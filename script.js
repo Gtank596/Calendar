@@ -157,6 +157,16 @@ const connectSyncBtn = document.getElementById("connectSyncBtn");
 const syncStatus = document.getElementById("syncStatus");
 const manualSyncRow = document.getElementById("manualSyncRow");
 
+// Supabase cloud sync UI
+const cloudEmailInput = document.getElementById("cloudEmailInput");
+const cloudPasswordInput = document.getElementById("cloudPasswordInput");
+const cloudSignupBtn = document.getElementById("cloudSignupBtn");
+const cloudLoginBtn = document.getElementById("cloudLoginBtn");
+const cloudLogoutBtn = document.getElementById("cloudLogoutBtn");
+const cloudPushBtn = document.getElementById("cloudPushBtn");
+const cloudPullBtn = document.getElementById("cloudPullBtn");
+const cloudSyncStatus = document.getElementById("cloudSyncStatus");
+
 const syncGate = document.getElementById("syncGate");
 const syncGateTitle = document.getElementById("syncGateTitle");
 const syncGateText = document.getElementById("syncGateText");
@@ -303,6 +313,8 @@ function shouldDimPastEvents(){
 
 function saveSettings(){
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  setLocalPayload({ updatedAt: Date.now(), events });
+  cloudWriteDebounced();
 }
 
 function getSortedBudgetCategories(){
@@ -636,6 +648,235 @@ function flashBudgetButtonError(btn){
   }, 900);
 }
 
+
+// ============================================================================
+// 04c. SUPABASE CLOUD SYNC
+// ============================================================================
+// Public anon keys are expected in frontend apps. Security comes from Supabase
+// Auth + Row Level Security policies, not from hiding this value.
+const SUPABASE_URL = "https://ddxiumutfrimgjzzbhus.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_Icp1pf88iW1t5TUnmVqb6Q_bXSRI9e_";
+const CLOUD_ROW_ID = "main";
+const CLOUD_TABLE = "calendar_cloud_state";
+
+let supabaseClient = null;
+let cloudUser = null;
+let cloudWriteTimer = null;
+
+function cloudConfigured(){
+  return (
+    typeof window.supabase !== "undefined" &&
+    SUPABASE_URL &&
+    SUPABASE_ANON_KEY &&
+    !SUPABASE_URL.includes("PASTE_") &&
+    !SUPABASE_ANON_KEY.includes("PASTE_")
+  );
+}
+
+function setCloudStatus(text){
+  if(cloudSyncStatus) cloudSyncStatus.textContent = text;
+}
+
+function updateCloudUI(){
+  if(!cloudConfigured()){
+    setCloudStatus("Cloud: Add Supabase URL + anon key");
+if(cloudSignupBtn) cloudSignupBtn.disabled = true;
+    if(cloudLoginBtn) cloudLoginBtn.disabled = true;
+    if(cloudLogoutBtn) cloudLogoutBtn.disabled = true;
+    if(cloudPushBtn) cloudPushBtn.disabled = true;
+    if(cloudPullBtn) cloudPullBtn.disabled = true;
+    return;
+  }
+
+if(cloudSignupBtn) cloudSignupBtn.disabled = !!cloudUser;
+  if(cloudLoginBtn) cloudLoginBtn.disabled = !!cloudUser;
+  if(cloudLogoutBtn) cloudLogoutBtn.disabled = !cloudUser;
+  if(cloudPushBtn) cloudPushBtn.disabled = !cloudUser;
+  if(cloudPullBtn) cloudPullBtn.disabled = !cloudUser;
+
+  setCloudStatus(
+    cloudUser
+      ? `Cloud: Signed in as ${cloudUser.email || "user"}`
+      : "Cloud: Not signed in"
+  );
+}
+
+async function initCloudSync(){
+  if(!cloudConfigured()){
+    updateCloudUI();
+    return;
+  }
+
+  supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  const { data } = await supabaseClient.auth.getSession();
+  cloudUser = data?.session?.user || null;
+
+  supabaseClient.auth.onAuthStateChange((_event, session) => {
+    cloudUser = session?.user || null;
+    updateCloudUI();
+
+    if(cloudUser){
+      pullCloudIfNewer().catch(console.error);
+    }
+  });
+
+  updateCloudUI();
+
+  if(cloudUser){
+    await pullCloudIfNewer();
+  }
+}
+
+async function signupCloud(){
+  if(!supabaseClient) return;
+
+  const email = cloudEmailInput?.value?.trim();
+  const password = cloudPasswordInput?.value || "";
+
+  if(!email || !password){
+    setCloudStatus("Cloud: Enter email and password");
+    return;
+  }
+
+  if(password.length < 6){
+    setCloudStatus("Cloud: Password needs at least 6 characters");
+    return;
+  }
+
+  setCloudStatus("Cloud: Creating account...");
+
+  const { data, error } = await supabaseClient.auth.signUp({
+    email,
+    password
+  });
+
+  if(error){
+    setCloudStatus("Cloud signup failed: " + error.message);
+    return;
+  }
+
+  cloudUser = data?.user || data?.session?.user || null;
+  updateCloudUI();
+
+  setCloudStatus(
+    cloudUser
+      ? `Cloud: Account created as ${cloudUser.email || "user"}`
+      : "Cloud: Account created. Now login."
+  );
+}
+
+async function loginCloud(){
+  if(!supabaseClient) return;
+
+  const email = cloudEmailInput?.value?.trim();
+  const password = cloudPasswordInput?.value || "";
+
+  if(!email || !password){
+    setCloudStatus("Cloud: Enter email and password");
+    return;
+  }
+
+  setCloudStatus("Cloud: Logging in...");
+
+  const { data, error } = await supabaseClient.auth.signInWithPassword({
+    email,
+    password
+  });
+
+  if(error){
+    setCloudStatus("Cloud login failed: " + error.message);
+    return;
+  }
+
+  cloudUser = data?.user || null;
+  updateCloudUI();
+
+  if(cloudUser){
+    await pullCloudIfNewer();
+  }
+}
+async function logoutCloud(){
+  if(!supabaseClient) return;
+  await supabaseClient.auth.signOut();
+  cloudUser = null;
+  updateCloudUI();
+}
+
+async function readCloudState(){
+  if(!supabaseClient || !cloudUser) return null;
+
+  const { data, error } = await supabaseClient
+    .from(CLOUD_TABLE)
+    .select("payload, updated_at")
+    .eq("id", CLOUD_ROW_ID)
+    .maybeSingle();
+
+  if(error){
+    setCloudStatus("Cloud read failed: " + error.message);
+    return null;
+  }
+
+  if(!data?.payload) return null;
+
+  return buildFullSavePayload(data.payload);
+}
+
+async function writeCloudStateNow(){
+  if(!supabaseClient || !cloudUser) return;
+
+  const payload = buildFullSavePayload({ updatedAt: Date.now(), events });
+
+  const { error } = await supabaseClient
+    .from(CLOUD_TABLE)
+    .upsert({
+      id: CLOUD_ROW_ID,
+      user_id: cloudUser.id,
+      payload,
+      updated_at: new Date(payload.updatedAt).toISOString()
+    }, { onConflict: "id" });
+
+  if(error){
+    setCloudStatus("Cloud save failed: " + error.message);
+    return;
+  }
+
+  setCloudStatus(`Cloud: Saved ${new Date(payload.updatedAt).toLocaleString()}`);
+}
+
+function cloudWriteDebounced(){
+  if(!cloudUser) return;
+
+  clearTimeout(cloudWriteTimer);
+  cloudWriteTimer = setTimeout(() => {
+    writeCloudStateNow().catch(console.error);
+  }, 900);
+}
+
+async function pullCloudIfNewer(){
+  const cloud = await readCloudState();
+  if(!cloud) return;
+
+  const local = getLocalPayload();
+
+  if(Number(cloud.updatedAt || 0) > Number(local.updatedAt || 0)){
+    applyFullSavePayload(cloud);
+    setCloudStatus(`Cloud: Pulled ${new Date(cloud.updatedAt).toLocaleString()}`);
+  }else{
+    setCloudStatus("Cloud: Local copy is current");
+  }
+}
+
+async function pushLocalToCloud(){
+  await writeCloudStateNow();
+}
+
+cloudSignupBtn?.addEventListener("click", () => signupCloud().catch(console.error));
+cloudLoginBtn?.addEventListener("click", () => loginCloud().catch(console.error));
+cloudLogoutBtn?.addEventListener("click", () => logoutCloud().catch(console.error));
+cloudPushBtn?.addEventListener("click", () => pushLocalToCloud().catch(console.error));
+cloudPullBtn?.addEventListener("click", () => pullCloudIfNewer().catch(console.error));
+
 // ============================================================================
 // 05. FILE SYNC (Google Drive JSON via File System Access API)
 // ============================================================================
@@ -646,28 +887,93 @@ let syncWriteTimer = null;
 function getLocalPayload(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw) return { updatedAt: 0, events: {} };
+    if(!raw) return { version: 1, updatedAt: 0, events: {} };
+
     const parsed = JSON.parse(raw);
 
     // Back-compat: old format was just the events map
     if(parsed && typeof parsed === "object" && !("events" in parsed)){
-      return { updatedAt: 0, events: parsed };
+      return { version: 1, updatedAt: 0, events: parsed };
     }
 
     return {
+      version: Number(parsed.version || 1),
       updatedAt: Number(parsed.updatedAt || 0),
-      events: parsed.events || {}
+      events: parsed.events || {},
+      settings: parsed.settings || null,
+      budgetPlans: parsed.budgetPlans || null,
+      budgetCategories: parsed.budgetCategories || null,
+      selectedBudgetPanes: parsed.selectedBudgetPanes || null,
+      activeSection: parsed.activeSection || null,
+      budgetViewMode: parsed.budgetViewMode || null
     };
   }catch{
-    return { updatedAt: 0, events: {} };
+    return { version: 1, updatedAt: 0, events: {} };
+  }
+}
+
+function buildFullSavePayload(base = {}){
+  return {
+    version: 2,
+    updatedAt: Number(base.updatedAt || Date.now()),
+    events: base.events || events || {},
+    settings: base.settings || settings || loadSettings(),
+    budgetPlans: base.budgetPlans || budgetPlans || loadBudgetPlans(),
+    budgetCategories: base.budgetCategories || budgetCategories || loadBudgetCategories(),
+    selectedBudgetPanes: base.selectedBudgetPanes || selectedBudgetPanes || loadBudgetPaneSelection(),
+    activeSection: base.activeSection || activeSection || "calendar",
+    budgetViewMode: base.budgetViewMode || budgetViewMode || "month"
+  };
+}
+
+function applyFullSavePayload(payload, opts = {}){
+  if(!payload) return;
+
+  const safe = buildFullSavePayload({
+    ...payload,
+    updatedAt: Number(payload.updatedAt || Date.now()),
+    events: normalizeEventsMap(payload.events || {})
+  });
+
+  events = normalizeEventsMap(safe.events || {});
+  settings = safe.settings || settings;
+  budgetPlans = safe.budgetPlans || budgetPlans;
+  budgetCategories = Array.isArray(safe.budgetCategories) && safe.budgetCategories.length
+    ? safe.budgetCategories
+    : budgetCategories;
+  selectedBudgetPanes = safe.selectedBudgetPanes || selectedBudgetPanes;
+  activeSection = safe.activeSection || activeSection;
+  budgetViewMode = safe.budgetViewMode || budgetViewMode;
+
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  localStorage.setItem(BUDGET_PLANS_KEY, JSON.stringify(budgetPlans));
+  localStorage.setItem(BUDGET_CATEGORIES_KEY, JSON.stringify(budgetCategories));
+  localStorage.setItem(BUDGET_PANES_KEY, JSON.stringify(selectedBudgetPanes));
+  localStorage.setItem("myCalendar_activeSection", activeSection);
+  if(typeof setLocalPayload === "function") setLocalPayload({ updatedAt: Date.now(), events });
+  if(typeof cloudWriteDebounced === "function") cloudWriteDebounced();
+  localStorage.setItem("myCalendar_budgetViewMode", budgetViewMode);
+  if(typeof setLocalPayload === "function") setLocalPayload({ updatedAt: Date.now(), events });
+  if(typeof cloudWriteDebounced === "function") cloudWriteDebounced();
+
+  syncStateFromLegacy();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
+
+  if(!opts.skipRender){
+    render();
+    renderEventList();
+    renderBudgetCategoryOptions();
+    renderEventCategoryOptions();
+    renderBudgetTransactionCategoryFilter();
+    renderBudgetPage();
+    setBudgetViewMode(budgetViewMode);
+    setActiveSection(activeSection);
+    updateHistoryUI();
   }
 }
 
 function setLocalPayload(payload){
-  const safe = {
-    updatedAt: Number(payload?.updatedAt || Date.now()),
-    events: payload?.events || {}
-  };
+  const safe = buildFullSavePayload(payload);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
 }
 
@@ -740,37 +1046,19 @@ function closeSyncGate(){
 
 syncGateClose?.addEventListener("click", closeSyncGate);
 
-function isHostedWebVersion(){
-  return location.protocol === "https:" && !location.hostname.includes("localhost");
-}
-
 function setSyncUI(){
-  if(isHostedWebVersion() && !syncConnected){
-    if(syncStatus){
-      syncStatus.textContent = "Save: Browser storage on this device";
-    }
-
-    if(manualSyncRow){
-      manualSyncRow.style.display = "flex";
-    }
-
-    if(connectSyncBtn){
-      connectSyncBtn.style.display = "none";
-    }
-
-    return;
-  }
-
   if(syncConnected){
     if(syncStatus) syncStatus.textContent = `Sync: Connected • ${syncHandle?.name || ""}`;
     if(manualSyncRow) manualSyncRow.style.display = "none";
-    if(connectSyncBtn) connectSyncBtn.style.display = "none";
+    if(connectSyncBtn) connectSyncBtn.style.display = "none"; // hide when connected
     return;
   }
 
+  // not connected
   if(manualSyncRow) manualSyncRow.style.display = "flex";
   if(connectSyncBtn) connectSyncBtn.style.display = "inline-flex";
 
+  // if we have a handle already, this is really "Enable", not "pick a file"
   if(connectSyncBtn){
     connectSyncBtn.textContent = syncHandle ? "Enable Sync" : "Connect Sync File";
   }
@@ -830,19 +1118,16 @@ async function readSyncFile(){
   try{
     const file = await syncHandle.getFile();
     const text = await file.text();
-    if(!text.trim()) return { updatedAt: 0, events: {} };
+    if(!text.trim()) return { version: 1, updatedAt: 0, events: {} };
 
     const parsed = JSON.parse(text);
 
     // Back-compat: file contains events map
     if(parsed && typeof parsed === "object" && !("events" in parsed)){
-      return { updatedAt: 0, events: parsed };
+      return { version: 1, updatedAt: 0, events: parsed };
     }
 
-    return {
-      updatedAt: Number(parsed.updatedAt || 0),
-      events: parsed.events || {}
-    };
+    return buildFullSavePayload(parsed);
   }catch{
     return null;
   }
@@ -879,10 +1164,7 @@ async function pollRemoteIfNewer(){
   const localUpdated = Number(local.updatedAt || 0);
 
   if(fileUpdated > localUpdated){
-    events = normalizeEventsMap(fileData.events || {});
-
-    syncStateFromLegacy();
-setLocalPayload({ updatedAt: fileUpdated, events: fileData.events || {} });
+    applyFullSavePayload(fileData, { skipRender: true });
 
     if(syncStatus){
       const d = new Date(fileUpdated);
@@ -937,13 +1219,7 @@ async function connectSync(){
   // Choose newest: file vs local
   const fileData = await readSyncFile();
   if (fileData) {
-    events = normalizeEventsMap(fileData.events || {});
-
-    syncStateFromLegacy();
-setLocalPayload({
-      updatedAt: fileData.updatedAt || Date.now(),
-      events: fileData.events || {}
-    });
+    applyFullSavePayload(fileData, { skipRender: true });
   } else {
     // only push if file is empty/unreadable
     await writeSyncFileNow();
@@ -983,13 +1259,7 @@ startRemotePolling();
     // ✅ On load: shared file is source of truth
 const fileData = await readSyncFile();
 if(fileData){
-  events = normalizeEventsMap(fileData.events || {});
-
-    syncStateFromLegacy();
-setLocalPayload({
-    updatedAt: fileData.updatedAt || Date.now(),
-    events: fileData.events || {}
-  });
+  applyFullSavePayload(fileData, { skipRender: true });
 
   if(syncStatus){
     const d = new Date(fileData.updatedAt || Date.now());
@@ -1021,10 +1291,7 @@ connectSyncBtn?.addEventListener("click", async () => {
       const local = getLocalPayload();
 
       if(fileData && (fileData.updatedAt || 0) > (local.updatedAt || 0)){
-        events = normalizeEventsMap(fileData.events || {});
-
-    syncStateFromLegacy();
-setLocalPayload({ updatedAt: fileData.updatedAt || Date.now(), events: fileData.events || {} });
+        applyFullSavePayload(fileData, { skipRender: true });
         if(syncStatus){
           const d = new Date(fileData.updatedAt || Date.now());
           syncStatus.textContent = `Sync: Connected • Loaded ${d.toLocaleString()}`;
@@ -1666,6 +1933,8 @@ function saveBudgetPaneSelection(){
     BUDGET_PANES_KEY,
     JSON.stringify(selectedBudgetPanes)
   );
+  setLocalPayload({ updatedAt: Date.now(), events });
+  cloudWriteDebounced();
 }
 
 function getBudgetInsightTiles({ range, items, expenseItems, expenseTotal, plan }){
@@ -2085,6 +2354,8 @@ function loadBudgetPlans(){
 
 function saveBudgetPlans(){
   localStorage.setItem(BUDGET_PLANS_KEY, JSON.stringify(budgetPlans));
+  setLocalPayload({ updatedAt: Date.now(), events });
+  cloudWriteDebounced();
 }
 
 function getBudgetPlanKey(range){
@@ -2320,6 +2591,8 @@ renderBudgetTransactionCategoryFilter();
 
 function saveBudgetCategories(){
   localStorage.setItem(BUDGET_CATEGORIES_KEY, JSON.stringify(budgetCategories));
+  setLocalPayload({ updatedAt: Date.now(), events });
+  cloudWriteDebounced();
 }
 
 function getBudgetCategory(id){
@@ -5405,6 +5678,7 @@ function saveEvents(previousEventsSnapshot = null){
 
   setLocalPayload({ updatedAt: Date.now(), events });
   syncWriteDebounced();
+  cloudWriteDebounced();
   updateHistoryUI();
 }
 
@@ -6951,10 +7225,7 @@ syncGatePrimary?.addEventListener("click", async () => {
     const local = getLocalPayload();
 
     if(fileData && (fileData.updatedAt || 0) > (local.updatedAt || 0)){
-      events = normalizeEventsMap(fileData.events || {});
-
-    syncStateFromLegacy();
-setLocalPayload({ updatedAt: fileData.updatedAt || Date.now(), events: fileData.events || {} });
+      applyFullSavePayload(fileData, { skipRender: true });
       if(syncStatus){
         const d = new Date(fileData.updatedAt || Date.now());
         syncStatus.textContent = `Sync: Connected • Loaded ${d.toLocaleString()}`;
@@ -7977,6 +8248,7 @@ if(deleteBtn) deleteBtn.disabled = true;
 try{
 setEditorCollapsed(isEditorCollapsed());
 setSyncUI();
+initCloudSync();
 tryAutoReconnect();
   render();
   renderEventList();

@@ -306,6 +306,41 @@
             <div id="syncStatus" class="syncStatus">Sync: Not connected</div>
           </div>
 
+          <div class="cloudSyncBox">
+            <div class="cloudSyncTop">
+              <div>
+                <div class="cloudSyncTitle">Cloud sync</div>
+                <div id="cloudSyncStatus" class="cloudSyncStatus">Cloud: Not connected</div>
+              </div>
+            </div>
+
+            <input
+  id="cloudEmailInput"
+  class="input cloudEmailInput"
+  type="email"
+  placeholder="Email"
+/>
+
+<input
+  id="cloudPasswordInput"
+  class="input cloudEmailInput"
+  type="password"
+  placeholder="Password"
+/>
+
+            <div class="cloudSyncActions">
+              <button id="cloudSignupBtn" class="tiny" type="button">Sign Up</button>
+<button id="cloudLoginBtn" class="tiny" type="button">Login</button>
+<button id="cloudLogoutBtn" class="tiny" type="button">Logout</button>
+<button id="cloudPullBtn" class="tiny" type="button">Pull</button>
+<button id="cloudPushBtn" class="tiny" type="button">Push</button>
+            </div>
+
+            <div class="cloudSyncHint">
+              Local saves still work. Cloud sync only activates after Supabase is configured and you sign in.
+            </div>
+          </div>
+
           <div class="row" id="manualSyncRow">
             <button id="exportBtn">Export JSON</button>
             <button id="importBtn">Import JSON</button>
@@ -741,6 +776,7 @@
     </div>
   </div>
 </div>
+ <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
  <script src="script.js"></script>
 </body>
 </html>

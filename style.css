@@ -4382,3 +4382,76 @@ body.timeDraggingBody{
   display:none;
 }
 
+
+
+/* =========================================================
+   SUPABASE CLOUD SYNC
+   ========================================================= */
+.cloudSyncBox{
+  margin-top:10px;
+  padding:12px;
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:16px;
+  background:
+    radial-gradient(340px 160px at 20% 0%, rgba(120,90,255,.14), transparent 62%),
+    rgba(255,255,255,.025);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+}
+
+.cloudSyncTop{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:10px;
+}
+
+.cloudSyncTitle{
+  color:rgba(233,236,255,.78);
+  font-size:12px;
+  font-weight:850;
+  text-transform:uppercase;
+  letter-spacing:.10em;
+}
+
+.cloudSyncStatus{
+  margin-top:3px;
+  color:rgba(233,236,255,.58);
+  font-size:12px;
+  font-weight:650;
+  line-height:1.35;
+}
+
+.cloudEmailInput{
+  height:38px;
+  margin-bottom:10px;
+}
+
+.cloudSyncActions{
+  display:grid;
+  grid-template-columns:repeat(4, 1fr);
+  gap:8px;
+}
+
+.cloudSyncActions .tiny{
+  height:34px;
+  min-width:0;
+}
+
+.cloudSyncActions .tiny:disabled{
+  opacity:.38;
+  cursor:not-allowed;
+}
+
+.cloudSyncHint{
+  margin-top:9px;
+  color:rgba(233,236,255,.46);
+  font-size:11px;
+  line-height:1.35;
+}
+
+@media (max-width: 520px){
+  .cloudSyncActions{
+    grid-template-columns:1fr 1fr;
+  }
+}
