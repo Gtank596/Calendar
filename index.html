@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>My Digital Calendar</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="title">
+      <h1>My Calendar</h1>
+      <div class="subtitle" id="monthLabel"></div>
+    </div>
+
+    <div class="controlsRight">
+
+<div class="sectionSwitcher" id="sectionSwitcher">
+    <div class="sectionSliderThumb" id="sectionSliderThumb"></div>
+    <button id="calendarSectionBtn" class="sectionBtn active" type="button">Calendar</button>
+    <button id="budgetSectionBtn" class="sectionBtn" type="button">Budget</button>
+    <button id="weatherSectionBtn" class="sectionBtn" type="button">Weather</button>
+  </div>
+
+      <button id="searchBtn" class="navBtn navBtnIcon" title="Search ( / )">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+    <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/>
+    <line x1="20" y1="20" x2="16.5" y2="16.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  </svg>
+</button>
+      <button id="settingsBtn" class="navBtn navBtnIcon" title="Settings">⚙</button>
+    </div>
+  </header>
+
+  <div class="subbar" id="calendarSubbar">
+    <div class="controlsCenter">
+      <button id="prevBtn" class="navBtn navBtnIcon" title="Previous month">◀</button>
+      <button id="todayBtn" class="navBtn navBtnToday" title="Jump to today">Today</button>
+      <button id="nextBtn" class="navBtn navBtnIcon" title="Next month">▶</button>
+
+      <div class="dividerVert"></div>
+
+      <button id="undoBtn" class="navBtn navBtnUndo" type="button" title="Undo (Ctrl/Cmd+Z)">↶</button>
+      <button id="redoBtn" class="navBtn navBtnUndo" type="button" title="Redo (Ctrl/Cmd+Y / Ctrl+Shift+Z)">↷</button>
+
+      <div class="dividerVert"></div>
+
+      <div class="viewSwitcher" id="viewSwitcher">
+        <div class="viewSliderThumb" id="viewSliderThumb"></div>
+        <button id="monthViewBtn" class="navBtn navBtnView active" type="button">Month</button>
+        <button id="weekViewBtn" class="navBtn navBtnView" type="button">Week</button>
+        <button id="dayViewBtn" class="navBtn navBtnView" type="button">Day</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="settingsMenu" class="settingsMenu hidden">
+    <label class="settingRow">
+      <input type="checkbox" id="toggleSuggestions" checked>
+      Smart Suggestions
+    </label>
+
+<label class="settingRow">
+  <input type="checkbox" id="dimPastEvents">
+  Dim Past Events
+</label>
+
+<label class="settingRow">
+  <input type="checkbox" id="budgetChartPercentages">
+  Show chart percentages
+</label>
+
+<label class="settingRow">
+  <input type="checkbox" id="budgetChartBudgetDetails" checked>
+  Show category budget details
+</label>
+
+<div class="settingsDivider"></div>
+
+<label class="settingBlock" for="budgetCategorySortSelect">
+  <div class="settingBlockTop">
+    <span>Budget category order</span>
+  </div>
+
+  <select id="budgetCategorySortSelect" class="input">
+    <option value="custom">Custom</option>
+    <option value="az">A → Z</option>
+    <option value="za">Z → A</option>
+    <option value="newest">Recently added</option>
+  </select>
+
+  <div class="settingHint">Controls the order in category dropdowns and Manage Categories.</div>
+</label>
+
+<div class="settingsDivider"></div>
+
+<label class="settingRow">
+  <input type="checkbox" id="weatherEnabled" checked>
+  Show weather in day view
+</label>
+
+<label class="settingBlock" for="weatherLocationSelect">
+  <div class="settingBlockTop">
+    <span>Weather location</span>
+  </div>
+
+  <select id="weatherLocationSelect" class="input">
+    <option value="coloradoSprings">Colorado Springs, CO</option>
+    <option value="denver">Denver, CO</option>
+    <option value="pueblo">Pueblo, CO</option>
+    <option value="fortCollins">Fort Collins, CO</option>
+  </select>
+
+  <div class="settingHint">Used for day-view weather.</div>
+</label>
+
+    <div class="settingsDivider"></div>
+
+    <label class="settingBlock" for="dragStepSlider">
+      <div class="settingBlockTop">
+        <span>Drag / resize increment</span>
+        <span id="dragStepValue">15 min</span>
+      </div>
+      <input
+        id="dragStepSlider"
+        class="settingSlider"
+        type="range"
+        min="1"
+        max="30"
+        step="1"
+        value="15"
+      />
+      <div class="settingHint">Controls both move and resize snapping in day view.</div>
+    </label>
+  </div>
+
+  <main id="calendarPage" class="layout">
+    <section class="calendar">
+      <div class="dow">
+        <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
+      </div>
+      <div class="grid" id="grid"></div>
+    </section>
+
+    <aside class="panel">
+      <button
+        id="collapseEditorBtn"
+        class="collapseBtn"
+        type="button"
+        aria-label="Collapse panel"
+        aria-expanded="true"
+        title="Collapse/expand panel"
+      >❮</button>
+
+      <div id="panelBody" class="panelBody">
+        <div class="panelHeader">
+          <h2 id="panelTitle">Select a day</h2>
+          <div class="panelSub" id="panelSub"></div>
+        </div>
+
+        <div class="eventsHeader">
+          <div class="eventsTitle">Events</div>
+          <button id="newEventBtn" class="tiny">+ New</button>
+        </div>
+
+        <div id="eventsList" class="eventsList"></div>
+
+        <div class="divider"></div>
+
+        <div id="editorSection" class="editorSection">
+          <div class="editLabel" id="editLabel">New event</div>
+
+          <label class="label">Quick add</label>
+          <div class="quickAddRow">
+            <input id="quickAddInput" class="input quickAddInput" placeholder='e.g., "Dinner with Sam tomorrow at 7pm"' />
+            <button id="quickAddBtn" class="tiny" type="button">Add</button>
+          </div>
+
+          <label class="label">Event title</label>
+          <input id="eventTitle" class="input" placeholder="e.g., Study: Network+ (Ports)" />
+
+          <label class="label">Details (optional)</label>
+          <textarea id="eventDetails" class="textarea" placeholder="Add notes…"></textarea>
+
+          <label class="label">Time (optional)</label>
+
+          <div class="timeGrid">
+            <div class="timeCol">
+              <div class="timeMiniLabel">Start</div>
+              <input id="startTimeInput" class="input" placeholder="e.g., 9 or 9:30" />
+              <div class="ampmRow" id="startAmPm">
+                <button type="button" class="ampmBtn active" data-value="am">AM</button>
+                <button type="button" class="ampmBtn" data-value="pm">PM</button>
+              </div>
+            </div>
+
+            <div class="timeCol">
+              <div class="timeMiniLabel">End (optional)</div>
+              <input id="endTimeInput" class="input" placeholder="e.g., 10 or 10:30" />
+              <div class="ampmRow" id="endAmPm">
+                <button type="button" class="ampmBtn active" data-value="am">AM</button>
+                <button type="button" class="ampmBtn" data-value="pm">PM</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="calendarBudgetGrid">
+  <div>
+    <label class="label">Color</label>
+    <div class="colorRow">
+      <input id="eventColor" type="color" class="colorInput" value="#7a5aff" />
+      <div class="colorHint" id="colorHint">Pick a color.</div>
+    </div>
+  </div>
+
+  <div>
+    <label class="label">Price <span class="optionalInline">(optional)</span></label>
+    <div class="priceInputWrap eventPriceWrap">
+      <span class="pricePrefix">$</span>
+      <input id="eventPrice" class="input priceInput eventPriceInput" type="number" min="0" max="1000" step="0.01" placeholder="25.50" />
+    </div>
+  </div>
+
+  <div>
+    <label class="label">Budget category</label>
+
+    <div class="dd budgetCatDD eventCatDD" id="eventCatDD" tabindex="0">
+      <div class="ddButton" id="eventCatDDButton">
+        <span id="eventCatDDLabel">Other</span>
+        <span class="ddArrow">▾</span>
+      </div>
+
+      <div class="ddMenu" id="eventCatDDMenu"></div>
+    </div>
+
+    <input id="eventCategory" type="hidden" value="other" />
+  </div>
+</div>
+
+          <div class="timeGrid">
+            <div class="timeCol">
+              <div class="timeMiniLabel">Repeat</div>
+
+              <div class="dd" id="repeatDD" tabindex="0" role="combobox" aria-expanded="false" aria-haspopup="listbox">
+                <div class="ddButton" id="repeatDDButton">
+                  <span id="repeatDDLabel">Does not repeat</span>
+                  <span class="ddArrow">▾</span>
+                </div>
+
+                <div class="ddMenu" id="repeatDDMenu" role="listbox">
+                  <button class="ddItem" type="button" data-value="none" role="option">Does not repeat</button>
+                  <button class="ddItem" type="button" data-value="daily" role="option">Daily</button>
+                  <button class="ddItem" type="button" data-value="weekly" role="option">Weekly</button>
+                  <button class="ddItem" type="button" data-value="weeklyDays" role="option">Weekly (pick days)</button>
+                  <button class="ddItem" type="button" data-value="span" role="option">Trip (shade grid)</button>
+                  <button class="ddItem" type="button" data-value="monthly" role="option">Monthly</button>
+                  <button class="ddItem" type="button" data-value="yearly" role="option">Yearly</button>
+                </div>
+              </div>
+
+              <input id="eventRepeat" type="hidden" value="none" />
+
+              <div id="weeklyIntervalRow" class="intervalRow" style="display:none;">
+                <span class="intervalText">Every</span>
+                <input id="repeatInterval" class="intervalInput" type="number" min="1" step="1" value="1" />
+                <span class="intervalText">weeks</span>
+              </div>
+
+              <div id="weeklyDaysRow" class="weekdayRow" style="display:none;">
+                <button type="button" class="weekdayBtn" data-day="0">S</button>
+                <button type="button" class="weekdayBtn" data-day="1">M</button>
+                <button type="button" class="weekdayBtn" data-day="2">T</button>
+                <button type="button" class="weekdayBtn" data-day="3">W</button>
+                <button type="button" class="weekdayBtn" data-day="4">T</button>
+                <button type="button" class="weekdayBtn" data-day="5">F</button>
+                <button type="button" class="weekdayBtn" data-day="6">S</button>
+              </div>
+            </div>
+
+            <div id="tripUntilRow" class="intervalRow" style="display:none;">
+              <span class="intervalText">Until</span>
+              <input id="spanUntil" class="input" type="date" />
+            </div>
+
+            <div class="timeCol" id="repeatUntilCol" style="display:none;">
+              <div class="timeMiniLabel">Repeat until (optional)</div>
+              <input id="repeatUntil" class="input" type="date" />
+            </div>
+          </div>
+
+          <div class="row rowDelete">
+            <button id="addBtn" class="primary">Add / Update</button>
+
+            <div class="deleteGroup">
+              <button id="deleteBtn" class="danger">Delete</button>
+
+              <label class="seriesToggle" title="When checked, Delete removes every repeated event connected">
+                <input id="deleteWholeSeries" type="checkbox" />
+                <span class="toggleText">Series</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="row syncRow">
+            <button id="connectSyncBtn">Connect Sync File</button>
+            <div id="syncStatus" class="syncStatus">Sync: Not connected</div>
+          </div>
+
+          <div class="row" id="manualSyncRow">
+            <button id="exportBtn">Export JSON</button>
+            <button id="importBtn">Import JSON</button>
+          </div>
+
+          <input id="importFile" type="file" accept="application/json" style="display:none;" />
+
+          
+        </div>
+      </div>
+    </aside>
+  </main>
+
+<main id="budgetPage" class="pageShell hidden">
+  <section class="budgetShell">
+
+    <div class="budgetTop">
+      <div class="budgetControls">
+        <button id="budgetPrevBtn" class="navBtn navBtnIcon" type="button" title="Previous budget period">◀</button>
+        <button id="budgetTodayBtn" class="navBtn navBtnToday" type="button" title="Jump to current budget period">Today</button>
+        <button id="budgetNextBtn" class="navBtn navBtnIcon" type="button" title="Next budget period">▶</button>
+
+        <div class="dividerVert"></div>
+
+        <div class="budgetViewSwitcher" id="budgetViewSwitcher">
+          <div class="budgetSliderThumb" id="budgetSliderThumb"></div>
+          <button id="budgetWeekBtn" class="budgetViewBtn active" type="button">Week</button>
+          <button id="budgetMonthBtn" class="budgetViewBtn" type="button">Month</button>
+          <button id="budgetYearBtn" class="budgetViewBtn" type="button">Year</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="budgetStats">
+  <div class="budgetStatCard budgetInsightsCard" data-budget-pane="snapshot">
+    <div class="budgetInsightsHeader">
+      <div class="budgetStatLabel">Financial snapshot</div>
+      <button id="budgetSnapshotMenuBtn" class="budgetInsightsMenuBtn" type="button" title="Customize snapshot">...</button>
+    </div>
+
+    <div id="budgetSnapshotGrid" class="budgetInsightsGrid"></div>
+  </div>
+
+  <div class="budgetStatCard budgetInsightsCard" data-budget-pane="insights">
+    <div class="budgetInsightsHeader">
+      <div class="budgetStatLabel">Budget insights</div>
+      <button id="budgetInsightsMenuBtn" class="budgetInsightsMenuBtn" type="button" title="Customize insights">...</button>
+    </div>
+
+    <div id="budgetInsightsGrid" class="budgetInsightsGrid"></div>
+  </div>
+
+  <div class="budgetStatCard budgetPlanCard">
+    <div class="budgetStatLabel">Budget plan</div>
+
+    <div class="budgetPlanInputWrap">
+      <span class="budgetPlanPrefix">$</span>
+      <input id="budgetPlanInput" class="input budgetPlanInput" type="number" min="0" step="0.01" placeholder="0.00" />
+      <button id="budgetPlanSaveBtn" class="tiny" type="button">Save</button>
+    </div>
+
+    <div class="budgetPlanSub" id="budgetPlanSub">Remaining: $0.00</div>
+
+    <div class="budgetPlanActions">
+      <button id="budgetPlanCopyBtn" class="tiny budgetPlanCopyBtn" type="button" title="Copies the previous week/month budget into this one">
+        Copy Last
+      </button>
+
+      <button id="budgetPlanUseForwardBtn" class="tiny budgetPlanUseForwardBtn" type="button" title="Uses this budget for every future week/month until the end of the year">
+        Use Forward
+      </button>
+
+      <button id="budgetPlanManageCategoryBtn" class="tiny budgetPlanManageCategoryBtn" type="button">
+        Manage Categories
+      </button>
+    </div>
+  </div>
+</div>
+
+    <div class="budgetContentGrid">
+      <section class="budgetPanel">
+        <div class="budgetPanelHeader">
+          <h3 id="budgetRangeTitle">Weekly budget</h3>
+          <span id="budgetRangeSub"></span>
+        </div>
+        <div id="budgetBars" class="budgetBars"></div>
+
+<div class="budgetCashflowCard" id="budgetCashflowCard">
+<div class="budgetCashflowHeader">
+  <div class="budgetCashflowTitle">Cashflow</div>
+
+  <div class="budgetCashflowToggle" id="budgetCashflowToggle">
+  <div class="budgetCashflowToggleThumb" id="budgetCashflowToggleThumb"></div>
+  <button id="budgetCashflowTotalsBtn" class="active" type="button">Totals</button>
+  <button id="budgetCashflowTrendBtn" type="button">Trend</button>
+</div>
+</div>
+  <div id="budgetCashflowTotalsView" class="budgetCashflowView">
+  <div class="budgetCashflowRow">
+    <div class="budgetCashflowTop">
+      <span>Income</span>
+      <span id="budgetIncomeTotal">$0.00</span>
+    </div>
+    <div class="budgetCashflowTrack">
+      <div id="budgetIncomeBar" class="budgetCashflowFill income"></div>
+    </div>
+  </div>
+
+  <div class="budgetCashflowRow">
+    <div class="budgetCashflowTop">
+      <span>Expenses</span>
+      <span id="budgetExpenseTotal">$0.00</span>
+    </div>
+    <div class="budgetCashflowTrack">
+      <div id="budgetExpenseBar" class="budgetCashflowFill expense"></div>
+    </div>
+  </div>
+
+  <div class="budgetNetRow">
+    <span>Net</span>
+    <span id="budgetNetTotal">+$0.00</span>
+  </div>
+</div>
+
+<div id="budgetCashflowTrendView" class="budgetCashflowView hidden">
+  <div id="budgetCashflowTrend" class="budgetCashflowTrend"></div>
+</div>
+</div>
+<div class="divider"></div>
+<section class="budgetPanel budgetCategoryChartPanel">
+  <div class="budgetPanelHeader">
+    <h3>Category breakdown</h3>
+    <span>Spending by category</span>
+  </div>
+
+  <div id="budgetCategoryChart" class="budgetCategoryChart"></div>
+</section>
+
+      </section>
+
+      <section class="budgetPanel budgetTransactionsPanel">
+  <div class="budgetPanelHeader">
+    <h3>Transactions</h3>
+
+    <div class="budgetTransactionHeaderRight">
+      <span id="budgetTransactionCount">0 items</span>
+
+<button id="budgetTxFilterToggleBtn" class="navBtn navBtnIcon budgetTxFilterToggleBtn" type="button" title="Search / filter transactions">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+    <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/>
+    <line x1="20" y1="20" x2="16.5" y2="16.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  </svg>
+</button>
+
+<button id="budgetTxDrawerOpenBtn" class="tiny" type="button">+ New</button>
+    </div>
+  </div>
+
+  <div class="budgetTransactionStage">
+<div class="budgetTransactionFilters">
+
+  <input
+    id="budgetTxSearch"
+    class="input budgetTxSearch"
+    type="text"
+    placeholder="Search transactions..."
+  >
+
+  <div class="budgetTxFilterRow">
+
+    <div
+      id="budgetFilterCategoryDD"
+      class="dd budgetFilterDD"
+      tabindex="0"
+    >
+      <button
+        type="button"
+        class="ddButton"
+        id="budgetFilterCategoryBtn"
+      >
+        <span id="budgetFilterCategoryLabel">All Categories</span>
+        <span class="ddArrow">▾</span>
+      </button>
+
+      <div class="ddMenu" id="budgetFilterCategoryMenu"></div>
+    </div>
+
+    <div
+      id="budgetFilterTypeDD"
+      class="dd budgetFilterDD"
+      tabindex="0"
+    >
+      <button
+        type="button"
+        class="ddButton"
+      >
+        <span id="budgetFilterTypeLabel">All Types</span>
+        <span class="ddArrow">▾</span>
+      </button>
+
+      <div class="ddMenu">
+        <button class="ddItem" data-type="all">All Types</button>
+        <button class="ddItem" data-type="expense">Expenses</button>
+        <button class="ddItem" data-type="income">Income</button>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+    <div id="budgetTransactionList" class="budgetTransactionList"></div>
+
+    <aside id="budgetTxDrawer" class="budgetTxDrawer">
+      <div class="budgetTxDrawerHeader">
+        <div>
+          <div class="budgetDrawerKicker">New transaction</div>
+          <h3>Add spending</h3>
+        </div>
+
+        <button id="budgetTxDrawerCloseBtn" class="navBtn navBtnIcon" type="button">×</button>
+      </div>
+
+      <label class="label">Transaction name</label>
+      <input id="budgetTxTitle" class="input" placeholder="e.g., Groceries" />
+
+      <div class="budgetAmountTypeRow">
+  <div>
+    <label class="label">Amount</label>
+    <input id="budgetTxAmount" class="input" type="number" min="0" step="0.01" placeholder="25.50" />
+  </div>
+
+  <div>
+    <label class="label">Type</label>
+    <div class="budgetTypeSwitcher" id="budgetTypeSwitcher">
+      <div class="budgetTypeSliderThumb" id="budgetTypeSliderThumb"></div>
+      <button id="budgetExpenseBtn" class="budgetTypeBtn active" type="button">Expense</button>
+      <button id="budgetIncomeBtn" class="budgetTypeBtn" type="button">Income</button>
+    </div>
+  </div>
+</div>
+
+<input id="budgetTxType" type="hidden" value="expense" />
+
+      <div class="budgetDateRepeatGrid">
+  <div>
+    <label class="label">Date</label>
+    <input id="budgetTxDate" class="input" type="date" />
+  </div>
+
+  <div>
+    <label class="label">Repeat</label>
+
+    <div class="dd budgetRepeatDD" id="budgetRepeatDD" tabindex="0">
+      <div class="ddButton" id="budgetRepeatDDButton">
+        <span id="budgetRepeatDDLabel">Does not repeat</span>
+        <span class="ddArrow">▾</span>
+      </div>
+
+      <div class="ddMenu" id="budgetRepeatDDMenu">
+        <button class="ddItem" type="button" data-value="none">Does not repeat</button>
+        <button class="ddItem" type="button" data-value="daily">Daily</button>
+        <button class="ddItem" type="button" data-value="weekly">Weekly</button>
+        <button class="ddItem" type="button" data-value="weeklyDays">Weekly (pick days)</button>
+        <button class="ddItem" type="button" data-value="monthly">Monthly</button>
+        <button class="ddItem" type="button" data-value="yearly">Yearly</button>
+      </div>
+    </div>
+
+    <input id="budgetRepeat" type="hidden" value="none" />
+  </div>
+</div>
+
+<label class="label">Category</label>
+      <div class="dd budgetCatDD" id="budgetCatDD" tabindex="0">
+  <div class="ddButton" id="budgetCatDDButton">
+    <span id="budgetCatDDLabel">Other</span>
+    <span class="ddArrow">▾</span>
+  </div>
+
+  <div class="ddMenu" id="budgetCatDDMenu"></div>
+</div>
+
+<input id="budgetTxCategory" type="hidden" value="other" />
+
+<button id="budgetManageCategoryBtn" class="tiny budgetManageCategoryBtn" type="button">
+  Manage Categories
+</button>
+
+<div id="budgetCategoryManager" class="budgetCategoryManager hidden">
+  <button id="budgetAddCategoryBtn" class="tiny budgetAddCategoryManagerBtn" type="button">
+    + Category
+  </button>
+
+  <div id="budgetCategoryManagerList"></div>
+</div>
+
+<div id="budgetWeeklyIntervalRow" class="intervalRow hidden">
+  <span class="intervalText">Every</span>
+  <input id="budgetRepeatInterval" class="intervalInput" type="number" min="1" step="1" value="1" />
+  <span class="intervalText">weeks</span>
+</div>
+
+<div id="budgetWeeklyDaysRow" class="weekdayRow hidden">
+  <button type="button" class="weekdayBtn" data-day="0">S</button>
+  <button type="button" class="weekdayBtn" data-day="1">M</button>
+  <button type="button" class="weekdayBtn" data-day="2">T</button>
+  <button type="button" class="weekdayBtn" data-day="3">W</button>
+  <button type="button" class="weekdayBtn" data-day="4">T</button>
+  <button type="button" class="weekdayBtn" data-day="5">F</button>
+  <button type="button" class="weekdayBtn" data-day="6">S</button>
+</div>
+
+<div id="budgetRepeatUntilCol" class="intervalRow hidden">
+  <span class="intervalText">Until</span>
+  <input id="budgetRepeatUntil" class="input" type="date" />
+</div>
+
+      <div class="budgetDrawerActions">
+       
+        <button id="budgetTxAddBtn" class="primary" type="button">Add Transaction</button>
+      </div>
+    </aside>
+  </div>
+</section>
+
+      </section>
+    </div>
+
+  </section>
+</main>
+
+<main id="weatherPage" class="pageShell hidden">
+  <section class="pageCard">
+    <div class="pageHero">
+      <div>
+        <div class="pageKicker">Weather</div>
+        <h2>Weather dashboard</h2>
+        <p>Your forecast tools will live here, separate from the calendar but still orbiting it.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+ 
+
+  <div id="syncGate" class="syncGate hidden">
+    <div class="syncGateCard">
+      <div class="syncGateTitle" id="syncGateTitle">Sync needs permission</div>
+      <div class="syncGateText" id="syncGateText">
+        Click Enable Sync so this calendar can read/write your shared JSON file.
+      </div>
+
+      <div class="syncGateActions">
+        <button id="syncGatePrimary" class="primary">Enable Sync</button>
+        <button id="syncGateClose" class="btnGhost" type="button">Not now</button>
+      </div>
+
+      <div class="syncGateHint" id="syncGateHint">
+        You won’t have to browse for the file again — this just re-enables permission.
+      </div>
+    </div>
+  </div>
+<div id="budgetCategoryHubModal" class="budgetCategoryHubModal hidden">
+  <div class="budgetCategoryHubCard">
+    <div class="budgetCategoryHubHeader">
+      <div>
+        <div class="budgetDrawerKicker">Budget categories</div>
+        <h3>Manage category budgets</h3>
+      </div>
+
+      <button id="budgetCategoryHubCloseBtn" class="navBtn navBtnIcon" type="button">×</button>
+    </div>
+
+    <button id="budgetCategoryHubAddBtn" class="tiny budgetAddCategoryManagerBtn" type="button">
+      + Category
+    </button>
+
+    <div id="budgetCategoryHubList" class="budgetCategoryHubList"></div>
+  </div>
+</div>
+<div id="budgetCategoryModal" class="budgetCategoryModal hidden">
+  <div class="budgetCategoryModalCard">
+    <div class="budgetDrawerKicker" id="budgetCategoryModalKicker">Category</div>
+    <h3 id="budgetCategoryModalTitle">Edit category</h3>
+
+    <p id="budgetCategoryModalText" class="budgetCategoryModalText"></p>
+
+    <input id="budgetCategoryModalInput" class="input" />
+
+<div class="budgetCategoryColorRow">
+  <label class="label">Category color</label>
+
+  <div class="colorRow">
+    <input
+      id="budgetCategoryModalColor"
+      type="color"
+      class="colorInput"
+      value="#7a5aff"
+    />
+
+    <div
+      id="budgetCategoryModalColorHint"
+      class="colorHint"
+    >
+      Pick a category color.
+    </div>
+  </div>
+<div class="budgetCategoryBudgetModalRow">
+  <label class="label">Category budgets</label>
+
+  <div class="budgetCategoryBudgetGrid">
+    <div class="budgetCategoryModalBudgetWrap">
+      <span>Week $</span>
+      <input id="budgetCategoryModalBudgetWeek" class="input" type="number" min="0" step="0.01" placeholder="0.00" />
+    </div>
+
+    <div class="budgetCategoryModalBudgetWrap">
+      <span>Month $</span>
+      <input id="budgetCategoryModalBudgetMonth" class="input" type="number" min="0" step="0.01" placeholder="0.00" />
+    </div>
+
+    <div class="budgetCategoryModalBudgetWrap budgetCategoryBudgetWide">
+      <span>Year $</span>
+      <input id="budgetCategoryModalBudgetYear" class="input" type="number" min="0" step="0.01" placeholder="0.00" />
+    </div>
+  </div>
+</div>
+</div>
+
+    <div class="budgetCategoryModalActions">
+      <button id="budgetCategoryModalCancel" class="tiny" type="button">Cancel</button>
+      <button id="budgetCategoryModalConfirm" class="primary" type="button">Save</button>
+    </div>
+  </div>
+</div>
+ <script src="script.js"></script>
+</body>
+</html>
