@@ -29,6 +29,10 @@
   </svg>
 </button>
       <button id="settingsBtn" class="navBtn navBtnIcon" title="Settings">⚙</button>
+      <button id="accountBtn" class="navBtn accountBtn" type="button" title="Account / Cloud Sync">
+        <span id="accountBtnDot" class="accountBtnDot" aria-hidden="true"></span>
+        <span id="accountBtnLabel" class="accountBtnLabel">Sign In</span>
+      </button>
     </div>
   </header>
 
@@ -306,42 +310,7 @@
             <div id="syncStatus" class="syncStatus">Sync: Not connected</div>
           </div>
 
-          <div class="cloudSyncBox">
-            <div class="cloudSyncTop">
-              <div>
-                <div class="cloudSyncTitle">Cloud sync</div>
-                <div id="cloudSyncStatus" class="cloudSyncStatus">Cloud: Not connected</div>
-              </div>
-            </div>
-
-            <input
-  id="cloudEmailInput"
-  class="input cloudEmailInput"
-  type="email"
-  placeholder="Email"
-/>
-
-<input
-  id="cloudPasswordInput"
-  class="input cloudEmailInput"
-  type="password"
-  placeholder="Password"
-/>
-
-            <div class="cloudSyncActions">
-              <button id="cloudSignupBtn" class="tiny" type="button">Sign Up</button>
-<button id="cloudLoginBtn" class="tiny" type="button">Login</button>
-<button id="cloudLogoutBtn" class="tiny" type="button">Logout</button>
-<button id="cloudPullBtn" class="tiny" type="button">Pull</button>
-<button id="cloudPushBtn" class="tiny" type="button">Push</button>
-            </div>
-
-            <div class="cloudSyncHint">
-              Local saves still work. Cloud sync only activates after Supabase is configured and you sign in.
-            </div>
-          </div>
-
-          <div class="row" id="manualSyncRow">
+<div class="row" id="manualSyncRow">
             <button id="exportBtn">Export JSON</button>
             <button id="importBtn">Import JSON</button>
           </div>
@@ -686,6 +655,76 @@
 
  
 
+
+<div id="accountModal" class="accountModal hidden">
+  <div class="accountModalCard">
+    <div class="accountModalHeader">
+      <div>
+        <div class="budgetDrawerKicker">Profile</div>
+        <h3>Account & cloud sync</h3>
+      </div>
+      <button id="accountModalCloseBtn" class="navBtn navBtnIcon" type="button" aria-label="Close account panel">×</button>
+    </div>
+
+      <div class="cloudSyncBox accountCloudPanel" id="cloudSyncBox">
+            <div class="cloudSyncGlow" aria-hidden="true"></div>
+
+            <div class="cloudSyncTop">
+              <div class="cloudSyncIcon" aria-hidden="true">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                  <path d="M7 18.5h10.2a4.3 4.3 0 0 0 .4-8.58A6.2 6.2 0 0 0 5.72 8.2 5.15 5.15 0 0 0 7 18.5Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M12 12v4m0 0 1.7-1.7M12 16l-1.7-1.7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+
+              <div class="cloudSyncHeading">
+                <div class="cloudSyncKicker">Vanguard Vault</div>
+                <div class="cloudSyncTitle">Cloud sync</div>
+                <div id="cloudSyncStatus" class="cloudSyncStatus">Cloud: Not connected</div>
+              </div>
+
+              <div id="cloudUserBadge" class="cloudUserBadge">Offline</div>
+            </div>
+
+            <div class="cloudInputGrid">
+              <label class="cloudField">
+                <span>Email</span>
+                <input
+                  id="cloudEmailInput"
+                  class="input cloudEmailInput"
+                  type="email"
+                  autocomplete="email"
+                  placeholder="you@example.com"
+                />
+              </label>
+
+              <label class="cloudField">
+                <span>Password</span>
+                <input
+                  id="cloudPasswordInput"
+                  class="input cloudEmailInput"
+                  type="password"
+                  autocomplete="current-password"
+                  placeholder="Password"
+                />
+              </label>
+            </div>
+
+            <div class="cloudSyncActions">
+              <button id="cloudLoginBtn" class="cloudPrimaryAction" type="button">Login</button>
+              <button id="cloudSignupBtn" class="cloudGhostAction" type="button">Sign Up</button>
+              <button id="cloudPullBtn" class="cloudGhostAction" type="button">Pull</button>
+              <button id="cloudPushBtn" class="cloudGhostAction" type="button">Push</button>
+              <button id="cloudLogoutBtn" class="cloudDangerAction" type="button">Logout</button>
+            </div>
+
+            <div class="cloudSyncHint">
+              Local saves still work. Cloud sync mirrors your calendar across signed-in devices.
+            </div>
+          </div>
+
+  </div>
+</div>
   <div id="syncGate" class="syncGate hidden">
     <div class="syncGateCard">
       <div class="syncGateTitle" id="syncGateTitle">Sync needs permission</div>

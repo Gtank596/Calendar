@@ -144,6 +144,11 @@ const budgetRepeatUntil = document.getElementById("budgetRepeatUntil");
 // Settings menu
 const settingsBtn = document.getElementById("settingsBtn");
 const settingsMenu = document.getElementById("settingsMenu");
+const accountBtn = document.getElementById("accountBtn");
+const accountBtnLabel = document.getElementById("accountBtnLabel");
+const accountBtnDot = document.getElementById("accountBtnDot");
+const accountModal = document.getElementById("accountModal");
+const accountModalCloseBtn = document.getElementById("accountModalCloseBtn");
 const toggleSuggestions = document.getElementById("toggleSuggestions");
 const dragStepSlider = document.getElementById("dragStepSlider");
 const dragStepValue = document.getElementById("dragStepValue");
@@ -158,6 +163,7 @@ const syncStatus = document.getElementById("syncStatus");
 const manualSyncRow = document.getElementById("manualSyncRow");
 
 // Supabase cloud sync UI
+const cloudSyncBox = document.getElementById("cloudSyncBox");
 const cloudEmailInput = document.getElementById("cloudEmailInput");
 const cloudPasswordInput = document.getElementById("cloudPasswordInput");
 const cloudSignupBtn = document.getElementById("cloudSignupBtn");
@@ -166,6 +172,7 @@ const cloudLogoutBtn = document.getElementById("cloudLogoutBtn");
 const cloudPushBtn = document.getElementById("cloudPushBtn");
 const cloudPullBtn = document.getElementById("cloudPullBtn");
 const cloudSyncStatus = document.getElementById("cloudSyncStatus");
+const cloudUserBadge = document.getElementById("cloudUserBadge");
 
 const syncGate = document.getElementById("syncGate");
 const syncGateTitle = document.getElementById("syncGateTitle");
@@ -662,6 +669,39 @@ const CLOUD_TABLE = "calendar_cloud_state";
 let supabaseClient = null;
 let cloudUser = null;
 let cloudWriteTimer = null;
+let cloudBusy = false;
+
+function openAccountModal(){
+  accountModal?.classList.remove("hidden");
+  setTimeout(() => {
+    if(!cloudUser){
+      cloudEmailInput?.focus({ preventScroll: true });
+    }
+  }, 0);
+}
+
+function closeAccountModal(){
+  accountModal?.classList.add("hidden");
+}
+
+accountBtn?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  openAccountModal();
+});
+
+accountModalCloseBtn?.addEventListener("click", closeAccountModal);
+
+accountModal?.addEventListener("click", (e) => {
+  if(e.target === accountModal){
+    closeAccountModal();
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if(e.key === "Escape" && !accountModal?.classList.contains("hidden")){
+    closeAccountModal();
+  }
+});
 
 function cloudConfigured(){
   return (
@@ -677,10 +717,38 @@ function setCloudStatus(text){
   if(cloudSyncStatus) cloudSyncStatus.textContent = text;
 }
 
+function setCloudBusy(isBusy){
+  cloudBusy = !!isBusy;
+  updateCloudUI();
+}
+
 function updateCloudUI(){
-  if(!cloudConfigured()){
+  const configured = cloudConfigured();
+  const signedIn = !!cloudUser;
+
+  cloudSyncBox?.classList.toggle("isConnected", signedIn);
+  accountBtn?.classList.toggle("isConnected", signedIn);
+  accountBtn?.classList.toggle("needsSignIn", configured && !signedIn);
+
+  if(accountBtnLabel){
+    accountBtnLabel.textContent = signedIn ? "Profile" : "Sign In";
+  }
+
+  if(accountBtnDot){
+    accountBtnDot.setAttribute("aria-label", signedIn ? "Signed in" : "Not signed in");
+  }
+
+  if(cloudUserBadge){
+    cloudUserBadge.textContent = signedIn
+      ? (cloudUser.email || "Online")
+      : configured
+        ? "Offline"
+        : "Setup";
+  }
+
+  if(!configured){
     setCloudStatus("Cloud: Add Supabase URL + anon key");
-if(cloudSignupBtn) cloudSignupBtn.disabled = true;
+    if(cloudSignupBtn) cloudSignupBtn.disabled = true;
     if(cloudLoginBtn) cloudLoginBtn.disabled = true;
     if(cloudLogoutBtn) cloudLogoutBtn.disabled = true;
     if(cloudPushBtn) cloudPushBtn.disabled = true;
@@ -688,14 +756,16 @@ if(cloudSignupBtn) cloudSignupBtn.disabled = true;
     return;
   }
 
-if(cloudSignupBtn) cloudSignupBtn.disabled = !!cloudUser;
-  if(cloudLoginBtn) cloudLoginBtn.disabled = !!cloudUser;
-  if(cloudLogoutBtn) cloudLogoutBtn.disabled = !cloudUser;
-  if(cloudPushBtn) cloudPushBtn.disabled = !cloudUser;
-  if(cloudPullBtn) cloudPullBtn.disabled = !cloudUser;
+  if(cloudSignupBtn) cloudSignupBtn.disabled = cloudBusy || signedIn;
+  if(cloudLoginBtn) cloudLoginBtn.disabled = cloudBusy || signedIn;
+  if(cloudLogoutBtn) cloudLogoutBtn.disabled = cloudBusy || !signedIn;
+  if(cloudPushBtn) cloudPushBtn.disabled = cloudBusy || !signedIn;
+  if(cloudPullBtn) cloudPullBtn.disabled = cloudBusy || !signedIn;
+
+  if(cloudBusy) return;
 
   setCloudStatus(
-    cloudUser
+    signedIn
       ? `Cloud: Signed in as ${cloudUser.email || "user"}`
       : "Cloud: Not signed in"
   );
@@ -729,7 +799,7 @@ async function initCloudSync(){
 }
 
 async function signupCloud(){
-  if(!supabaseClient) return;
+  if(!supabaseClient || cloudBusy) return;
 
   const email = cloudEmailInput?.value?.trim();
   const password = cloudPasswordInput?.value || "";
@@ -744,30 +814,34 @@ async function signupCloud(){
     return;
   }
 
+  setCloudBusy(true);
   setCloudStatus("Cloud: Creating account...");
 
-  const { data, error } = await supabaseClient.auth.signUp({
-    email,
-    password
-  });
+  try{
+    const { data, error } = await supabaseClient.auth.signUp({
+      email,
+      password
+    });
 
-  if(error){
-    setCloudStatus("Cloud signup failed: " + error.message);
-    return;
+    if(error){
+      setCloudStatus("Cloud signup failed: " + error.message);
+      return;
+    }
+
+    cloudUser = data?.user || data?.session?.user || null;
+
+    setCloudStatus(
+      cloudUser
+        ? `Cloud: Account created as ${cloudUser.email || "user"}`
+        : "Cloud: Account created. Now login."
+    );
+  }finally{
+    setCloudBusy(false);
   }
-
-  cloudUser = data?.user || data?.session?.user || null;
-  updateCloudUI();
-
-  setCloudStatus(
-    cloudUser
-      ? `Cloud: Account created as ${cloudUser.email || "user"}`
-      : "Cloud: Account created. Now login."
-  );
 }
 
 async function loginCloud(){
-  if(!supabaseClient) return;
+  if(!supabaseClient || cloudBusy) return;
 
   const email = cloudEmailInput?.value?.trim();
   const password = cloudPasswordInput?.value || "";
@@ -777,30 +851,43 @@ async function loginCloud(){
     return;
   }
 
+  setCloudBusy(true);
   setCloudStatus("Cloud: Logging in...");
 
-  const { data, error } = await supabaseClient.auth.signInWithPassword({
-    email,
-    password
-  });
+  try{
+    const { data, error } = await supabaseClient.auth.signInWithPassword({
+      email,
+      password
+    });
 
-  if(error){
-    setCloudStatus("Cloud login failed: " + error.message);
-    return;
-  }
+    if(error){
+      setCloudStatus("Cloud login failed: " + error.message);
+      return;
+    }
 
-  cloudUser = data?.user || null;
-  updateCloudUI();
+    cloudUser = data?.user || null;
 
-  if(cloudUser){
-    await pullCloudIfNewer();
+    if(cloudUser){
+      await pullCloudIfNewer();
+    }
+  }finally{
+    setCloudBusy(false);
   }
 }
+
 async function logoutCloud(){
-  if(!supabaseClient) return;
-  await supabaseClient.auth.signOut();
-  cloudUser = null;
-  updateCloudUI();
+  if(!supabaseClient || cloudBusy) return;
+
+  setCloudBusy(true);
+  setCloudStatus("Cloud: Logging out...");
+
+  try{
+    await supabaseClient.auth.signOut();
+    cloudUser = null;
+    setCloudStatus("Cloud: Logged out");
+  }finally{
+    setCloudBusy(false);
+  }
 }
 
 async function readCloudState(){
@@ -877,6 +964,12 @@ cloudLogoutBtn?.addEventListener("click", () => logoutCloud().catch(console.erro
 cloudPushBtn?.addEventListener("click", () => pushLocalToCloud().catch(console.error));
 cloudPullBtn?.addEventListener("click", () => pullCloudIfNewer().catch(console.error));
 
+cloudPasswordInput?.addEventListener("keydown", (e) => {
+  if(e.key === "Enter"){
+    loginCloud().catch(console.error);
+  }
+});
+
 // ============================================================================
 // 05. FILE SYNC (Google Drive JSON via File System Access API)
 // ============================================================================
@@ -950,11 +1043,7 @@ function applyFullSavePayload(payload, opts = {}){
   localStorage.setItem(BUDGET_CATEGORIES_KEY, JSON.stringify(budgetCategories));
   localStorage.setItem(BUDGET_PANES_KEY, JSON.stringify(selectedBudgetPanes));
   localStorage.setItem("myCalendar_activeSection", activeSection);
-  if(typeof setLocalPayload === "function") setLocalPayload({ updatedAt: Date.now(), events });
-  if(typeof cloudWriteDebounced === "function") cloudWriteDebounced();
   localStorage.setItem("myCalendar_budgetViewMode", budgetViewMode);
-  if(typeof setLocalPayload === "function") setLocalPayload({ updatedAt: Date.now(), events });
-  if(typeof cloudWriteDebounced === "function") cloudWriteDebounced();
 
   syncStateFromLegacy();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
@@ -6653,6 +6742,16 @@ function renderWeekView(){
   requestAnimationFrame(() => alignDowToGrid());
 }
 
+function isMobileLayout(){
+  return window.matchMedia && window.matchMedia("(max-width: 760px)").matches;
+}
+
+function getDayTimelineLayout(){
+  return isMobileLayout()
+    ? { laneLeft: 58, laneRight: 10, gutter: 4 }
+    : { laneLeft: 78, laneRight: 12, gutter: 5 };
+}
+
 function renderDayView(){
   const now = new Date();
 
@@ -6777,10 +6876,11 @@ for(const item of railLabels){
   }
 
   const metrics = getTimelineMetrics(dayEl);
-  const laneLeft = 78;
-  const laneRight = 12;
+  const timelineLayout = getDayTimelineLayout();
+  const laneLeft = timelineLayout.laneLeft;
+  const laneRight = timelineLayout.laneRight;
+  const gutter = timelineLayout.gutter;
   const laneWidthPx = dayEl.clientWidth - laneLeft - laneRight;
-  const gutter = 5;
 
   for(const item of placed){
     const ev = item.ev;

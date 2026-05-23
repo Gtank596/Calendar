@@ -4388,70 +4388,965 @@ body.timeDraggingBody{
    SUPABASE CLOUD SYNC
    ========================================================= */
 .cloudSyncBox{
-  margin-top:10px;
-  padding:12px;
-  border:1px solid rgba(255,255,255,.08);
-  border-radius:16px;
+  position:relative;
+  margin-top:12px;
+  padding:14px;
+  overflow:hidden;
+  border:1px solid rgba(160,135,255,.16);
+  border-radius:20px;
   background:
-    radial-gradient(340px 160px at 20% 0%, rgba(120,90,255,.14), transparent 62%),
-    rgba(255,255,255,.025);
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+    linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.022)),
+    radial-gradient(420px 220px at 20% 0%, rgba(120,90,255,.22), transparent 64%),
+    rgba(11,15,29,.72);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.07),
+    0 18px 42px rgba(0,0,0,.20);
+}
+
+.cloudSyncGlow{
+  position:absolute;
+  inset:auto -60px -100px auto;
+  width:190px;
+  height:190px;
+  border-radius:999px;
+  background:rgba(120,90,255,.16);
+  filter:blur(34px);
+  pointer-events:none;
+}
+
+.cloudSyncBox.isConnected{
+  border-color:rgba(111,231,168,.26);
+}
+
+.cloudSyncBox.isConnected .cloudSyncGlow{
+  background:rgba(111,231,168,.14);
 }
 
 .cloudSyncTop{
-  display:flex;
-  align-items:flex-start;
-  justify-content:space-between;
-  gap:10px;
-  margin-bottom:10px;
+  position:relative;
+  z-index:1;
+  display:grid;
+  grid-template-columns:auto minmax(0, 1fr) auto;
+  align-items:start;
+  gap:12px;
+  margin-bottom:13px;
+}
+
+.cloudSyncIcon{
+  width:38px;
+  height:38px;
+  display:grid;
+  place-items:center;
+  border-radius:15px;
+  color:#fff;
+  background:
+    linear-gradient(180deg, rgba(126,96,255,.48), rgba(110,84,235,.30));
+  border:1px solid rgba(160,135,255,.30);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.13),
+    0 12px 24px rgba(90,60,220,.20);
+}
+
+.cloudSyncHeading{
+  min-width:0;
+}
+
+.cloudSyncKicker{
+  color:rgba(233,236,255,.46);
+  font-size:10px;
+  font-weight:900;
+  letter-spacing:.13em;
+  text-transform:uppercase;
 }
 
 .cloudSyncTitle{
-  color:rgba(233,236,255,.78);
-  font-size:12px;
-  font-weight:850;
-  text-transform:uppercase;
-  letter-spacing:.10em;
+  margin-top:1px;
+  color:#fff;
+  font-size:15px;
+  font-weight:900;
+  letter-spacing:-.02em;
 }
 
 .cloudSyncStatus{
   margin-top:3px;
-  color:rgba(233,236,255,.58);
+  color:rgba(233,236,255,.60);
   font-size:12px;
   font-weight:650;
   line-height:1.35;
 }
 
+.cloudUserBadge{
+  max-width:116px;
+  padding:6px 8px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.10);
+  background:rgba(255,255,255,.045);
+  color:rgba(233,236,255,.62);
+  font-size:10px;
+  font-weight:900;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+.cloudSyncBox.isConnected .cloudUserBadge{
+  color:#bdfbd6;
+  background:rgba(111,231,168,.10);
+  border-color:rgba(111,231,168,.22);
+}
+
+.cloudInputGrid{
+  position:relative;
+  z-index:1;
+  display:grid;
+  grid-template-columns:1fr;
+  gap:10px;
+}
+
+.cloudField{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+
+.cloudField span{
+  color:rgba(233,236,255,.55);
+  font-size:11px;
+  font-weight:850;
+  text-transform:uppercase;
+  letter-spacing:.10em;
+}
+
 .cloudEmailInput{
-  height:38px;
-  margin-bottom:10px;
+  height:40px;
+  margin-bottom:0;
 }
 
 .cloudSyncActions{
+  position:relative;
+  z-index:1;
   display:grid;
-  grid-template-columns:repeat(4, 1fr);
+  grid-template-columns:1.15fr .9fr .75fr .75fr .8fr;
   gap:8px;
+  margin-top:12px;
 }
 
-.cloudSyncActions .tiny{
-  height:34px;
+.cloudSyncActions button{
+  height:36px;
   min-width:0;
+  padding:0 10px;
+  border-radius:13px;
+  cursor:pointer;
+  font-size:12px;
+  font-weight:850;
+  border:1px solid rgba(255,255,255,.10);
+  color:rgba(233,236,255,.88);
+  background:rgba(255,255,255,.045);
+  transition:
+    transform .16s ease,
+    background .16s ease,
+    border-color .16s ease,
+    opacity .16s ease,
+    box-shadow .16s ease;
 }
 
-.cloudSyncActions .tiny:disabled{
-  opacity:.38;
+.cloudSyncActions button:hover:not(:disabled){
+  transform:translateY(-1px);
+  background:rgba(255,255,255,.08);
+  border-color:rgba(255,255,255,.18);
+}
+
+.cloudPrimaryAction{
+  color:#fff !important;
+  border-color:rgba(160,135,255,.36) !important;
+  background:
+    linear-gradient(180deg, rgba(126,96,255,.72), rgba(110,84,235,.44)) !important;
+  box-shadow:0 10px 24px rgba(90,60,220,.18);
+}
+
+.cloudGhostAction{
+  background:rgba(255,255,255,.04);
+}
+
+.cloudDangerAction{
+  color:rgba(255,220,226,.92) !important;
+  border-color:rgba(255,110,130,.22) !important;
+  background:rgba(255,70,100,.09) !important;
+}
+
+.cloudSyncActions button:disabled{
+  opacity:.34;
   cursor:not-allowed;
+  transform:none;
+  box-shadow:none;
 }
 
 .cloudSyncHint{
-  margin-top:9px;
+  position:relative;
+  z-index:1;
+  margin-top:10px;
+  padding-top:10px;
+  border-top:1px solid rgba(255,255,255,.07);
   color:rgba(233,236,255,.46);
   font-size:11px;
-  line-height:1.35;
+  line-height:1.38;
+}
+
+@media (max-width: 760px){
+  .cloudSyncActions{
+    grid-template-columns:1fr 1fr;
+  }
+
+  .cloudDangerAction{
+    grid-column:1 / -1;
+  }
 }
 
 @media (max-width: 520px){
+  .cloudSyncTop{
+    grid-template-columns:auto 1fr;
+  }
+
+  .cloudUserBadge{
+    grid-column:1 / -1;
+    max-width:none;
+    width:max-content;
+  }
+
   .cloudSyncActions{
+    grid-template-columns:1fr;
+  }
+}
+
+
+
+/* =========================================================
+   ACCOUNT BUTTON + CLOUD SYNC MODAL
+   ========================================================= */
+.accountBtn{
+  gap:8px;
+  width:auto;
+  min-width:88px;
+  padding:0 13px;
+  font-size:13px;
+  font-weight:850;
+  letter-spacing:-.01em;
+}
+
+.accountBtnDot{
+  width:9px;
+  height:9px;
+  border-radius:999px;
+  background:rgba(233,236,255,.42);
+  box-shadow:0 0 0 3px rgba(255,255,255,.04);
+}
+
+.accountBtn.needsSignIn{
+  color:#dfffea;
+  border-color:rgba(111,231,168,.34);
+  background:linear-gradient(180deg, rgba(111,231,168,.22), rgba(111,231,168,.09));
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.08),
+    0 10px 26px rgba(30,200,120,.10);
+}
+
+.accountBtn.needsSignIn .accountBtnDot{
+  background:#6ee7a8;
+  box-shadow:
+    0 0 0 3px rgba(111,231,168,.12),
+    0 0 16px rgba(111,231,168,.50);
+}
+
+.accountBtn.isConnected{
+  color:#e9ecff;
+  border-color:rgba(160,135,255,.26);
+  background:rgba(255,255,255,.045);
+}
+
+.accountBtn.isConnected .accountBtnDot{
+  background:#8a6bff;
+  box-shadow:
+    0 0 0 3px rgba(138,107,255,.13),
+    0 0 16px rgba(138,107,255,.45);
+}
+
+.accountModal{
+  position:fixed;
+  inset:0;
+  z-index:5200;
+  display:flex;
+  align-items:flex-start;
+  justify-content:flex-end;
+  padding:74px 20px 20px;
+  background:rgba(0,0,0,.36);
+  backdrop-filter:blur(7px);
+}
+
+.accountModal.hidden{
+  display:none;
+}
+
+.accountModalCard{
+  width:min(440px, 100%);
+  max-height:min(720px, calc(100vh - 94px));
+  overflow:auto;
+  padding:16px;
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:22px;
+  background:
+    radial-gradient(520px 260px at 20% 0%, rgba(120,90,255,.18), transparent 60%),
+    rgba(15,18,32,.98);
+  box-shadow:0 24px 70px rgba(0,0,0,.48);
+  animation:accountModalIn .18s ease-out;
+}
+
+@keyframes accountModalIn{
+  from{
+    opacity:0;
+    transform:translateY(-8px) scale(.98);
+  }
+  to{
+    opacity:1;
+    transform:translateY(0) scale(1);
+  }
+}
+
+.accountModalHeader{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:14px;
+  padding-bottom:12px;
+  margin-bottom:12px;
+  border-bottom:1px solid rgba(255,255,255,.08);
+}
+
+.accountModalHeader h3{
+  margin:3px 0 0;
+  font-size:18px;
+  letter-spacing:-.02em;
+}
+
+.accountCloudPanel{
+  margin-top:0;
+}
+
+@media (max-width:700px){
+  .accountModal{
+    align-items:flex-start;
+    justify-content:center;
+    padding:82px 12px 12px;
+  }
+
+  .accountBtn{
+    min-width:42px;
+    padding:0 11px;
+  }
+
+  .accountBtnLabel{
+    display:none;
+  }
+}
+
+/* =========================================================
+   MOBILE APP VIEW
+   ---------------------------------------------------------
+   Keeps the desktop layout intact, but turns the app into a
+   phone-first stacked interface for receipt/OCR work later.
+   ========================================================= */
+@media (max-width: 760px){
+  html{
+    -webkit-text-size-adjust:100%;
+    scroll-behavior:smooth;
+  }
+
+  body{
+    overflow-x:hidden;
+    background:
+      radial-gradient(720px 520px at 15% 0%, rgba(120,90,255,.28), transparent 60%),
+      radial-gradient(520px 420px at 95% 18%, rgba(70,200,255,.13), transparent 62%),
+      var(--bg);
+  }
+
+  .topbar{
+    position:sticky;
+    top:0;
+    z-index:1200;
+    grid-template-columns:minmax(0, 1fr) auto;
+    gap:10px;
+    padding:12px 12px 10px;
+    backdrop-filter:blur(18px);
+  }
+
+  .title{
+    min-width:0;
+  }
+
+  .title h1{
+    font-size:18px;
+    line-height:1.05;
+  }
+
+  .subtitle{
+    font-size:12px;
+    max-width:44vw;
+    overflow:hidden;
+    white-space:nowrap;
+    text-overflow:ellipsis;
+  }
+
+  .controlsRight{
+    justify-self:end;
+    display:grid;
+    grid-template-columns:auto auto auto;
+    gap:6px;
+    padding:0;
+    border:0;
+    background:transparent;
+    box-shadow:none;
+  }
+
+  .sectionSwitcher{
+    grid-column:1 / -1;
+    grid-row:2;
+    width:100%;
+    order:10;
+    overflow:hidden;
+  }
+
+  .sectionBtn{
+    flex:1 1 0;
+    min-width:0;
+    padding:0 8px;
+    font-size:12px;
+  }
+
+  #searchBtn,
+  #settingsBtn,
+  .accountBtn{
+    width:40px;
+    min-width:40px;
+    height:40px;
+    padding:0;
+    border-radius:14px;
+  }
+
+  .accountBtnLabel{
+    display:none;
+  }
+
+  .accountBtnDot{
+    width:10px;
+    height:10px;
+  }
+
+  .settingsMenu{
+    position:fixed;
+    top:74px;
+    left:12px;
+    right:12px;
+    width:auto;
+    max-height:calc(100dvh - 92px);
+    overflow:auto;
+    border-radius:20px;
+  }
+
+  .subbar{
+    position:sticky;
+    top:96px;
+    z-index:1050;
+    margin-bottom:0;
+    padding:8px 10px;
+    overflow-x:auto;
+    -webkit-overflow-scrolling:touch;
+    scrollbar-width:none;
+    backdrop-filter:blur(14px);
+  }
+
+  .subbar::-webkit-scrollbar{
+    display:none;
+  }
+
+  .subbar .controlsCenter{
+    min-width:max-content;
+    gap:6px;
+    padding:5px;
+  }
+
+  .navBtn{
+    height:38px;
+    min-height:38px;
+  }
+
+  .navBtnToday{
+    min-width:64px;
+    padding:0 12px;
+  }
+
+  .navBtnUndo{
+    min-width:38px;
+  }
+
+  .navBtnView{
+    min-width:62px;
+    padding:0 12px;
+  }
+
+  .layout{
+    display:flex;
+    flex-direction:column;
+    gap:12px;
+    padding:10px;
+  }
+
+  .calendar,
+  .panel,
+  .budgetPanel,
+  .budgetStatCard,
+  .pageCard{
+    border-radius:20px;
+  }
+
+  .panel{
+    padding:12px;
+    overflow:hidden;
+  }
+
+  .collapseBtn{
+    display:none;
+  }
+
+  .panelBody{
+    opacity:1 !important;
+    visibility:visible !important;
+    transform:none !important;
+    pointer-events:auto !important;
+  }
+
+  body.editorCollapsed .panelBody{
+    opacity:1 !important;
+    visibility:visible !important;
+    transform:none !important;
+    pointer-events:auto !important;
+  }
+
+  .panelHeader h2{
+    font-size:20px;
+  }
+
+  .eventsList{
+    max-height:240px;
+    overflow:auto;
+    padding-right:4px;
+  }
+
+  .editorSection{
+    padding-bottom:8px;
+  }
+
+  .quickAddRow,
+  .timeGrid,
+  .calendarBudgetGrid,
+  .rowDelete,
+  .syncRow,
+  #manualSyncRow{
+    grid-template-columns:1fr !important;
+    flex-direction:column;
+    align-items:stretch;
+  }
+
+  .quickAddRow .tiny,
+  .rowDelete .primary,
+  .deleteGroup,
+  #manualSyncRow button,
+  .syncRow button{
+    width:100%;
+  }
+
+  .deleteGroup{
+    display:grid;
+    grid-template-columns:1fr auto;
+    gap:8px;
+  }
+
+  .input,
+  .textarea,
+  .ddButton,
+  select{
+    font-size:16px; /* prevents iOS zoom */
+  }
+
+  .dow{
+    height:34px;
+    font-size:10px;
+    letter-spacing:.08em;
+  }
+
+  .dow > div{
+    height:34px;
+    padding:0 2px;
+  }
+
+  .grid{
+    grid-template-columns:repeat(7, minmax(0, 1fr));
+  }
+
+  .day{
+    min-height:78px;
+    padding:6px;
+  }
+
+  .dayHeader{
+    margin-bottom:4px;
+  }
+
+  .num{
+    font-size:12px;
+  }
+
+  .badge{
+    font-size:9px;
+  }
+
+  .tripBox{
+    padding:5px;
+    border-radius:12px;
+  }
+
+  .tripBox .spanBand.named{
+    font-size:10px;
+  }
+
+  .day:not(.dayViewDay) .eventPill{
+    margin-top:4px;
+    padding:4px 5px;
+    border-radius:9px;
+  }
+
+  .day:not(.dayViewDay) .pillTitle{
+    font-size:10.5px;
+  }
+
+  .day:not(.dayViewDay) .pillTime,
+  .day:not(.dayViewDay) .pillDetails{
+    display:none;
+  }
+
+  .day.weekViewDay{
+    min-height:460px;
+    min-width:150px;
+  }
+
+  body:has(.weekViewDay) .calendar{
+    overflow-x:auto;
+    -webkit-overflow-scrolling:touch;
+  }
+
+  body:has(.weekViewDay) .grid,
+  .grid:has(.weekViewDay){
+    grid-template-columns:repeat(7, minmax(150px, 1fr)) !important;
+    min-width:1050px;
+  }
+
+  .dayViewHeaderWrap{
+    flex-direction:column;
+    align-items:stretch;
+    gap:10px;
+    margin:0 0 12px;
+    padding-bottom:12px;
+  }
+
+  .dayViewHeader{
+    font-size:22px;
+  }
+
+  .dayViewWeekJumper{
+    justify-content:space-between;
+    gap:6px;
+    overflow-x:auto;
+    padding-bottom:2px;
+    scrollbar-width:none;
+  }
+
+  .dayViewWeekJumper::-webkit-scrollbar{
+    display:none;
+  }
+
+  .dayViewWeekdayRow{
+    gap:5px;
+  }
+
+  .dayViewWeekNavBtn{
+    width:30px;
+    height:30px;
+    flex-basis:30px;
+  }
+
+  .dayViewWeekdayBtn{
+    width:32px;
+    height:32px;
+    flex-basis:32px;
+  }
+
+  .weatherHourlyStrip{
+    margin:0 0 10px;
+    height:54px;
+    border-radius:15px;
+  }
+
+  .weatherStripDot{
+    padding:2px 4px;
+    font-size:9px;
+  }
+
+  .day.dayViewDay{
+    min-height:1120px;
+    padding:14px 10px 18px;
+    --timeline-top:130px;
+  }
+
+  .day.dayViewDay.weatherOn{
+    --timeline-top:186px;
+  }
+
+  .dayHourGrid{
+    left:58px;
+    right:10px;
+  }
+
+  .dayTimeRail{
+    left:8px;
+    width:42px;
+  }
+
+  .dayTimeMark{
+    font-size:10px;
+  }
+
+  .nowLine{
+    left:58px;
+    right:10px;
+  }
+
+  .nowDot{
+    left:53px;
+  }
+
+  .day.dayViewDay .eventPill{
+    padding:10px 10px 10px 14px;
+    border-radius:14px;
+  }
+
+  .day.dayViewDay .pillTopRow{
+    flex-direction:column;
+    align-items:flex-start;
+    gap:2px;
+    width:100%;
+  }
+
+  .day.dayViewDay .pillTitle{
+    font-size:13px;
+  }
+
+  .day.dayViewDay .pillTime{
+    border-left:0;
+    padding-left:0;
+    font-size:10px;
+  }
+
+  .day.dayViewDay .pillDetails{
+    font-size:10.5px;
+    white-space:normal;
+  }
+
+  .day.dayViewDay .dayEmptyState{
+    left:58px;
+    right:10px;
+  }
+
+  .budgetShell,
+  .pageShell{
+    padding:10px;
+  }
+
+  .budgetTop{
+    margin:0 -10px 12px;
+    padding:8px 10px;
+    overflow-x:auto;
+    -webkit-overflow-scrolling:touch;
+    scrollbar-width:none;
+  }
+
+  .budgetTop::-webkit-scrollbar{
+    display:none;
+  }
+
+  .budgetControls{
+    min-width:max-content;
+    gap:6px;
+  }
+
+  .budgetStats,
+  .budgetContentGrid{
+    grid-template-columns:1fr !important;
+    gap:12px;
+  }
+
+  .budgetStatCard,
+  .budgetPanel{
+    padding:14px;
+  }
+
+  .budgetInsightsGrid{
     grid-template-columns:1fr 1fr;
+  }
+
+  .budgetPanelHeader{
+    align-items:flex-start;
+    flex-direction:column;
+    gap:4px;
+  }
+
+  .budgetBarRow{
+    grid-template-columns:72px 1fr 68px;
+    gap:8px;
+  }
+
+  .budgetCategoryChartPanel{
+    min-height:auto;
+    max-height:none;
+  }
+
+  .budgetCategoryChart{
+    grid-template-columns:1fr;
+    max-height:none;
+    overflow:visible;
+  }
+
+  .budgetTransactionsPanel{
+    height:auto;
+    min-height:520px;
+    max-height:none;
+  }
+
+  .budgetTransactionStage{
+    min-height:520px;
+  }
+
+  .budgetTransactionFilters{
+    gap:8px;
+  }
+
+  .budgetTransaction{
+    grid-template-columns:1fr;
+    gap:8px;
+  }
+
+  .budgetTransactionRight{
+    justify-content:space-between;
+    flex-wrap:wrap;
+  }
+
+  .budgetTxDrawer{
+    position:fixed;
+    inset:auto 0 0 0;
+    width:100%;
+    height:min(82dvh, 720px);
+    left:0;
+    right:0;
+    top:auto;
+    bottom:0;
+    border-left:0;
+    border-top:1px solid rgba(255,255,255,.12);
+    border-radius:24px 24px 0 0;
+    transform:translate3d(0, 105%, 0);
+    box-shadow:0 -24px 70px rgba(0,0,0,.55);
+  }
+
+  .budgetTxDrawer.open{
+    transform:translate3d(0, 0, 0);
+  }
+
+  .budgetAmountTypeRow,
+  .budgetDateRepeatGrid,
+  .budgetTxFilterRow,
+  .budgetCategoryBudgetGrid{
+    grid-template-columns:1fr !important;
+  }
+
+  .budgetTypeSwitcher,
+  .budgetViewSwitcher{
+    width:100%;
+  }
+
+  .budgetTypeBtn,
+  .budgetViewBtn{
+    flex:1 1 0;
+    min-width:0;
+  }
+
+  .budgetCategoryHubModal,
+  .budgetCategoryModal,
+  .accountModal,
+  .syncGate{
+    padding:12px;
+    align-items:flex-end;
+  }
+
+  .budgetCategoryHubCard,
+  .budgetCategoryModalCard,
+  .accountModalCard,
+  .syncGateCard{
+    width:100%;
+    max-height:86dvh;
+    border-radius:24px 24px 18px 18px;
+  }
+
+  .accountModal{
+    justify-content:center;
+    padding-top:12px;
+  }
+
+  .accountModalCard{
+    padding:14px;
+  }
+
+  .cloudInputGrid,
+  .cloudSyncActions{
+    grid-template-columns:1fr !important;
+  }
+}
+
+@media (max-width: 420px){
+  .sectionBtn{
+    font-size:11px;
+    padding:0 5px;
+  }
+
+  .navBtnView{
+    min-width:56px;
+  }
+
+  .day{
+    min-height:70px;
+    padding:5px;
+  }
+
+  .day:not(.dayViewDay) .eventPill{
+    padding:3px 4px;
+  }
+
+  .day:not(.dayViewDay) .pillTitle{
+    font-size:10px;
+  }
+
+  .budgetInsightsGrid{
+    grid-template-columns:1fr;
+  }
+
+  .budgetBarRow{
+    grid-template-columns:62px 1fr 60px;
   }
 }
