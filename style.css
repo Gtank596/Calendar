@@ -5778,3 +5778,52 @@ body[data-active-section="weather"] #calendarSubbar{
     font-size:11px !important;
   }
 }
+
+/* =========================================================
+   MOBILE SETTINGS SHEET FIX
+   ---------------------------------------------------------
+   On phones, the sticky topbar/subbar can sit above the
+   settings menu. Treat settings like a bottom sheet so it
+   never gets trapped under the navigation chrome.
+   ========================================================= */
+@media (max-width:760px){
+  .settingsMenu{
+    position:fixed !important;
+    left:12px !important;
+    right:12px !important;
+    top:auto !important;
+    bottom:calc(12px + env(safe-area-inset-bottom, 0px)) !important;
+    width:auto !important;
+    max-width:none !important;
+    max-height:min(72dvh, 620px) !important;
+    overflow-y:auto !important;
+    overflow-x:hidden !important;
+    z-index:8000 !important;
+
+    border-radius:24px !important;
+    padding:16px !important;
+    background:
+      radial-gradient(520px 260px at 20% 0%, rgba(120,90,255,.20), transparent 62%),
+      rgba(15,20,38,.98) !important;
+    border:1px solid rgba(255,255,255,.14) !important;
+    box-shadow:
+      0 28px 80px rgba(0,0,0,.56),
+      inset 0 1px 0 rgba(255,255,255,.06) !important;
+    backdrop-filter:blur(18px) !important;
+  }
+
+  .settingsMenu::before{
+    content:"";
+    display:block;
+    width:42px;
+    height:4px;
+    margin:0 auto 14px;
+    border-radius:999px;
+    background:rgba(233,236,255,.28);
+  }
+
+  .settingsMenu .input,
+  .settingsMenu select.input{
+    width:100% !important;
+  }
+}
