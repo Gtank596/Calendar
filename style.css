@@ -5448,3 +5448,39 @@ body[data-active-section="weather"] #calendarSubbar{
     margin-top:10px;
   }
 }
+
+@media (max-width:760px){
+  body[data-calendar-view="month"] #calendarPage .calendar{
+    overflow:hidden !important;
+  }
+
+  body[data-calendar-view="month"] #calendarPage .grid{
+    display:grid !important;
+    grid-template-columns:repeat(7, minmax(0, 1fr)) !important;
+    width:100% !important;
+    min-width:0 !important;
+    max-width:100% !important;
+  }
+
+  body[data-calendar-view="month"] #calendarPage .day{
+    min-width:0 !important;
+    width:auto !important;
+    height:48px !important;
+    min-height:48px !important;
+    padding:4px !important;
+  }
+
+  body[data-calendar-view="month"] #calendarPage .eventPill,
+  body[data-calendar-view="month"] #calendarPage .tripBox{
+    display:none !important;
+  }
+
+  body[data-calendar-view="week"] #calendarPage .calendar{
+    overflow-x:auto !important;
+  }
+
+  body[data-calendar-view="week"] #calendarPage .grid{
+    grid-template-columns:repeat(7, minmax(150px, 1fr)) !important;
+    min-width:1050px !important;
+  }
+}
