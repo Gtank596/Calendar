@@ -156,6 +156,7 @@ const dimPastEvents = document.getElementById("dimPastEvents");
 const weatherEnabled = document.getElementById("weatherEnabled");
 const weatherLocationSelect = document.getElementById("weatherLocationSelect");
 const budgetCategorySortSelect = document.getElementById("budgetCategorySortSelect");
+const mobileCalendarStyleSelect = document.getElementById("mobileCalendarStyleSelect");
 
 // Sync UI
 const connectSyncBtn = document.getElementById("connectSyncBtn");
@@ -280,6 +281,7 @@ budgetChartPercentages: saved.budgetChartPercentages ?? true,
 budgetChartBudgetDetails: saved.budgetChartBudgetDetails ?? true,
       dragStepMins: clamp(parseInt(saved.dragStepMins ?? 15, 10) || 15, 1, 30),
 budgetCategorySort: saved.budgetCategorySort || "custom",
+mobileCalendarStyle: saved.mobileCalendarStyle || "compact",
 weather: saved.weather || {
     enabled: true,
     locationKey: "coloradoSprings"
@@ -292,6 +294,7 @@ dimPastEvents: true,
 budgetChartPercentages: true,
 budgetChartBudgetDetails: true,
 budgetCategorySort: "custom",
+mobileCalendarStyle: "compact",
       dragStepMins: 15,
 weather: {
     enabled: true,
@@ -320,6 +323,7 @@ function shouldDimPastEvents(){
 
 function saveSettings(){
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  updateMobileCalendarStyleUI();
   setLocalPayload({ updatedAt: Date.now(), events });
   cloudWriteDebounced();
 }
@@ -364,6 +368,42 @@ function getSortedBudgetCategories(){
 }
 
 let settings = loadSettings();
+
+function isMobileViewport(){
+  return window.matchMedia && window.matchMedia("(max-width: 760px)").matches;
+}
+
+function getMobileCalendarStyle(){
+  return settings?.mobileCalendarStyle || "compact";
+}
+
+function updateMobileCalendarStyleUI(){
+  const style = getMobileCalendarStyle();
+  document.body.dataset.mobileCalendarStyle = style;
+
+  if(mobileCalendarStyleSelect){
+    mobileCalendarStyleSelect.value = style;
+  }
+}
+
+function openMobileEditor(){
+  if(isMobileViewport()){
+    document.body.classList.add("mobileEditorOpen");
+    setTimeout(() => {
+      editorSection?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+  }
+}
+
+function closeMobileEditor(){
+  document.body.classList.remove("mobileEditorOpen");
+}
+
+function getEventPreviewCountText(count){
+  if(count <= 0) return "";
+  if(count > 9) return "9+";
+  return String(count);
+}
 
 function getDragStepMins(){
   return clamp(parseInt(settings?.dragStepMins ?? 15, 10) || 15, 1, 30);
@@ -525,6 +565,7 @@ budgetChartBudgetDetails &&
   (budgetChartBudgetDetails.checked = !!settings.budgetChartBudgetDetails);
 dimPastEvents && (dimPastEvents.checked = !!settings.dimPastEvents);
 updateDragStepUI();
+updateMobileCalendarStyleUI();
 
 dimPastEvents?.addEventListener("change", () => {
   settings.dimPastEvents = !!dimPastEvents.checked;
@@ -543,6 +584,18 @@ dragStepSlider?.addEventListener("input", () => {
   settings.dragStepMins = clamp(parseInt(dragStepSlider.value, 10) || 15, 1, 30);
   updateDragStepUI();
   saveSettings();
+});
+
+mobileCalendarStyleSelect?.addEventListener("change", () => {
+  settings.mobileCalendarStyle = mobileCalendarStyleSelect.value || "compact";
+  updateMobileCalendarStyleUI();
+  saveSettings();
+  render();
+});
+
+window.addEventListener("resize", () => {
+  updateMobileCalendarStyleUI();
+  if(!isMobileViewport()) closeMobileEditor();
 });
 
 // ============================================================================
@@ -4609,6 +4662,7 @@ function openEventInEditor(ev, dayISO){
   if(panelSub) panelSub.textContent = fmtPrettyISO(dayISO);
 
   populateFormFromSelected();
+  openMobileEditor();
   renderEventList();
   render();
 }
@@ -6337,6 +6391,9 @@ function fmtDayLabel(dt){
 }
 
 function updateViewModeButtons(){
+  document.body.dataset.calendarView = viewMode;
+  updateMobileCalendarStyleUI();
+
   monthViewBtn?.classList.toggle("active", viewMode === "month");
   weekViewBtn?.classList.toggle("active", viewMode === "week");
   dayViewBtn?.classList.toggle("active", viewMode === "day");
@@ -6508,7 +6565,11 @@ dayEl.addEventListener("drop", (e) => {
     const list = sortByTimeThenTitle(
       getCalendarEventsForDay(cellISO).filter(ev => !(ev?.span?.mode === "bg"))
     );
-    const maxShow = 3;
+
+    dayEl.classList.toggle("hasEvents", list.length > 0);
+    dayEl.dataset.eventCount = getEventPreviewCountText(list.length);
+
+    const maxShow = isMobileViewport() && getMobileCalendarStyle() === "compact" ? 0 : 3;
 
     for(let j=0; j<Math.min(maxShow, list.length); j++){
       const ev = list[j];
@@ -7164,6 +7225,7 @@ if(!opts.silent && isEditorCollapsed()){
   if(panelSub) panelSub.textContent = fmtPrettyISO(iso);
 
   clearFormForNew();
+  closeMobileEditor();
   renderEventList();
 
   syncStateFromLegacy();
@@ -7270,6 +7332,7 @@ categoryId,
   populateFormFromSelected();
   renderEventList();
   render();
+  closeMobileEditor();
 });
 
 function isOccurrenceContext(){
@@ -7367,6 +7430,7 @@ syncGatePrimary?.addEventListener("click", async () => {
 newEventBtn?.addEventListener("click", () => {
 if(isEditorCollapsed()) setEditorCollapsed(false);
   clearFormForNew();
+  openMobileEditor();
   renderEventList();
 });
 
