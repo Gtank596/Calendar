@@ -5827,3 +5827,42 @@ body[data-active-section="weather"] #calendarSubbar{
     width:100% !important;
   }
 }
+
+
+/* Day view must always win on mobile, even after month-view overrides */
+@media (max-width:760px){
+  body[data-calendar-view="day"] #calendarPage .calendar,
+  #calendarPage .calendar:has(.dayViewDay){
+    overflow:visible !important;
+  }
+
+  body[data-calendar-view="day"] #calendarPage .dow,
+  #calendarPage .dow:has(+ .grid .dayViewDay){
+    display:none !important;
+  }
+
+  body[data-calendar-view="day"] #calendarPage .grid,
+  #calendarPage .grid:has(.dayViewDay){
+    display:block !important;
+    grid-template-columns:none !important;
+    width:100% !important;
+    min-width:0 !important;
+    max-width:100% !important;
+  }
+
+  body[data-calendar-view="day"] #calendarPage .day.dayViewDay,
+  #calendarPage .day.dayViewDay{
+    width:100% !important;
+    min-width:0 !important;
+    max-width:100% !important;
+    height:auto !important;
+    min-height:1120px !important;
+    padding:14px 10px 18px !important;
+    overflow:visible !important;
+  }
+
+  body[data-calendar-view="day"] #calendarPage .day.dayViewDay .eventPill,
+  #calendarPage .day.dayViewDay .eventPill{
+    display:block !important;
+  }
+}
