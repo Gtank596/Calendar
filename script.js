@@ -1873,16 +1873,36 @@ function updateSectionSlider(){
 function setActiveSection(section){
   activeSection = section;
   localStorage.setItem("myCalendar_activeSection", activeSection);
+  document.body.dataset.activeSection = section;
 
   calendarSectionBtn?.classList.toggle("active", section === "calendar");
   budgetSectionBtn?.classList.toggle("active", section === "budget");
   weatherSectionBtn?.classList.toggle("active", section === "weather");
 
-  calendarPage?.classList.toggle("hidden", section !== "calendar");
-  budgetPage?.classList.toggle("hidden", section !== "budget");
-  weatherPage?.classList.toggle("hidden", section !== "weather");
+  const showCalendar = section === "calendar";
+  const showBudget = section === "budget";
+  const showWeather = section === "weather";
 
-  calendarSubbar?.classList.toggle("hidden", section !== "calendar");
+  calendarPage?.classList.toggle("hidden", !showCalendar);
+  budgetPage?.classList.toggle("hidden", !showBudget);
+  weatherPage?.classList.toggle("hidden", !showWeather);
+
+  if(calendarPage){
+    calendarPage.hidden = !showCalendar;
+    calendarPage.style.display = showCalendar ? "" : "none";
+  }
+
+  if(budgetPage){
+    budgetPage.hidden = !showBudget;
+    budgetPage.style.display = showBudget ? "" : "none";
+  }
+
+  if(weatherPage){
+    weatherPage.hidden = !showWeather;
+    weatherPage.style.display = showWeather ? "" : "none";
+  }
+
+  calendarSubbar?.classList.toggle("hidden", !showCalendar);
 
   if(section === "calendar"){
     render();
@@ -1893,15 +1913,14 @@ function setActiveSection(section){
     });
   }
 
-if(section === "budget"){
-  renderBudgetTransactionCategoryFilter();
-  renderBudgetPage();
-  requestAnimationFrame(updateBudgetSlider);
-}
+  if(section === "budget"){
+    renderBudgetTransactionCategoryFilter();
+    renderBudgetPage();
+    requestAnimationFrame(updateBudgetSlider);
+  }
 
   requestAnimationFrame(updateSectionSlider);
 }
-
 calendarSectionBtn?.addEventListener("click", () => setActiveSection("calendar"));
 budgetSectionBtn?.addEventListener("click", () => setActiveSection("budget"));
 weatherSectionBtn?.addEventListener("click", () => setActiveSection("weather"));

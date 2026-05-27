@@ -5359,3 +5359,14 @@ body.timeDraggingBody{
 .pageShell.hidden{
   display:none !important;
 }
+
+#calendarPage[hidden],
+#budgetPage[hidden],
+#weatherPage[hidden]{
+  display:none !important;
+}
+
+body[data-active-section="budget"] #calendarPage,
+body[data-active-section="weather"] #calendarPage{
+  display:none !important;
+}
