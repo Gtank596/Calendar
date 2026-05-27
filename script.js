@@ -3585,10 +3585,51 @@ const previousLabel = formatBudgetRangeShort(previousRange);
   `;
 }
 
+function formatShortDate(date){
+  return date.toLocaleDateString(undefined,{
+    month:"short",
+    day:"numeric"
+  });
+}
+
 function renderBudgetPage(){
   if(!budgetPage) return;
 
   const range = budgetRangeForMode();
+
+const rangeLabel = document.getElementById("budgetRangeLabel");
+
+if(rangeLabel){
+
+  if(window.innerWidth <= 760){
+
+    const start = ymdToDate(range.startISO);
+    const end = ymdToDate(range.endISO);
+
+    if(budgetViewMode === "week"){
+      rangeLabel.textContent =
+        `${formatShortDate(start)} – ${formatShortDate(end)}`;
+    }
+
+    else if(budgetViewMode === "month"){
+      rangeLabel.textContent =
+        start.toLocaleString("default", {
+          month:"long",
+          year:"numeric"
+        });
+    }
+
+    else if(budgetViewMode === "year"){
+      rangeLabel.textContent =
+        start.getFullYear();
+    }
+
+    rangeLabel.style.display = "block";
+
+  }else{
+    rangeLabel.style.display = "none";
+  }
+}
 
   if(budgetTxDate && !budgetTxDate.value){
     budgetTxDate.value = selectedDateISO || range.startISO;
