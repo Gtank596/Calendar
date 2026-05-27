@@ -322,6 +322,7 @@ function shouldDimPastEvents(){
 }
 
 function saveSettings(){
+  setAppState({ settings }, { render:false });
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   updateMobileCalendarStyleUI();
   setLocalPayload({ updatedAt: Date.now(), events });
@@ -1099,6 +1100,7 @@ function applyFullSavePayload(payload, opts = {}){
   localStorage.setItem("myCalendar_budgetViewMode", budgetViewMode);
 
   syncStateFromLegacy();
+  invalidateDerivedData("events");
   localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
 
   if(!opts.skipRender){
@@ -1924,8 +1926,7 @@ function updateSectionSlider(){
 }
 
 function setActiveSection(section){
-  activeSection = section;
-  localStorage.setItem("myCalendar_activeSection", activeSection);
+  setAppState({ activeSection: section }, { persistActiveSection: true });
   document.body.dataset.activeSection = section;
 
   calendarSectionBtn?.classList.toggle("active", section === "calendar");
@@ -1960,8 +1961,7 @@ document.querySelector(".calendar")?.classList.toggle("hidden", !showCalendar);
 document.querySelector(".panel")?.classList.toggle("hidden", !showCalendar);
 
   if(section === "calendar"){
-    render();
-    renderEventList();
+    queueRender({ calendar:true, eventList:true, sliders:true });
     requestAnimationFrame(() => {
       alignDowToGrid();
       updateViewSlider();
@@ -1969,9 +1969,7 @@ document.querySelector(".panel")?.classList.toggle("hidden", !showCalendar);
   }
 
   if(section === "budget"){
-    renderBudgetTransactionCategoryFilter();
-    renderBudgetPage();
-    requestAnimationFrame(updateBudgetSlider);
+    queueRender({ budgetFilters:true, budget:true, sliders:true });
   }
 
   requestAnimationFrame(updateSectionSlider);
@@ -2484,15 +2482,13 @@ budgetTxDrawerOpenBtn?.addEventListener("click", openBudgetTxDrawer);
 budgetTxDrawerCloseBtn?.addEventListener("click", closeBudgetTxDrawer);
 
 function setBudgetViewMode(mode){
-  budgetViewMode = mode;
-  localStorage.setItem("myCalendar_budgetViewMode", budgetViewMode);
+  setBudgetState({ budgetViewMode: mode }, { persistBudgetViewMode: true, render:false });
 
   budgetWeekBtn?.classList.toggle("active", mode === "week");
   budgetMonthBtn?.classList.toggle("active", mode === "month");
   budgetYearBtn?.classList.toggle("active", mode === "year");
 
-  renderBudgetPage();
-  requestAnimationFrame(updateBudgetSlider);
+  queueRender({ budget:true, sliders:true });
 }
 
 const BUDGET_PLANS_KEY = "myCalendarBudgetPlans_v1";
@@ -3229,7 +3225,7 @@ budgetCategoryModalBudgetWeek
 
 budgetAddCategoryBtn?.addEventListener("click", addBudgetCategory);
 
-function getBudgetItems(startISO, endISO){
+function computeBudgetItemsUncached(startISO, endISO){
   const items = [];
   const seen = new Set();
 
@@ -3269,6 +3265,23 @@ function getBudgetItems(startISO, endISO){
   }
 
   return items.sort((a,b) => a.date.localeCompare(b.date));
+}
+
+function getBudgetItems(startISO, endISO){
+  syncStateFromLegacy();
+
+  if(derivedCache.budgetItemsVersion !== state.meta.eventsVersion){
+    derivedCache.budgetItems.clear();
+    derivedCache.budgetItemsVersion = state.meta.eventsVersion;
+  }
+
+  const cacheKey = `${startISO}__${endISO}`;
+  const cached = derivedCache.budgetItems.get(cacheKey);
+  if(cached) return cached.map(item => ({ ...item }));
+
+  const fresh = computeBudgetItemsUncached(startISO, endISO);
+  derivedCache.budgetItems.set(cacheKey, fresh);
+  return fresh.map(item => ({ ...item }));
 }
 
 function groupBudgetItems(items, range){
@@ -3585,51 +3598,10 @@ const previousLabel = formatBudgetRangeShort(previousRange);
   `;
 }
 
-function formatShortDate(date){
-  return date.toLocaleDateString(undefined,{
-    month:"short",
-    day:"numeric"
-  });
-}
-
 function renderBudgetPage(){
   if(!budgetPage) return;
 
   const range = budgetRangeForMode();
-
-const rangeLabel = document.getElementById("budgetRangeLabel");
-
-if(rangeLabel){
-
-  if(window.innerWidth <= 760){
-
-    const start = ymdToDate(range.startISO);
-    const end = ymdToDate(range.endISO);
-
-    if(budgetViewMode === "week"){
-      rangeLabel.textContent =
-        `${formatShortDate(start)} – ${formatShortDate(end)}`;
-    }
-
-    else if(budgetViewMode === "month"){
-      rangeLabel.textContent =
-        start.toLocaleString("default", {
-          month:"long",
-          year:"numeric"
-        });
-    }
-
-    else if(budgetViewMode === "year"){
-      rangeLabel.textContent =
-        start.getFullYear();
-    }
-
-    rangeLabel.style.display = "block";
-
-  }else{
-    rangeLabel.style.display = "none";
-  }
-}
 
   if(budgetTxDate && !budgetTxDate.value){
     budgetTxDate.value = selectedDateISO || range.startISO;
@@ -5866,6 +5838,7 @@ function normalizeEventsMap(map){
 
 function saveEvents(previousEventsSnapshot = null){
   syncStateFromLegacy();
+  invalidateDerivedData("events");
 
   const snapshot = previousEventsSnapshot
     ? cloneEventsMap(previousEventsSnapshot)
@@ -6337,8 +6310,11 @@ let selectedEventId = null;
 let editBaseDateISO = null;
 
 // ============================================================================
-// 12B. STATE BRIDGE (legacy globals -> single state object)
+// 12B. APP STATE STORE + RENDER SCHEDULER
 // ============================================================================
+// State is the little command crystal of the app. Most of the older code still
+// reads legacy globals, so these bridge helpers keep the old functions alive
+// while giving new code one clear place to mutate app state.
 const state = {
   events,
   view,
@@ -6347,9 +6323,38 @@ const state = {
   selectedEventId,
   editBaseDateISO,
   settings,
+  activeSection,
+  budgetViewMode,
+  selectedBudgetPanes,
+  budgetPlans,
+  budgetCategories,
+  budgetTransactionFilter,
+  budgetTxEditState,
   ui: {
-    // reserved for future UI-only state (dragging, focus mode, etc.)
+    mobileEditorOpen: false,
+    quickSearchOpen: false
+  },
+  meta: {
+    eventsVersion: 0,
+    renderVersion: 0
   }
+};
+
+const renderQueue = {
+  scheduled: false,
+  calendar: false,
+  eventList: false,
+  budget: false,
+  budgetFilters: false,
+  budgetCategories: false,
+  sliders: false,
+  history: false,
+  section: false
+};
+
+const derivedCache = {
+  budgetItemsVersion: -1,
+  budgetItems: new Map()
 };
 
 function syncStateFromLegacy(){
@@ -6360,6 +6365,13 @@ function syncStateFromLegacy(){
   state.selectedEventId = selectedEventId;
   state.editBaseDateISO = editBaseDateISO;
   state.settings = settings;
+  state.activeSection = activeSection;
+  state.budgetViewMode = budgetViewMode;
+  state.selectedBudgetPanes = selectedBudgetPanes;
+  state.budgetPlans = budgetPlans;
+  state.budgetCategories = budgetCategories;
+  state.budgetTransactionFilter = budgetTransactionFilter;
+  state.budgetTxEditState = budgetTxEditState;
 }
 
 function syncLegacyFromState(){
@@ -6370,6 +6382,120 @@ function syncLegacyFromState(){
   selectedEventId = state.selectedEventId;
   editBaseDateISO = state.editBaseDateISO;
   settings = state.settings;
+  activeSection = state.activeSection;
+  budgetViewMode = state.budgetViewMode;
+  selectedBudgetPanes = state.selectedBudgetPanes;
+  budgetPlans = state.budgetPlans;
+  budgetCategories = state.budgetCategories;
+  budgetTransactionFilter = state.budgetTransactionFilter;
+  budgetTxEditState = state.budgetTxEditState;
+}
+
+function invalidateDerivedData(scope = "events"){
+  if(scope === "events" || scope === "budget"){
+    state.meta.eventsVersion += 1;
+    derivedCache.budgetItems.clear();
+    derivedCache.budgetItemsVersion = state.meta.eventsVersion;
+  }
+}
+
+function setAppState(patch = {}, options = {}){
+  Object.assign(state, patch);
+  syncLegacyFromState();
+
+  if(options.invalidate){
+    invalidateDerivedData(options.invalidate);
+  }
+
+  if(options.persistActiveSection && typeof state.activeSection === "string"){
+    localStorage.setItem("myCalendar_activeSection", state.activeSection);
+  }
+
+  if(options.persistBudgetViewMode && typeof state.budgetViewMode === "string"){
+    localStorage.setItem("myCalendar_budgetViewMode", state.budgetViewMode);
+  }
+
+  if(options.render){
+    queueRender(options.render);
+  }
+
+  return state;
+}
+
+function setCalendarState(patch = {}, options = {}){
+  return setAppState(patch, {
+    ...options,
+    render: options.render ?? { calendar:true, eventList:true, sliders:true }
+  });
+}
+
+function setBudgetState(patch = {}, options = {}){
+  return setAppState(patch, {
+    ...options,
+    render: options.render ?? { budget:true, sliders:true }
+  });
+}
+
+function queueRender(scope = {}){
+  if(scope === true || scope === "all"){
+    renderQueue.calendar = true;
+    renderQueue.eventList = true;
+    renderQueue.budget = true;
+    renderQueue.budgetFilters = true;
+    renderQueue.budgetCategories = true;
+    renderQueue.sliders = true;
+    renderQueue.history = true;
+  }else if(typeof scope === "string"){
+    renderQueue[scope] = true;
+  }else{
+    Object.assign(renderQueue, scope);
+  }
+
+  if(renderQueue.scheduled) return;
+
+  renderQueue.scheduled = true;
+  requestAnimationFrame(flushRenderQueue);
+}
+
+function flushRenderQueue(){
+  renderQueue.scheduled = false;
+  syncLegacyFromState();
+
+  const shouldRenderBudget =
+    renderQueue.budget &&
+    (!budgetPage || !budgetPage.hidden || activeSection === "budget");
+
+  if(renderQueue.calendar) render();
+  if(renderQueue.eventList) renderEventList();
+
+  if(renderQueue.budgetCategories){
+    renderBudgetCategoryOptions();
+    renderEventCategoryOptions();
+  }
+
+  if(renderQueue.budgetFilters) renderBudgetTransactionCategoryFilter();
+  if(shouldRenderBudget) renderBudgetPage();
+
+  if(renderQueue.sliders){
+    updateViewSlider();
+    updateBudgetSlider();
+    updateBudgetCashflowToggle();
+    updateSectionSlider();
+  }
+
+  if(renderQueue.history) updateHistoryUI();
+
+  renderQueue.calendar = false;
+  renderQueue.eventList = false;
+  renderQueue.budget = false;
+  renderQueue.budgetFilters = false;
+  renderQueue.budgetCategories = false;
+  renderQueue.sliders = false;
+  renderQueue.history = false;
+  renderQueue.section = false;
+
+  syncStateFromLegacy();
+  state.meta.renderVersion += 1;
 }
 
 
@@ -6444,6 +6570,7 @@ function updateViewModeButtons(){
 // 12C. RENDERING ENTRYPOINTS
 // ============================================================================
 function render(){
+  syncStateFromLegacy();
   if(!grid) return;
 
   updateViewModeButtons();
@@ -6608,16 +6735,9 @@ dayEl.addEventListener("drop", (e) => {
     );
 
     dayEl.classList.toggle("hasEvents", list.length > 0);
-dayEl.dataset.eventCount = getEventPreviewCountText(list.length);
+    dayEl.dataset.eventCount = getEventPreviewCountText(list.length);
 
-if(isMobileViewport() && getMobileCalendarStyle() === "compact" && list.length > 0){
-  const countBadge = document.createElement("span");
-  countBadge.className = "mobileEventCountBadge";
-  countBadge.textContent = getEventPreviewCountText(list.length);
-  dayEl.appendChild(countBadge);
-}
-
-const maxShow = isMobileViewport() && getMobileCalendarStyle() === "compact" ? 0 : 3;
+    const maxShow = isMobileViewport() && getMobileCalendarStyle() === "compact" ? 0 : 3;
 
     for(let j=0; j<Math.min(maxShow, list.length); j++){
       const ev = list[j];
@@ -7262,8 +7382,8 @@ renderEventCategoryOptions();
 }
 
 function selectDate(iso, opts={silent:false}){
-  selectedDateISO = iso;
-  if(viewMode === "week" || viewMode === "day") view = ymdToDate(iso);
+  const nextView = (viewMode === "week" || viewMode === "day") ? ymdToDate(iso) : view;
+  setCalendarState({ selectedDateISO: iso, view: nextView }, { render:false });
 // If the editor is collapsed, clicking a day should pop it back open.
 if(!opts.silent && isEditorCollapsed()){
   setEditorCollapsed(false);
@@ -7278,7 +7398,7 @@ if(!opts.silent && isEditorCollapsed()){
 
   syncStateFromLegacy();
 
-  if(!opts.silent) render();
+  if(!opts.silent) queueRender({ calendar:true });
 }
 
 addBtn?.addEventListener("click", () => {
@@ -7519,9 +7639,7 @@ prevBtn?.addEventListener("click", () => {
   } else {
     view.setDate(view.getDate() - 1);
   }
-  syncStateFromLegacy();
-  render();
-  renderEventList();
+  setCalendarState({ view }, { render:{ calendar:true, eventList:true, sliders:true } });
 });
 
 nextBtn?.addEventListener("click", () => {
@@ -7533,19 +7651,16 @@ nextBtn?.addEventListener("click", () => {
   } else {
     view.setDate(view.getDate() + 1);
   }
-  syncStateFromLegacy();
-  render();
-  renderEventList();
+  setCalendarState({ view }, { render:{ calendar:true, eventList:true, sliders:true } });
 });
 
 todayBtn?.addEventListener("click", () => {
   const t = new Date();
   if(viewMode === "month") view = new Date(t.getFullYear(), t.getMonth(), 1);
   else view = new Date(t.getFullYear(), t.getMonth(), t.getDate());
-  syncStateFromLegacy();
+  setCalendarState({ view }, { render:false });
   selectDate(isoDate(t.getFullYear(), t.getMonth()+1, t.getDate()));
-  render();
-  renderEventList();
+  queueRender({ calendar:true, eventList:true, sliders:true });
 });
 
 undoBtn?.addEventListener("click", () => {
@@ -7568,28 +7683,19 @@ monthViewBtn?.addEventListener("click", () => {
   } else {
     view.setDate(1);
   }
-  syncStateFromLegacy();
-  render();
-  renderEventList();
-  updateViewSlider();
+  setCalendarState({ viewMode, view }, { render:{ calendar:true, eventList:true, sliders:true } });
 });
 
 weekViewBtn?.addEventListener("click", () => {
   viewMode = "week";
   if(selectedDateISO) view = ymdToDate(selectedDateISO);
-  syncStateFromLegacy();
-  render();
-  renderEventList();
-  updateViewSlider();
+  setCalendarState({ viewMode, view }, { render:{ calendar:true, eventList:true, sliders:true } });
 });
 
 dayViewBtn?.addEventListener("click", () => {
   viewMode = "day";
   if(selectedDateISO) view = ymdToDate(selectedDateISO);
-  syncStateFromLegacy();
-  render();
-  renderEventList();
-  updateViewSlider();
+  setCalendarState({ viewMode, view }, { render:{ calendar:true, eventList:true, sliders:true } });
 });
 
 function isTypingTarget(el){
