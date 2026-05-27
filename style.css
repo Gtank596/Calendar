@@ -5484,21 +5484,266 @@ body[data-active-section="weather"] #calendarSubbar{
     min-width:1050px !important;
   }
 }
-
 /* =========================================================
-   MERGED MOBILE MONTH + SETTINGS + DAY VIEW SAFETY PATCH
+   MOBILE CALENDAR REDESIGN
    ---------------------------------------------------------
-   Keeps the restored compact/side-scroll month behavior and
-   bottom-sheet settings menu, while preserving the mobile day
-   view fix so the timeline does not get crushed into a sliver.
+   Default mobile mode is "Compact day list": the month grid
+   fits the phone, events live below, and the editor opens only
+   when + New or an event is tapped.
+
+   Optional setting: "Side-scroll month" preserves the wider
+   desktop-style month board inside a horizontal scroller.
    ========================================================= */
+@media (max-width: 760px){
+  html,
+  body{
+    max-width:100%;
+    overflow-x:hidden !important;
+  }
+
+  .topbar{
+    display:grid !important;
+    grid-template-columns:1fr auto !important;
+    align-items:start !important;
+    gap:10px !important;
+    padding:14px 12px 10px !important;
+  }
+
+  .topbar .controlsRight{
+    width:100% !important;
+    grid-column:1 / -1 !important;
+    display:grid !important;
+    grid-template-columns:1fr auto auto auto !important;
+    align-items:center !important;
+    gap:8px !important;
+  }
+
+  .topbar .sectionSwitcher{
+    grid-column:1 !important;
+    grid-row:1 !important;
+    width:100% !important;
+    min-width:0 !important;
+  }
+
+  #searchBtn,
+  #settingsBtn,
+  #accountBtn{
+    grid-row:1 !important;
+  }
+
+  .sectionBtn{
+    min-width:0 !important;
+    padding:0 8px !important;
+  }
+
+  .subbar{
+    width:100% !important;
+    max-width:100vw !important;
+    overflow-x:auto !important;
+    overflow-y:hidden !important;
+    padding:8px 10px !important;
+  }
+
+  .subbar .controlsCenter{
+    width:max-content !important;
+    min-width:max-content !important;
+  }
+
+  #calendarPage.layout{
+    display:flex !important;
+    flex-direction:column !important;
+    width:100% !important;
+    max-width:100vw !important;
+    padding:10px !important;
+    overflow:hidden !important;
+  }
+
+  #calendarPage .calendar,
+  #calendarPage .panel{
+    width:100% !important;
+    max-width:100% !important;
+    min-width:0 !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .calendar{
+    overflow:hidden !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .dow,
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .grid{
+    width:100% !important;
+    min-width:0 !important;
+    max-width:100% !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .grid{
+    grid-template-columns:repeat(7, minmax(0, 1fr)) !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .day:not(.dayViewDay){
+    position:relative !important;
+    min-width:0 !important;
+    width:auto !important;
+    height:52px !important;
+    min-height:52px !important;
+    padding:5px 4px !important;
+    overflow:hidden !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .dayHeader{
+    margin:0 !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .num{
+    font-size:12px !important;
+    line-height:1 !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .badge{
+    font-size:9px !important;
+    padding:1px 5px !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .eventPill,
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox,
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .suggestionPill{
+    display:none !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .day.hasEvents::after{
+    content:attr(data-event-count);
+    position:absolute;
+    right:5px;
+    bottom:5px;
+    min-width:13px;
+    height:13px;
+    padding:0 3px;
+    border-radius:999px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:8px;
+    font-weight:900;
+    color:rgba(233,236,255,.88);
+    background:rgba(126,96,255,.34);
+    border:1px solid rgba(160,135,255,.34);
+    box-shadow:0 0 12px rgba(122,90,255,.18);
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .today::before{
+    width:5px;
+    height:5px;
+    right:5px;
+    top:5px;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .panel{
+    margin-top:2px !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] .eventsList{
+    max-height:none !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] .editorSection{
+    display:none !important;
+    margin-top:12px !important;
+    padding-top:12px !important;
+    border-top:1px solid rgba(255,255,255,.08);
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"].mobileEditorOpen .editorSection{
+    display:block !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] .divider:has(+ .editorSection){
+    display:none !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"].mobileEditorOpen .divider:has(+ .editorSection){
+    display:block !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .calendar{
+    overflow-x:auto !important;
+    -webkit-overflow-scrolling:touch;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .dow,
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .grid{
+    min-width:760px !important;
+    width:760px !important;
+    max-width:none !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .day:not(.dayViewDay){
+    height:86px !important;
+    min-height:86px !important;
+  }
+}
+
+@media (max-width: 420px){
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .day:not(.dayViewDay){
+    height:48px !important;
+    min-height:48px !important;
+    padding:4px 3px !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .num{
+    font-size:11px !important;
+  }
+
+  .topbar .controlsRight{
+    gap:6px !important;
+  }
+
+  .sectionBtn{
+    font-size:11px !important;
+    padding:0 5px !important;
+  }
+}
+
+@media (max-width: 760px){
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] .editorSection{
+    display:block !important;
+    margin-top:12px !important;
+    padding-top:12px !important;
+    border-top:1px solid rgba(255,255,255,.08);
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] .editorSection > *{
+    display:none !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] .editorSection > .label:first-of-type,
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] .editorSection > .quickAddRow{
+    display:grid !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] .editorSection > .label:first-of-type{
+    display:block !important;
+    margin-top:0 !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"].mobileEditorOpen .editorSection > *{
+    display:revert !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"].mobileEditorOpen .timeGrid,
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"].mobileEditorOpen .calendarBudgetGrid{
+    display:grid !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"].mobileEditorOpen .row,
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"].mobileEditorOpen .quickAddRow{
+    display:flex !important;
+  }
+}
 
 /* Mobile side-scroll mode should show month event pills */
 @media (max-width:760px){
   body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .calendar{
     overflow-x:auto !important;
-    overflow-y:hidden !important;
-    -webkit-overflow-scrolling:touch;
   }
 
   body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .dow,
@@ -5506,10 +5751,6 @@ body[data-active-section="weather"] #calendarSubbar{
     width:max-content !important;
     min-width:980px !important;
     max-width:none !important;
-  }
-
-  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .grid{
-    grid-template-columns:repeat(7, 140px) !important;
   }
 
   body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .day:not(.dayViewDay){
@@ -5538,7 +5779,13 @@ body[data-active-section="weather"] #calendarSubbar{
   }
 }
 
-/* Mobile settings menu becomes a bottom sheet */
+/* =========================================================
+   MOBILE SETTINGS SHEET FIX
+   ---------------------------------------------------------
+   On phones, the sticky topbar/subbar can sit above the
+   settings menu. Treat settings like a bottom sheet so it
+   never gets trapped under the navigation chrome.
+   ========================================================= */
 @media (max-width:760px){
   .settingsMenu{
     position:fixed !important;
@@ -5578,43 +5825,5 @@ body[data-active-section="weather"] #calendarSubbar{
   .settingsMenu .input,
   .settingsMenu select.input{
     width:100% !important;
-  }
-}
-
-/* Day view must always win on mobile, even after month-view overrides */
-@media (max-width:760px){
-  body[data-calendar-view="day"] #calendarPage .calendar,
-  #calendarPage .calendar:has(.dayViewDay){
-    overflow:visible !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .dow,
-  #calendarPage .dow:has(+ .grid .dayViewDay){
-    display:none !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .grid,
-  #calendarPage .grid:has(.dayViewDay){
-    display:block !important;
-    grid-template-columns:none !important;
-    width:100% !important;
-    min-width:0 !important;
-    max-width:100% !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .day.dayViewDay,
-  #calendarPage .day.dayViewDay{
-    width:100% !important;
-    min-width:0 !important;
-    max-width:100% !important;
-    height:auto !important;
-    min-height:1120px !important;
-    padding:14px 10px 18px !important;
-    overflow:visible !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .day.dayViewDay .eventPill,
-  #calendarPage .day.dayViewDay .eventPill{
-    display:block !important;
   }
 }
