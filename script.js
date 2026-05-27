@@ -3603,6 +3603,8 @@ function renderBudgetPage(){
 
   const range = budgetRangeForMode();
 
+  updateBudgetRangeLabel(range);
+
   if(budgetTxDate && !budgetTxDate.value){
     budgetTxDate.value = selectedDateISO || range.startISO;
   }
@@ -3847,6 +3849,39 @@ function moveBudgetPeriod(direction){
   monthLabel.textContent = fmtMonthYear(view);
 
   renderBudgetPage();
+}
+
+function formatShortDate(date){
+  return date.toLocaleDateString(undefined,{
+    month:"short",
+    day:"numeric"
+  });
+}
+
+function updateBudgetRangeLabel(range){
+  const rangeLabel = document.getElementById("budgetRangeLabel");
+  if(!rangeLabel || !range) return;
+
+  if(window.innerWidth > 760){
+    rangeLabel.style.display = "none";
+    return;
+  }
+
+  const start = ymdToDate(range.startISO);
+  const end = ymdToDate(range.endISO);
+
+  if(budgetViewMode === "week"){
+    rangeLabel.textContent = `${formatShortDate(start)} – ${formatShortDate(end)}`;
+  }else if(budgetViewMode === "month"){
+    rangeLabel.textContent = start.toLocaleString("default", {
+      month:"long",
+      year:"numeric"
+    });
+  }else if(budgetViewMode === "year"){
+    rangeLabel.textContent = String(start.getFullYear());
+  }
+
+  rangeLabel.style.display = "block";
 }
 
 function deleteBudgetTransaction(eventId, date, opts = {}){
@@ -6735,9 +6770,16 @@ dayEl.addEventListener("drop", (e) => {
     );
 
     dayEl.classList.toggle("hasEvents", list.length > 0);
-    dayEl.dataset.eventCount = getEventPreviewCountText(list.length);
+dayEl.dataset.eventCount = getEventPreviewCountText(list.length);
 
-    const maxShow = isMobileViewport() && getMobileCalendarStyle() === "compact" ? 0 : 3;
+if(isMobileViewport() && getMobileCalendarStyle() === "compact" && list.length > 0){
+  const countBadge = document.createElement("span");
+  countBadge.className = "mobileEventCountBadge";
+  countBadge.textContent = getEventPreviewCountText(list.length);
+  dayEl.appendChild(countBadge);
+}
+
+const maxShow = isMobileViewport() && getMobileCalendarStyle() === "compact" ? 0 : 3;
 
     for(let j=0; j<Math.min(maxShow, list.length); j++){
       const ev = list[j];
