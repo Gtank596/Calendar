@@ -1,4 +1,4 @@
-const CACHE_NAME = "my-calendar-pwa-v1";
+const CACHE_NAME = "my-calendar-pwa-v2";
 
 const APP_SHELL = [
   "./",
@@ -37,10 +37,20 @@ self.addEventListener("fetch", event => {
 
   const url = new URL(request.url);
 
-  // Keep API/CDN requests network-first so Supabase and weather stay fresh.
+  // Keep API requests network-first so Supabase and weather stay fresh.
+  // CDN scripts are also cached after first successful load so the installed app
+  // can still boot while offline.
   if (url.origin !== self.location.origin) {
     event.respondWith(
-      fetch(request).catch(() => caches.match(request))
+      fetch(request)
+        .then(response => {
+          if (response && response.status === 200) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then(cache => cache.put(request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
     );
     return;
   }

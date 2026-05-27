@@ -719,11 +719,47 @@ const SUPABASE_URL = "https://ddxiumutfrimgjzzbhus.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_Icp1pf88iW1t5TUnmVqb6Q_bXSRI9e_";
 const CLOUD_ROW_ID = "main";
 const CLOUD_TABLE = "calendar_cloud_state";
+const CLOUD_PENDING_KEY = "myCalendarCloudPending_v1";
+const CLOUD_LAST_SYNC_KEY = "myCalendarCloudLastSync_v1";
 
 let supabaseClient = null;
 let cloudUser = null;
 let cloudWriteTimer = null;
 let cloudBusy = false;
+let cloudFlushInProgress = false;
+
+function getCloudPending(){
+  try{
+    return JSON.parse(localStorage.getItem(CLOUD_PENDING_KEY)) || null;
+  }catch{
+    return null;
+  }
+}
+
+function isCloudPending(){
+  return !!getCloudPending();
+}
+
+function markCloudPending(reason = "local change"){
+  const local = getLocalPayload?.() || {};
+
+  localStorage.setItem(CLOUD_PENDING_KEY, JSON.stringify({
+    reason,
+    updatedAt: Number(local.updatedAt || Date.now()),
+    markedAt: Date.now()
+  }));
+}
+
+function clearCloudPending(){
+  localStorage.removeItem(CLOUD_PENDING_KEY);
+  localStorage.setItem(CLOUD_LAST_SYNC_KEY, String(Date.now()));
+}
+
+function getCloudSyncLabel(){
+  if(!cloudUser) return "Cloud: Not signed in";
+  if(isCloudPending()) return "Cloud: Pending sync";
+  return `Cloud: Signed in as ${cloudUser.email || "user"}`;
+}
 
 function openAccountModal(){
   accountModal?.classList.remove("hidden");
@@ -818,11 +854,7 @@ function updateCloudUI(){
 
   if(cloudBusy) return;
 
-  setCloudStatus(
-    signedIn
-      ? `Cloud: Signed in as ${cloudUser.email || "user"}`
-      : "Cloud: Not signed in"
-  );
+  setCloudStatus(getCloudSyncLabel());
 }
 
 async function initCloudSync(){
@@ -841,14 +873,14 @@ async function initCloudSync(){
     updateCloudUI();
 
     if(cloudUser){
-      pullCloudIfNewer().catch(console.error);
+      tryFlushPendingCloudSync("auth change").catch(console.error);
     }
   });
 
   updateCloudUI();
 
   if(cloudUser){
-    await pullCloudIfNewer();
+    await tryFlushPendingCloudSync("startup");
   }
 }
 
@@ -964,9 +996,19 @@ async function readCloudState(){
 }
 
 async function writeCloudStateNow(){
-  if(!supabaseClient || !cloudUser) return;
+  if(!supabaseClient || !cloudUser){
+    markCloudPending("not signed in");
+    updateCloudUI();
+    return false;
+  }
 
-  const payload = buildFullSavePayload({ updatedAt: Date.now(), events });
+  if(typeof navigator !== "undefined" && navigator.onLine === false){
+    markCloudPending("offline");
+    setCloudStatus("Cloud: Offline, saved locally");
+    return false;
+  }
+
+  const payload = buildFullSavePayload(getLocalPayload());
 
   const { error } = await supabaseClient
     .from(CLOUD_TABLE)
@@ -974,24 +1016,71 @@ async function writeCloudStateNow(){
       id: CLOUD_ROW_ID,
       user_id: cloudUser.id,
       payload,
-      updated_at: new Date(payload.updatedAt).toISOString()
+      updated_at: new Date(payload.updatedAt || Date.now()).toISOString()
     }, { onConflict: "id" });
 
   if(error){
-    setCloudStatus("Cloud save failed: " + error.message);
-    return;
+    markCloudPending("cloud save failed");
+    setCloudStatus("Cloud save failed, will retry: " + error.message);
+    return false;
   }
 
-  setCloudStatus(`Cloud: Saved ${new Date(payload.updatedAt).toLocaleString()}`);
+  clearCloudPending();
+  setCloudStatus(`Cloud: Synced ${new Date(payload.updatedAt || Date.now()).toLocaleString()}`);
+  updateCloudUI();
+  return true;
 }
 
 function cloudWriteDebounced(){
+  markCloudPending("local change");
+  updateCloudUI();
+
   if(!cloudUser) return;
 
   clearTimeout(cloudWriteTimer);
   cloudWriteTimer = setTimeout(() => {
-    writeCloudStateNow().catch(console.error);
+    tryFlushPendingCloudSync("debounced write").catch(console.error);
   }, 900);
+}
+
+async function tryFlushPendingCloudSync(reason = "sync"){
+  if(cloudFlushInProgress) return false;
+  if(!supabaseClient || !cloudUser){
+    updateCloudUI();
+    return false;
+  }
+
+  if(typeof navigator !== "undefined" && navigator.onLine === false){
+    if(isCloudPending()) setCloudStatus("Cloud: Offline, sync pending");
+    return false;
+  }
+
+  cloudFlushInProgress = true;
+
+  try{
+    const pending = getCloudPending();
+
+    if(pending){
+      const cloud = await readCloudState();
+      const local = getLocalPayload();
+      const cloudTime = Number(cloud?.updatedAt || 0);
+      const localTime = Number(local?.updatedAt || 0);
+
+      if(cloud && cloudTime > localTime){
+        setCloudStatus("Cloud: Sync paused, cloud has newer changes. Use Push or Pull.");
+        return false;
+      }
+
+      setCloudStatus("Cloud: Syncing pending changes...");
+      return await writeCloudStateNow();
+    }
+
+    await pullCloudIfNewer();
+    return true;
+  }finally{
+    cloudFlushInProgress = false;
+    updateCloudUI();
+  }
 }
 
 async function pullCloudIfNewer(){
@@ -1000,17 +1089,43 @@ async function pullCloudIfNewer(){
 
   const local = getLocalPayload();
 
+  if(isCloudPending() && Number(local.updatedAt || 0) >= Number(cloud.updatedAt || 0)){
+    await writeCloudStateNow();
+    return;
+  }
+
   if(Number(cloud.updatedAt || 0) > Number(local.updatedAt || 0)){
     applyFullSavePayload(cloud);
+    clearCloudPending();
     setCloudStatus(`Cloud: Pulled ${new Date(cloud.updatedAt).toLocaleString()}`);
   }else{
-    setCloudStatus("Cloud: Local copy is current");
+    setCloudStatus(isCloudPending() ? "Cloud: Pending sync" : "Cloud: Local copy is current");
   }
 }
 
 async function pushLocalToCloud(){
+  markCloudPending("manual push");
   await writeCloudStateNow();
 }
+
+window.addEventListener("online", () => {
+  if(isCloudPending()){
+    setCloudStatus("Cloud: Back online, syncing...");
+    tryFlushPendingCloudSync("online").catch(console.error);
+  }
+});
+
+window.addEventListener("offline", () => {
+  if(isCloudPending()){
+    setCloudStatus("Cloud: Offline, sync pending");
+  }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if(document.visibilityState === "visible" && isCloudPending()){
+    tryFlushPendingCloudSync("visible").catch(console.error);
+  }
+});
 
 cloudSignupBtn?.addEventListener("click", () => signupCloud().catch(console.error));
 cloudLoginBtn?.addEventListener("click", () => loginCloud().catch(console.error));
@@ -1116,9 +1231,13 @@ function applyFullSavePayload(payload, opts = {}){
   }
 }
 
-function setLocalPayload(payload){
+function setLocalPayload(payload, opts = {}){
   const safe = buildFullSavePayload(payload);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
+
+  if(!opts.skipCloudPending){
+    markCloudPending("local save");
+  }
 }
 
 function timeToMinutes(t){
@@ -3603,8 +3722,6 @@ function renderBudgetPage(){
 
   const range = budgetRangeForMode();
 
-  updateBudgetRangeLabel(range);
-
   if(budgetTxDate && !budgetTxDate.value){
     budgetTxDate.value = selectedDateISO || range.startISO;
   }
@@ -3849,39 +3966,6 @@ function moveBudgetPeriod(direction){
   monthLabel.textContent = fmtMonthYear(view);
 
   renderBudgetPage();
-}
-
-function formatShortDate(date){
-  return date.toLocaleDateString(undefined,{
-    month:"short",
-    day:"numeric"
-  });
-}
-
-function updateBudgetRangeLabel(range){
-  const rangeLabel = document.getElementById("budgetRangeLabel");
-  if(!rangeLabel || !range) return;
-
-  if(window.innerWidth > 760){
-    rangeLabel.style.display = "none";
-    return;
-  }
-
-  const start = ymdToDate(range.startISO);
-  const end = ymdToDate(range.endISO);
-
-  if(budgetViewMode === "week"){
-    rangeLabel.textContent = `${formatShortDate(start)} – ${formatShortDate(end)}`;
-  }else if(budgetViewMode === "month"){
-    rangeLabel.textContent = start.toLocaleString("default", {
-      month:"long",
-      year:"numeric"
-    });
-  }else if(budgetViewMode === "year"){
-    rangeLabel.textContent = String(start.getFullYear());
-  }
-
-  rangeLabel.style.display = "block";
 }
 
 function deleteBudgetTransaction(eventId, date, opts = {}){
@@ -6770,16 +6854,9 @@ dayEl.addEventListener("drop", (e) => {
     );
 
     dayEl.classList.toggle("hasEvents", list.length > 0);
-dayEl.dataset.eventCount = getEventPreviewCountText(list.length);
+    dayEl.dataset.eventCount = getEventPreviewCountText(list.length);
 
-if(isMobileViewport() && getMobileCalendarStyle() === "compact" && list.length > 0){
-  const countBadge = document.createElement("span");
-  countBadge.className = "mobileEventCountBadge";
-  countBadge.textContent = getEventPreviewCountText(list.length);
-  dayEl.appendChild(countBadge);
-}
-
-const maxShow = isMobileViewport() && getMobileCalendarStyle() === "compact" ? 0 : 3;
+    const maxShow = isMobileViewport() && getMobileCalendarStyle() === "compact" ? 0 : 3;
 
     for(let j=0; j<Math.min(maxShow, list.length); j++){
       const ev = list[j];
@@ -8639,6 +8716,12 @@ if(deleteBtn) deleteBtn.disabled = true;
 try{
 setEditorCollapsed(isEditorCollapsed());
 setSyncUI();
+if("serviceWorker" in navigator){
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./service-worker.js").catch(console.error);
+  });
+}
+
 initCloudSync();
 tryAutoReconnect();
   render();
