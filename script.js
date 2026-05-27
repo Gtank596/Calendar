@@ -8571,6 +8571,16 @@ document.addEventListener("keydown", (e) => {
 
 
 window.addEventListener("resize", () => alignDowToGrid());
+// Prevent mobile pinch/double-tap zoom from triggering resize chaos
+document.addEventListener("gesturestart", e => e.preventDefault(), { passive:false });
+document.addEventListener("gesturechange", e => e.preventDefault(), { passive:false });
+document.addEventListener("gestureend", e => e.preventDefault(), { passive:false });
+
+document.addEventListener("touchmove", e => {
+  if(e.touches && e.touches.length > 1){
+    e.preventDefault();
+  }
+}, { passive:false });
 
 // ============================================================================
 // 16B. INIT

@@ -6024,3 +6024,9 @@ body[data-active-section="weather"] #calendarSubbar{
   }
 
 }
+
+html,
+body{
+  touch-action: manipulation;
+  overscroll-behavior: none;
+}
