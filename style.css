@@ -5381,3 +5381,70 @@ body[data-active-section="budget"] #calendarSubbar,
 body[data-active-section="weather"] #calendarSubbar{
   display:none !important;
 }
+
+/* Mobile month calendar: fixed phone-sized board */
+@media (max-width: 700px){
+  body{
+    overflow-x:hidden;
+  }
+
+  #calendarPage{
+    padding:10px 8px !important;
+    overflow:hidden !important;
+  }
+
+  #calendarPage .calendar{
+    width:100% !important;
+    max-width:100% !important;
+    overflow:hidden !important;
+    border-radius:18px !important;
+  }
+
+  #calendarPage .dow,
+  #calendarPage .grid{
+    width:100% !important;
+    min-width:0 !important;
+    max-width:100% !important;
+  }
+
+  #calendarPage .grid{
+    grid-template-columns:repeat(7, minmax(0, 1fr)) !important;
+  }
+
+  #calendarPage .day:not(.dayViewDay){
+    min-height:58px !important;
+    height:58px !important;
+    padding:5px 4px !important;
+    overflow:hidden !important;
+  }
+
+  #calendarPage .num{
+    font-size:11px !important;
+  }
+
+  #calendarPage .badge{
+    font-size:8px !important;
+    padding:1px 5px !important;
+  }
+
+  #calendarPage .day:not(.dayViewDay) .eventPill{
+    margin-top:3px !important;
+    height:14px !important;
+    padding:1px 4px !important;
+    border-radius:999px !important;
+  }
+
+  #calendarPage .day:not(.dayViewDay) .pillTitle{
+    font-size:9px !important;
+    line-height:1 !important;
+  }
+
+  #calendarPage .day:not(.dayViewDay) .pillTime,
+  #calendarPage .day:not(.dayViewDay) .pillDetails{
+    display:none !important;
+  }
+
+  #calendarPage .panel{
+    margin-top:10px;
+  }
+}
