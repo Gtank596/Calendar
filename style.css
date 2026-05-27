@@ -5739,3 +5739,42 @@ body[data-active-section="weather"] #calendarSubbar{
     display:flex !important;
   }
 }
+
+/* Mobile side-scroll mode should show month event pills */
+@media (max-width:760px){
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .calendar{
+    overflow-x:auto !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .dow,
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .grid{
+    width:max-content !important;
+    min-width:980px !important;
+    max-width:none !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .day:not(.dayViewDay){
+    width:140px !important;
+    min-width:140px !important;
+    height:118px !important;
+    min-height:118px !important;
+    padding:8px !important;
+    overflow:hidden !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .eventPill{
+    display:block !important;
+    height:auto !important;
+    min-height:20px !important;
+    margin-top:5px !important;
+    padding:4px 6px !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .tripBox{
+    display:block !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .pillTitle{
+    font-size:11px !important;
+  }
+}
