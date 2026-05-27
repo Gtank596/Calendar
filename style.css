@@ -5350,3 +5350,12 @@ body.timeDraggingBody{
     grid-template-columns:62px 1fr 60px;
   }
 }
+
+/* Force app section hiding to win, especially on mobile */
+#calendarPage.hidden,
+#budgetPage.hidden,
+#weatherPage.hidden,
+.layout.hidden,
+.pageShell.hidden{
+  display:none !important;
+}
