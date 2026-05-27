@@ -1903,6 +1903,8 @@ function setActiveSection(section){
   }
 
   calendarSubbar?.classList.toggle("hidden", !showCalendar);
+document.querySelector(".calendar")?.classList.toggle("hidden", !showCalendar);
+document.querySelector(".panel")?.classList.toggle("hidden", !showCalendar);
 
   if(section === "calendar"){
     render();

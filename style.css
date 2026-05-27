@@ -5370,3 +5370,14 @@ body[data-active-section="budget"] #calendarPage,
 body[data-active-section="weather"] #calendarPage{
   display:none !important;
 }
+
+body[data-active-section="budget"] #calendarPage,
+body[data-active-section="weather"] #calendarPage,
+body[data-active-section="budget"] .calendar,
+body[data-active-section="weather"] .calendar,
+body[data-active-section="budget"] .panel,
+body[data-active-section="weather"] .panel,
+body[data-active-section="budget"] #calendarSubbar,
+body[data-active-section="weather"] #calendarSubbar{
+  display:none !important;
+}
