@@ -6567,9 +6567,16 @@ dayEl.addEventListener("drop", (e) => {
     );
 
     dayEl.classList.toggle("hasEvents", list.length > 0);
-    dayEl.dataset.eventCount = getEventPreviewCountText(list.length);
+dayEl.dataset.eventCount = getEventPreviewCountText(list.length);
 
-    const maxShow = isMobileViewport() && getMobileCalendarStyle() === "compact" ? 0 : 3;
+if(isMobileViewport() && getMobileCalendarStyle() === "compact" && list.length > 0){
+  const countBadge = document.createElement("span");
+  countBadge.className = "mobileEventCountBadge";
+  countBadge.textContent = getEventPreviewCountText(list.length);
+  dayEl.appendChild(countBadge);
+}
+
+const maxShow = isMobileViewport() && getMobileCalendarStyle() === "compact" ? 0 : 3;
 
     for(let j=0; j<Math.min(maxShow, list.length); j++){
       const ev = list[j];

@@ -5866,3 +5866,43 @@ body[data-active-section="weather"] #calendarSubbar{
     display:block !important;
   }
 }
+
+@media (max-width: 700px){
+
+  .day:not(.dayViewDay){
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+  }
+
+  .day:not(.dayViewDay) .eventPill{
+    position: relative;
+    z-index: 2;
+  }
+
+}
+
+@media (max-width:760px){
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .day.hasEvents::after{
+    display:none !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .mobileEventCountBadge{
+    position:absolute;
+    right:5px;
+    bottom:5px;
+    min-width:13px;
+    height:13px;
+    padding:0 3px;
+    border-radius:999px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:8px;
+    font-weight:900;
+    color:rgba(233,236,255,.88);
+    background:rgba(126,96,255,.34);
+    border:1px solid rgba(160,135,255,.34);
+    box-shadow:0 0 12px rgba(122,90,255,.18);
+    pointer-events:none;
+  }
+}
