@@ -5486,129 +5486,135 @@ body[data-active-section="weather"] #calendarSubbar{
 }
 
 /* =========================================================
-   MOBILE DAY VIEW RESCUE
+   MERGED MOBILE MONTH + SETTINGS + DAY VIEW SAFETY PATCH
    ---------------------------------------------------------
-   Earlier mobile month rules were too broad and forced every
-   calendar grid into 7 columns. Day view only has one cell, so
-   it was getting squeezed into the first column like a tiny
-   lighthouse in a storm. These rules re-expand day view.
+   Keeps the restored compact/side-scroll month behavior and
+   bottom-sheet settings menu, while preserving the mobile day
+   view fix so the timeline does not get crushed into a sliver.
    ========================================================= */
+
+/* Mobile side-scroll mode should show month event pills */
 @media (max-width:760px){
-  body[data-calendar-view="day"] #calendarPage .calendar{
-    overflow:hidden !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .dow{
-    display:none !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .grid{
-    display:block !important;
-    grid-template-columns:1fr !important;
-    width:100% !important;
-    min-width:0 !important;
-    max-width:100% !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .day.dayViewDay{
-    width:100% !important;
-    max-width:100% !important;
-    min-width:0 !important;
-    min-height:1120px !important;
-    height:auto !important;
-    padding:14px 12px 18px !important;
-    overflow:hidden !important;
-    border-right:none !important;
-    --timeline-top:150px;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .day.dayViewDay.weatherOn{
-    --timeline-top:210px;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .dayViewHeaderWrap{
-    display:grid !important;
-    grid-template-columns:1fr !important;
-    gap:12px !important;
-    margin:0 0 14px !important;
-    padding-bottom:12px !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .dayViewHeader{
-    font-size:24px !important;
-    line-height:1.08 !important;
-    max-width:100% !important;
-    word-break:normal !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .dayViewWeekJumper{
-    width:100% !important;
-    justify-content:flex-start !important;
-    gap:6px !important;
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .calendar{
     overflow-x:auto !important;
-    padding-bottom:2px !important;
+    overflow-y:hidden !important;
     -webkit-overflow-scrolling:touch;
   }
 
-  body[data-calendar-view="day"] #calendarPage .dayViewWeekdayRow{
-    gap:6px !important;
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .dow,
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .grid{
+    width:max-content !important;
+    min-width:980px !important;
+    max-width:none !important;
   }
 
-  body[data-calendar-view="day"] #calendarPage .dayViewWeekNavBtn{
-    width:32px !important;
-    height:32px !important;
-    flex:0 0 32px !important;
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .grid{
+    grid-template-columns:repeat(7, 140px) !important;
   }
 
-  body[data-calendar-view="day"] #calendarPage .dayViewWeekdayBtn{
-    width:32px !important;
-    height:32px !important;
-    flex:0 0 32px !important;
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .day:not(.dayViewDay){
+    width:140px !important;
+    min-width:140px !important;
+    height:118px !important;
+    min-height:118px !important;
+    padding:8px !important;
+    overflow:hidden !important;
   }
 
-  body[data-calendar-view="day"] #calendarPage .weatherHourlyStrip{
-    margin:0 0 12px !important;
-    height:58px !important;
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .eventPill{
+    display:block !important;
+    height:auto !important;
+    min-height:20px !important;
+    margin-top:5px !important;
+    padding:4px 6px !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .tripBox{
+    display:block !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="scroll"] #calendarPage .pillTitle{
+    font-size:11px !important;
+  }
+}
+
+/* Mobile settings menu becomes a bottom sheet */
+@media (max-width:760px){
+  .settingsMenu{
+    position:fixed !important;
+    left:12px !important;
+    right:12px !important;
+    top:auto !important;
+    bottom:calc(12px + env(safe-area-inset-bottom, 0px)) !important;
+    width:auto !important;
+    max-width:none !important;
+    max-height:min(72dvh, 620px) !important;
+    overflow-y:auto !important;
+    overflow-x:hidden !important;
+    z-index:8000 !important;
+
+    border-radius:24px !important;
+    padding:16px !important;
+    background:
+      radial-gradient(520px 260px at 20% 0%, rgba(120,90,255,.20), transparent 62%),
+      rgba(15,20,38,.98) !important;
+    border:1px solid rgba(255,255,255,.14) !important;
+    box-shadow:
+      0 28px 80px rgba(0,0,0,.56),
+      inset 0 1px 0 rgba(255,255,255,.06) !important;
+    backdrop-filter:blur(18px) !important;
+  }
+
+  .settingsMenu::before{
+    content:"";
+    display:block;
+    width:42px;
+    height:4px;
+    margin:0 auto 14px;
+    border-radius:999px;
+    background:rgba(233,236,255,.28);
+  }
+
+  .settingsMenu .input,
+  .settingsMenu select.input{
     width:100% !important;
+  }
+}
+
+/* Day view must always win on mobile, even after month-view overrides */
+@media (max-width:760px){
+  body[data-calendar-view="day"] #calendarPage .calendar,
+  #calendarPage .calendar:has(.dayViewDay){
+    overflow:visible !important;
+  }
+
+  body[data-calendar-view="day"] #calendarPage .dow,
+  #calendarPage .dow:has(+ .grid .dayViewDay){
+    display:none !important;
+  }
+
+  body[data-calendar-view="day"] #calendarPage .grid,
+  #calendarPage .grid:has(.dayViewDay){
+    display:block !important;
+    grid-template-columns:none !important;
+    width:100% !important;
+    min-width:0 !important;
     max-width:100% !important;
   }
 
-  body[data-calendar-view="day"] #calendarPage .dayHourGrid,
-  body[data-calendar-view="day"] #calendarPage .nowLine,
-  body[data-calendar-view="day"] #calendarPage .dayEmptyState{
-    left:58px !important;
-    right:10px !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .dayTimeRail{
-    left:10px !important;
-    width:42px !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .nowDot{
-    left:52px !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .dayTimeMark{
-    font-size:10px !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .day.dayViewDay .eventPill{
-    left:auto !important;
-    right:auto !important;
-    max-width:calc(100% - 68px) !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .day.dayViewDay .pillTopRow{
+  body[data-calendar-view="day"] #calendarPage .day.dayViewDay,
+  #calendarPage .day.dayViewDay{
     width:100% !important;
+    min-width:0 !important;
     max-width:100% !important;
+    height:auto !important;
+    min-height:1120px !important;
+    padding:14px 10px 18px !important;
+    overflow:visible !important;
   }
 
-  body[data-calendar-view="day"] #calendarPage .day.dayViewDay .pillTitle{
-    font-size:13px !important;
-  }
-
-  body[data-calendar-view="day"] #calendarPage .day.dayViewDay .pillTime{
-    font-size:10px !important;
+  body[data-calendar-view="day"] #calendarPage .day.dayViewDay .eventPill,
+  #calendarPage .day.dayViewDay .eventPill{
+    display:block !important;
   }
 }
