@@ -3717,10 +3717,46 @@ const previousLabel = formatBudgetRangeShort(previousRange);
   `;
 }
 
+
+function formatShortDate(date){
+  return date.toLocaleDateString(undefined,{
+    month:"short",
+    day:"numeric"
+  });
+}
+
+function updateBudgetRangeLabel(range){
+  const rangeLabel = document.getElementById("budgetRangeLabel");
+  if(!rangeLabel || !range) return;
+
+  if(window.innerWidth > 760){
+    rangeLabel.style.display = "none";
+    return;
+  }
+
+  const start = ymdToDate(range.startISO);
+  const end = ymdToDate(range.endISO);
+
+  if(budgetViewMode === "week"){
+    rangeLabel.textContent = `${formatShortDate(start)} – ${formatShortDate(end)}`;
+  }else if(budgetViewMode === "month"){
+    rangeLabel.textContent = start.toLocaleString("default", {
+      month:"long",
+      year:"numeric"
+    });
+  }else if(budgetViewMode === "year"){
+    rangeLabel.textContent = String(start.getFullYear());
+  }
+
+  rangeLabel.style.display = "block";
+}
+
 function renderBudgetPage(){
   if(!budgetPage) return;
 
   const range = budgetRangeForMode();
+
+  updateBudgetRangeLabel(range);
 
   if(budgetTxDate && !budgetTxDate.value){
     budgetTxDate.value = selectedDateISO || range.startISO;
@@ -6855,6 +6891,13 @@ dayEl.addEventListener("drop", (e) => {
 
     dayEl.classList.toggle("hasEvents", list.length > 0);
     dayEl.dataset.eventCount = getEventPreviewCountText(list.length);
+
+    if(isMobileViewport() && getMobileCalendarStyle() === "compact" && list.length > 0){
+      const countBadge = document.createElement("span");
+      countBadge.className = "mobileEventCountBadge";
+      countBadge.textContent = getEventPreviewCountText(list.length);
+      dayEl.appendChild(countBadge);
+    }
 
     const maxShow = isMobileViewport() && getMobileCalendarStyle() === "compact" ? 0 : 3;
 
