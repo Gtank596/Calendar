@@ -3206,7 +3206,7 @@ function getReceiptCategoryGuess(text){
       "tj maxx", "ross", "kohls", "kohl's"
     ]],
 
-    ["car", [
+    ["car ", [
       "auto", "autozone", "o'reilly", "oreilly", "discount tire",
       "jiffy lube", "brake", "oil change", "nissan", "elite"
     ]]
@@ -3234,9 +3234,76 @@ function getReceiptCategoryGuess(text){
   return "";
 }
 
+function cleanReceiptLine(line){
+  return String(line || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getBestReceiptTitle(result = {}){
+  const rawText = String(result.rawText || result.text || "");
+  const fallbackStore = String(result.storeName || result.merchant || result.title || "").trim();
+
+  const badPatterns = [
+    "survey", "feedback", "thank", ".com", "www",
+    "subtotal", "total", "tax", "change due", "debit", "credit",
+    "approved", "terminal", "ref #", "network id", "items sold",
+    "scan", "delivery", "receipt", "cashier", "mgr", "store",
+    "phone", "address", "colorado springs"
+  ];
+
+  const lines = rawText
+    .split(/\n+/)
+    .map(cleanReceiptLine)
+    .filter(line => line.length >= 3 && line.length <= 42);
+
+  let best = "";
+  let bestScore = -999;
+
+  for(const line of lines){
+    const lower = line.toLowerCase();
+    let score = 0;
+
+    if(badPatterns.some(bad => lower.includes(bad))) score -= 50;
+
+    // Looks like an item line with a price.
+    if(/\b\d+\.\d{2}\b/.test(line)) score += 12;
+
+    // Product-ish uppercase lines.
+    if(/[A-Z]{3,}/.test(line)) score += 5;
+
+    // Avoid lines that are mostly numbers/codes.
+    const letters = (line.match(/[a-z]/gi) || []).length;
+    const digits = (line.match(/\d/g) || []).length;
+    if(letters >= 4) score += 5;
+    if(digits > letters) score -= 8;
+
+    // Walmart item lines often have name + UPC + price.
+    if(lower.includes("equate")) score += 12;
+
+    // Too URL/email-ish.
+    if(line.includes("@") || line.includes("://")) score -= 50;
+
+    if(score > bestScore){
+      bestScore = score;
+      best = line;
+    }
+  }
+
+  if(best && bestScore > 0){
+    return best
+      .replace(/\b\d{8,}\b/g, "")
+      .replace(/\b\d+\.\d{2}\b/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  return fallbackStore || "Receipt";
+}
+
 function applyReceiptScanResult(result = {}){
   const rawText = result.rawText || result.text || "";
-  const store = String(result.storeName || result.merchant || result.title || "").trim();
+  const store = getBestReceiptTitle(result);
   const amount = Number(result.total ?? result.amount ?? result.grandTotal ?? 0);
   const date = normalizeReceiptDate(result.date || result.purchaseDate || "");
 
