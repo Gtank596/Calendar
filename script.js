@@ -3264,8 +3264,17 @@ async function scanReceiptFile(file){
 
     // The base64 only lives in this function scope and is not written to app storage.
     if(error){
-      throw new Error(error.message || "Receipt OCR failed.");
+  let detail = error.message || "Receipt OCR failed.";
+
+  try{
+    if(error.context && typeof error.context.json === "function"){
+      const body = await error.context.json();
+      detail = body?.error || body?.message || detail;
     }
+  }catch{}
+
+  throw new Error(detail);
+}
 
     if(!data?.ok){
       throw new Error(data?.error || "Could not read receipt.");
