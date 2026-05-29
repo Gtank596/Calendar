@@ -3145,9 +3145,16 @@ function normalizeReceiptDate(value){
   if(!value) return "";
 
   const raw = String(value).trim();
+  const currentYear = new Date().getFullYear();
 
   if(/^\d{4}-\d{2}-\d{2}$/.test(raw)){
-    return raw;
+    let [year, month, day] = raw.split("-").map(Number);
+
+    if(year < 2020 || year > currentYear + 1){
+      year = currentYear;
+    }
+
+    return `${year}-${pad2(month)}-${pad2(day)}`;
   }
 
   const match = raw.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
@@ -3155,12 +3162,17 @@ function normalizeReceiptDate(value){
 
   let [, mm, dd, yy] = match;
   let year = Number(yy);
+
   if(year < 100) year += year >= 70 ? 1900 : 2000;
 
   const month = Number(mm);
   const day = Number(dd);
 
   if(month < 1 || month > 12 || day < 1 || day > 31) return "";
+
+  if(year < 2020 || year > currentYear + 1){
+    year = currentYear;
+  }
 
   return `${year}-${pad2(month)}-${pad2(day)}`;
 }
@@ -3169,20 +3181,52 @@ function getReceiptCategoryGuess(text){
   const lower = String(text || "").toLowerCase();
 
   const guesses = [
-    ["groceries", ["grocery", "king soopers", "safeway", "walmart", "target", "costco", "trader joe", "sprouts"]],
-    ["food", ["restaurant", "cafe", "coffee", "chick-fil-a", "mcdonald", "wendy", "subway", "taco", "pizza"]],
-    ["gas", ["fuel", "gasoline", "shell", "conoco", "kum & go", "circle k", "7-eleven"]],
-    ["shopping", ["amazon", "best buy", "walgreens", "cvs", "dollar tree"]]
+    ["food", [
+      "restaurant", "cafe", "coffee", "chick-fil-a", "chick fil a",
+      "mcdonald", "wendy", "subway", "taco", "pizza", "chuy",
+      "chipotle", "panera", "starbucks", "dutch bros", "sonic",
+      "burger", "grill", "barbecue", "bbq"
+    ]],
+
+    ["groceries", [
+      "grocery", "king soopers", "safeway", "walmart", "target",
+      "costco", "trader joe", "sprouts", "whole foods", "market",
+      "aldi", "sam's club", "sams club"
+    ]],
+
+    ["gas", [
+      "fuel", "gasoline", "shell", "conoco", "kum & go", "kum and go",
+      "circle k", "7-eleven", "exxon", "mobil", "chevron", "phillips 66",
+      "valero", "loaf n jug", "murphy"
+    ]],
+
+    ["shopping", [
+      "amazon", "best buy", "walgreens", "cvs", "dollar tree",
+      "home depot", "lowe's", "lowes", "hobby lobby", "michaels",
+      "tj maxx", "ross", "kohls", "kohl's"
+    ]],
+
+    ["car", [
+      "auto", "autozone", "o'reilly", "oreilly", "discount tire",
+      "jiffy lube", "brake", "oil change", "nissan", "elite"
+    ]]
   ];
 
   const categories = getSortedBudgetCategories();
 
+  const normalize = s => String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
   for(const [nameHint, words] of guesses){
     if(!words.some(word => lower.includes(word))) continue;
 
-    const cat = categories.find(c =>
-      String(c.name || "").toLowerCase().includes(nameHint)
-    );
+    const hintNorm = normalize(nameHint);
+
+    const cat = categories.find(c => {
+      const name = normalize(c.name);
+      return name.includes(hintNorm) || hintNorm.includes(name);
+    });
 
     if(cat) return cat.id;
   }
