@@ -6030,3 +6030,69 @@ body{
   touch-action: manipulation;
   overscroll-behavior: none;
 }
+
+
+/* ===== Receipt OCR scan flow ===== */
+.budgetReceiptScanBtn{
+  border-color:rgba(125,255,191,.22);
+  background:
+    linear-gradient(135deg, rgba(125,255,191,.12), rgba(122,90,255,.12));
+  color:rgba(230,255,245,.94);
+}
+
+.budgetReceiptScanBtn:hover{
+  border-color:rgba(125,255,191,.40);
+  background:
+    linear-gradient(135deg, rgba(125,255,191,.18), rgba(122,90,255,.18));
+}
+
+.budgetReceiptScanBtn:disabled{
+  opacity:.68;
+  cursor:progress;
+  transform:none;
+}
+
+.budgetReceiptScanStatus{
+  margin:0 0 12px;
+  padding:10px 12px;
+  border-radius:14px;
+  border:1px solid rgba(255,255,255,.10);
+  background:rgba(255,255,255,.04);
+  color:rgba(233,236,255,.78);
+  font-size:12px;
+  font-weight:750;
+  line-height:1.35;
+}
+
+.budgetReceiptScanStatus.info{
+  border-color:rgba(140,110,255,.30);
+  background:rgba(120,90,255,.12);
+}
+
+.budgetReceiptScanStatus.success{
+  border-color:rgba(125,255,191,.26);
+  background:rgba(80,220,160,.10);
+  color:rgba(225,255,242,.92);
+}
+
+.budgetReceiptScanStatus.error{
+  border-color:rgba(255,110,130,.32);
+  background:rgba(255,70,100,.10);
+  color:rgba(255,220,226,.94);
+}
+
+.budgetReceiptScanStatus.hidden{
+  display:none;
+}
+
+@media (max-width:520px){
+  .budgetTransactionHeaderRight{
+    flex-wrap:wrap;
+    justify-content:flex-end;
+  }
+
+  .budgetReceiptScanBtn,
+  #budgetTxDrawerOpenBtn{
+    flex:0 0 auto;
+  }
+}

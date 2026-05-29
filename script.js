@@ -103,6 +103,9 @@ const budgetAddCategoryBtn = document.getElementById("budgetAddCategoryBtn");
 const budgetTxDrawer = document.getElementById("budgetTxDrawer");
 const budgetTxDrawerOpenBtn = document.getElementById("budgetTxDrawerOpenBtn");
 const budgetTxDrawerCloseBtn = document.getElementById("budgetTxDrawerCloseBtn");
+const budgetReceiptScanBtn = document.getElementById("budgetReceiptScanBtn");
+const budgetReceiptScanInput = document.getElementById("budgetReceiptScanInput");
+const budgetReceiptScanStatus = document.getElementById("budgetReceiptScanStatus");
 const budgetCatDD = document.getElementById("budgetCatDD");
 const budgetCatDDButton = document.getElementById("budgetCatDDButton");
 const budgetCatDDLabel = document.getElementById("budgetCatDDLabel");
@@ -2587,6 +2590,7 @@ function closeBudgetTxDrawer(){
 
 function openNewBudgetTransaction(){
   resetBudgetTransactionForm();
+  clearReceiptScanStatus();
   openBudgetTxDrawer();
 }
 
@@ -2595,6 +2599,7 @@ budgetTxDrawerOpenBtn?.addEventListener("click", openNewBudgetTransaction);
 budgetTxDrawerCloseBtn?.addEventListener("click", () => {
   closeBudgetTxDrawer();
   resetBudgetTransactionForm();
+  clearReceiptScanStatus();
 });
 
 budgetTxDrawerOpenBtn?.addEventListener("click", openBudgetTxDrawer);
@@ -3054,6 +3059,243 @@ function budgetRangeForMode(){
     group: "day"
   };
 }
+
+
+// ============================================================================
+// 08b. RECEIPT OCR (privacy-first, no receipt photo storage)
+// ============================================================================
+// The selected receipt image only exists in memory long enough to compress it,
+// send it to the Supabase Edge Function, and prefill the transaction drawer.
+// Do NOT save receipt images to localStorage, IndexedDB, Supabase Storage, or JSON.
+
+const RECEIPT_SCAN_FUNCTION = "scan-receipt";
+let receiptScanBusy = false;
+
+function setReceiptScanStatus(message = "", type = "info"){
+  if(!budgetReceiptScanStatus) return;
+
+  const text = String(message || "").trim();
+  budgetReceiptScanStatus.textContent = text;
+  budgetReceiptScanStatus.className = `budgetReceiptScanStatus ${text ? "" : "hidden"} ${type}`;
+}
+
+function clearReceiptScanStatus(){
+  setReceiptScanStatus("");
+}
+
+function setReceiptScanBusy(isBusy){
+  receiptScanBusy = !!isBusy;
+
+  if(budgetReceiptScanBtn){
+    budgetReceiptScanBtn.disabled = receiptScanBusy;
+    budgetReceiptScanBtn.textContent = receiptScanBusy ? "Reading..." : "Scan Receipt";
+  }
+}
+
+function readFileAsDataURL(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("Could not read receipt image."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageElement(src){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Could not load receipt image."));
+    img.src = src;
+  });
+}
+
+async function compressReceiptImage(file){
+  const dataUrl = await readFileAsDataURL(file);
+  const img = await loadImageElement(dataUrl);
+
+  const maxSide = 1600;
+  const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+  const width = Math.max(1, Math.round(img.width * scale));
+  const height = Math.max(1, Math.round(img.height * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const ctx = canvas.getContext("2d", { alpha: false });
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(img, 0, 0, width, height);
+
+  const compressedDataUrl = canvas.toDataURL("image/jpeg", 0.82);
+  const imageBase64 = compressedDataUrl.split(",")[1] || "";
+
+  // Scrub canvas pixels as soon as possible. The app never persists the image.
+  canvas.width = 1;
+  canvas.height = 1;
+
+  return {
+    imageBase64,
+    mimeType: "image/jpeg"
+  };
+}
+
+function normalizeReceiptDate(value){
+  if(!value) return "";
+
+  const raw = String(value).trim();
+
+  if(/^\d{4}-\d{2}-\d{2}$/.test(raw)){
+    return raw;
+  }
+
+  const match = raw.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
+  if(!match) return "";
+
+  let [, mm, dd, yy] = match;
+  let year = Number(yy);
+  if(year < 100) year += year >= 70 ? 1900 : 2000;
+
+  const month = Number(mm);
+  const day = Number(dd);
+
+  if(month < 1 || month > 12 || day < 1 || day > 31) return "";
+
+  return `${year}-${pad2(month)}-${pad2(day)}`;
+}
+
+function getReceiptCategoryGuess(text){
+  const lower = String(text || "").toLowerCase();
+
+  const guesses = [
+    ["groceries", ["grocery", "king soopers", "safeway", "walmart", "target", "costco", "trader joe", "sprouts"]],
+    ["food", ["restaurant", "cafe", "coffee", "chick-fil-a", "mcdonald", "wendy", "subway", "taco", "pizza"]],
+    ["gas", ["fuel", "gasoline", "shell", "conoco", "kum & go", "circle k", "7-eleven"]],
+    ["shopping", ["amazon", "best buy", "walgreens", "cvs", "dollar tree"]]
+  ];
+
+  const categories = getSortedBudgetCategories();
+
+  for(const [nameHint, words] of guesses){
+    if(!words.some(word => lower.includes(word))) continue;
+
+    const cat = categories.find(c =>
+      String(c.name || "").toLowerCase().includes(nameHint)
+    );
+
+    if(cat) return cat.id;
+  }
+
+  return "";
+}
+
+function applyReceiptScanResult(result = {}){
+  const rawText = result.rawText || result.text || "";
+  const store = String(result.storeName || result.merchant || result.title || "").trim();
+  const amount = Number(result.total ?? result.amount ?? result.grandTotal ?? 0);
+  const date = normalizeReceiptDate(result.date || result.purchaseDate || "");
+
+  resetBudgetTransactionForm();
+
+  if(budgetTxTitle){
+    budgetTxTitle.value = store || "Receipt";
+  }
+
+  if(Number.isFinite(amount) && amount > 0 && budgetTxAmount){
+    budgetTxAmount.value = amount.toFixed(2);
+  }
+
+  if(date && budgetTxDate){
+    budgetTxDate.value = date;
+  }
+
+  setBudgetTxType("expense");
+
+  const categoryGuess = result.categoryId || getReceiptCategoryGuess(`${store}\n${rawText}`);
+  if(categoryGuess && budgetTxCategory){
+    budgetTxCategory.value = categoryGuess;
+    renderBudgetCategoryOptions();
+  }
+
+  openBudgetTxDrawer();
+
+  const pieces = [];
+  if(store) pieces.push(store);
+  if(Number.isFinite(amount) && amount > 0) pieces.push(money(amount));
+  if(date) pieces.push(date);
+
+  setReceiptScanStatus(
+    pieces.length
+      ? `Receipt scanned: ${pieces.join(" • ")}. Review before adding.`
+      : "Receipt scanned. Review the fields before adding.",
+    "success"
+  );
+}
+
+async function scanReceiptFile(file){
+  if(!file || receiptScanBusy) return;
+
+  if(!file.type?.startsWith("image/")){
+    openBudgetTxDrawer();
+    setReceiptScanStatus("Please choose a receipt image.", "error");
+    return;
+  }
+
+  if(!supabaseClient){
+    openAccountModal?.();
+    setReceiptScanStatus("Cloud OCR needs Supabase to be initialized first.", "error");
+    return;
+  }
+
+  setReceiptScanBusy(true);
+  openBudgetTxDrawer();
+  setReceiptScanStatus("Reading receipt... the photo will not be saved.", "info");
+
+  try{
+    const { imageBase64, mimeType } = await compressReceiptImage(file);
+
+    const { data, error } = await supabaseClient.functions.invoke(RECEIPT_SCAN_FUNCTION, {
+      body: {
+        imageBase64,
+        mimeType
+      }
+    });
+
+    // The base64 only lives in this function scope and is not written to app storage.
+    if(error){
+      throw new Error(error.message || "Receipt OCR failed.");
+    }
+
+    if(!data?.ok){
+      throw new Error(data?.error || "Could not read receipt.");
+    }
+
+    applyReceiptScanResult(data.receipt || data);
+  }catch(err){
+    console.error(err);
+    setReceiptScanStatus(
+      `Receipt scan failed: ${err?.message || err}. You can still enter it manually.`,
+      "error"
+    );
+  }finally{
+    setReceiptScanBusy(false);
+
+    if(budgetReceiptScanInput){
+      budgetReceiptScanInput.value = "";
+    }
+  }
+}
+
+budgetReceiptScanBtn?.addEventListener("click", () => {
+  if(receiptScanBusy) return;
+  budgetReceiptScanInput?.click();
+});
+
+budgetReceiptScanInput?.addEventListener("change", () => {
+  const file = budgetReceiptScanInput.files?.[0];
+  scanReceiptFile(file);
+});
 
 function addBudgetTransaction(){
   if(budgetTxEditState){
