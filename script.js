@@ -3244,45 +3244,82 @@ function getBestReceiptTitle(result = {}){
   const rawText = String(result.rawText || result.text || "");
   const fallbackStore = String(result.storeName || result.merchant || result.title || "").trim();
 
-  const badPatterns = [
-    "survey", "feedback", "thank", ".com", "www",
-    "subtotal", "total", "tax", "change due", "debit", "credit",
-    "approved", "terminal", "ref #", "network id", "items sold",
-    "scan", "delivery", "receipt", "cashier", "mgr", "store",
-    "phone", "address", "colorado springs"
-  ];
-
   const lines = rawText
     .split(/\n+/)
     .map(cleanReceiptLine)
-    .filter(line => line.length >= 3 && line.length <= 42);
+    .filter(Boolean);
+
+  const headerLines = lines.slice(0, 12);
+  const headerText = headerLines.join("\n").toLowerCase();
+
+  const knownMerchants = [
+    ["walmart", "Walmart"],
+    ["target", "Target"],
+    ["king soopers", "King Soopers"],
+    ["safeway", "Safeway"],
+    ["costco", "Costco"],
+    ["sam's club", "Sam's Club"],
+    ["sams club", "Sam's Club"],
+    ["chick-fil-a", "Chick-fil-A"],
+    ["chick fil a", "Chick-fil-A"],
+    ["starbucks", "Starbucks"],
+    ["dutch bros", "Dutch Bros"],
+    ["chuy", "Chuy's"],
+    ["shell", "Shell"],
+    ["conoco", "Conoco"],
+    ["circle k", "Circle K"],
+    ["loaf n jug", "Loaf 'N Jug"],
+    ["murphy", "Murphy"],
+    ["murphy usa", "Murphy USA"],
+    ["walgreens", "Walgreens"],
+    ["cvs", "CVS"],
+    ["amazon", "Amazon"],
+    ["home depot", "Home Depot"],
+    ["lowe's", "Lowe's"],
+    ["lowes", "Lowe's"],
+    ["best buy", "Best Buy"]
+  ];
+
+  // Known merchants win ONLY if they appear near the receipt header.
+  for(const [needle, label] of knownMerchants){
+    if(headerText.includes(needle)){
+      return label;
+    }
+  }
+
+  const badPatterns = [
+    "survey", "feedback", "thank", ".com", "www", "@",
+    "subtotal", "total", "tax", "change due", "debit", "credit",
+    "approved", "terminal", "ref #", "network id", "items sold",
+    "scan", "delivery", "receipt", "cashier", "mgr", "phone",
+    "address", "purchase", "pin verified", "customer copy"
+  ];
 
   let best = "";
   let bestScore = -999;
 
-  for(const line of lines){
+  for(const line of headerLines){
     const lower = line.toLowerCase();
     let score = 0;
 
-    if(badPatterns.some(bad => lower.includes(bad))) score -= 50;
+    if(badPatterns.some(bad => lower.includes(bad))) score -= 60;
 
-    // Looks like an item line with a price.
-    if(/\b\d+\.\d{2}\b/.test(line)) score += 12;
+    if(/^[a-z0-9 &'’.-]+$/i.test(line)) score += 10;
+    if(line.length >= 3 && line.length <= 28) score += 8;
 
-    // Product-ish uppercase lines.
-    if(/[A-Z]{3,}/.test(line)) score += 5;
+    const words = line.split(/\s+/).filter(Boolean);
+    if(words.length <= 3) score += 6;
 
-    // Avoid lines that are mostly numbers/codes.
     const letters = (line.match(/[a-z]/gi) || []).length;
     const digits = (line.match(/\d/g) || []).length;
-    if(letters >= 4) score += 5;
-    if(digits > letters) score -= 8;
 
-    // Walmart item lines often have name + UPC + price.
-    if(lower.includes("equate")) score += 12;
+    if(letters >= 3) score += 6;
+    if(digits > 0) score -= digits * 3;
+    if(digits > letters) score -= 30;
 
-    // Too URL/email-ish.
-    if(line.includes("@") || line.includes("://")) score -= 50;
+    if(/\b\d+\.\d{2}\b/.test(line)) score -= 40;
+    if(/\b\d{5,}\b/.test(line)) score -= 30;
+    if(/\b(items?|sold|tc#|op#|te#|tr#|st#|sku|qty)\b/i.test(line)) score -= 40;
 
     if(score > bestScore){
       bestScore = score;
@@ -3290,17 +3327,10 @@ function getBestReceiptTitle(result = {}){
     }
   }
 
-  if(best && bestScore > 0){
-    return best
-      .replace(/\b\d{8,}\b/g, "")
-      .replace(/\b\d+\.\d{2}\b/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-
-  return fallbackStore || "Receipt";
+  return bestScore > 0
+    ? best.trim()
+    : fallbackStore || "Receipt";
 }
-
 function applyReceiptScanResult(result = {}){
   const rawText = result.rawText || result.text || "";
   const store = getBestReceiptTitle(result);
