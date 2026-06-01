@@ -1168,6 +1168,7 @@ function getLocalPayload(){
       settings: parsed.settings || null,
       budgetPlans: parsed.budgetPlans || null,
       budgetCategories: parsed.budgetCategories || null,
+      merchantAliases: parsed.merchantAliases || null,
       selectedBudgetPanes: parsed.selectedBudgetPanes || null,
       activeSection: parsed.activeSection || null,
       budgetViewMode: parsed.budgetViewMode || null
@@ -1185,6 +1186,7 @@ function buildFullSavePayload(base = {}){
     settings: base.settings || settings || loadSettings(),
     budgetPlans: base.budgetPlans || budgetPlans || loadBudgetPlans(),
     budgetCategories: base.budgetCategories || budgetCategories || loadBudgetCategories(),
+    merchantAliases: base.merchantAliases || merchantAliases || loadMerchantAliases(),
     selectedBudgetPanes: base.selectedBudgetPanes || selectedBudgetPanes || loadBudgetPaneSelection(),
     activeSection: base.activeSection || activeSection || "calendar",
     budgetViewMode: base.budgetViewMode || budgetViewMode || "month"
@@ -1206,6 +1208,9 @@ function applyFullSavePayload(payload, opts = {}){
   budgetCategories = Array.isArray(safe.budgetCategories) && safe.budgetCategories.length
     ? safe.budgetCategories
     : budgetCategories;
+  merchantAliases = safe.merchantAliases && typeof safe.merchantAliases === "object"
+    ? safe.merchantAliases
+    : merchantAliases;
   selectedBudgetPanes = safe.selectedBudgetPanes || selectedBudgetPanes;
   activeSection = safe.activeSection || activeSection;
   budgetViewMode = safe.budgetViewMode || budgetViewMode;
@@ -1213,6 +1218,7 @@ function applyFullSavePayload(payload, opts = {}){
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   localStorage.setItem(BUDGET_PLANS_KEY, JSON.stringify(budgetPlans));
   localStorage.setItem(BUDGET_CATEGORIES_KEY, JSON.stringify(budgetCategories));
+  localStorage.setItem(MERCHANT_ALIASES_KEY, JSON.stringify(merchantAliases));
   localStorage.setItem(BUDGET_PANES_KEY, JSON.stringify(selectedBudgetPanes));
   localStorage.setItem("myCalendar_activeSection", activeSection);
   localStorage.setItem("myCalendar_budgetViewMode", budgetViewMode);
@@ -2559,6 +2565,7 @@ function resetBudgetTransactionForm(){
   const range = budgetRangeForMode();
 
   budgetTxEditState = null;
+  currentReceiptScanDraft = null;
 
   if(budgetTxTitle) budgetTxTitle.value = "";
   if(budgetTxAmount) budgetTxAmount.value = "";
@@ -3069,7 +3076,128 @@ function budgetRangeForMode(){
 // Do NOT save receipt images to localStorage, IndexedDB, Supabase Storage, or JSON.
 
 const RECEIPT_SCAN_FUNCTION = "scan-receipt";
+const MERCHANT_ALIASES_KEY = "myCalendarMerchantAliases_v1";
 let receiptScanBusy = false;
+let currentReceiptScanDraft = null;
+let merchantAliases = loadMerchantAliases();
+
+function loadMerchantAliases(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(MERCHANT_ALIASES_KEY));
+    return saved && typeof saved === "object" ? saved : {};
+  }catch{
+    return {};
+  }
+}
+
+function normalizeMerchantKey(name = ""){
+  return String(name || "")
+    .toLowerCase()
+    .replace(/[0]/g, "o")
+    .replace(/[1|]/g, "l")
+    .replace(/[5]/g, "s")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\b(store|restaurant|gourmet|burgers?|supercenter|location|inc|llc|ltd|co|company|the)\b/g, " ")
+    .replace(/\b(no|#)\s*\d+\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function titleCaseMerchantName(name = ""){
+  return String(name || "")
+    .toLowerCase()
+    .replace(/\b\w/g, ch => ch.toUpperCase())
+    .replace(/\bUsa\b/g, "USA")
+    .replace(/\bCvs\b/g, "CVS");
+}
+
+function merchantSimilarity(a = "", b = ""){
+  const left = normalizeMerchantKey(a).replace(/\s+/g, "");
+  const right = normalizeMerchantKey(b).replace(/\s+/g, "");
+
+  if(!left || !right) return 0;
+  if(left === right) return 1;
+  if(left.includes(right) || right.includes(left)){
+    return Math.min(left.length, right.length) / Math.max(left.length, right.length);
+  }
+
+  const bigrams = str => {
+    const set = new Set();
+    for(let i = 0; i < str.length - 1; i++) set.add(str.slice(i, i + 2));
+    return set;
+  };
+
+  const aSet = bigrams(left);
+  const bSet = bigrams(right);
+  if(!aSet.size || !bSet.size) return 0;
+
+  let overlap = 0;
+  for(const gram of aSet){
+    if(bSet.has(gram)) overlap++;
+  }
+
+  return (overlap * 2) / (aSet.size + bSet.size);
+}
+
+function saveMerchantAliases(){
+  localStorage.setItem(MERCHANT_ALIASES_KEY, JSON.stringify(merchantAliases));
+  setLocalPayload({ updatedAt: Date.now(), events });
+  cloudWriteDebounced();
+}
+
+function saveMerchantAlias(rawName, cleanName){
+  const key = normalizeMerchantKey(rawName);
+  const normalized = String(cleanName || "").trim();
+
+  if(!key || !normalized || normalized.length < 2) return;
+
+  const existing = merchantAliases[key] || {};
+
+  merchantAliases[key] = {
+    rawName: String(rawName || "").trim(),
+    normalizedName: normalized,
+    createdAt: existing.createdAt || Date.now(),
+    updatedAt: Date.now(),
+    useCount: Number(existing.useCount || 0) + 1
+  };
+
+  saveMerchantAliases();
+}
+
+function normalizeMerchantName(rawName = ""){
+  const raw = String(rawName || "").trim();
+  const key = normalizeMerchantKey(raw);
+
+  if(!key) return raw;
+
+  const exact = merchantAliases[key];
+  if(exact?.normalizedName){
+    exact.useCount = Number(exact.useCount || 0) + 1;
+    exact.updatedAt = Date.now();
+    saveMerchantAliases();
+    return exact.normalizedName;
+  }
+
+  let best = null;
+  let bestScore = 0;
+
+  for(const [aliasKey, alias] of Object.entries(merchantAliases)){
+    const score = merchantSimilarity(key, aliasKey);
+    if(score > bestScore){
+      bestScore = score;
+      best = alias;
+    }
+  }
+
+  if(best?.normalizedName && bestScore >= 0.88){
+    saveMerchantAlias(raw, best.normalizedName);
+    return best.normalizedName;
+  }
+
+  return titleCaseMerchantName(raw);
+}
+
 
 function setReceiptScanStatus(message = "", type = "info"){
   if(!budgetReceiptScanStatus) return;
@@ -3331,10 +3459,40 @@ function getBestReceiptTitle(result = {}){
     ? best.trim()
     : fallbackStore || "Receipt";
 }
+function getBestReceiptAmount(result = {}){
+  const rawText = String(result.rawText || result.text || "");
+  const moneyRe = /(-?\$?\d{1,4}(?:,\d{3})*\.\d{2})/;
+  const lines = rawText.split(/\n+/).map(cleanReceiptLine).filter(Boolean);
+  const candidates = [];
+
+  for(const line of lines){
+    const match = line.match(moneyRe);
+    if(!match) continue;
+
+    const value = Number(match[1].replace(/[$,]/g, ""));
+    if(!Number.isFinite(value) || value <= 0) continue;
+
+    let score = 0;
+    if(/\b(grand\s+total|amount\s+paid|paid|card|visa|mastercard|amex)\b/i.test(line)) score += 40;
+    if(/\btotal\b/i.test(line)) score += 25;
+    if(/\b(subtotal|sub\s*total|tax|tip|discount|change|balance due|cash back)\b/i.test(line)) score -= 80;
+
+    candidates.push({ value, score, line });
+  }
+
+  candidates.sort((a, b) => b.score - a.score || b.value - a.value);
+  const best = candidates.find(c => c.score > 0);
+  if(best) return best.value;
+
+  const fallback = Number(result.grandTotal ?? result.amount ?? result.total ?? 0);
+  return Number.isFinite(fallback) ? fallback : 0;
+}
+
 function applyReceiptScanResult(result = {}){
   const rawText = result.rawText || result.text || "";
-  const store = getBestReceiptTitle(result);
-  const amount = Number(result.total ?? result.amount ?? result.grandTotal ?? 0);
+  const rawStore = getBestReceiptTitle(result);
+  const store = normalizeMerchantName(rawStore);
+  const amount = getBestReceiptAmount(result);
   const date = normalizeReceiptDate(result.date || result.purchaseDate || "");
 
   resetBudgetTransactionForm();
@@ -3350,6 +3508,13 @@ function applyReceiptScanResult(result = {}){
   if(date && budgetTxDate){
     budgetTxDate.value = date;
   }
+
+  currentReceiptScanDraft = {
+    rawMerchant: rawStore,
+    normalizedMerchant: store,
+    rawText,
+    scannedAt: Date.now()
+  };
 
   setBudgetTxType("expense");
 
@@ -3485,6 +3650,23 @@ function renderBudgetTransactionCategoryFilter(){
   `;
 }
 
+function learnMerchantAliasFromCurrentDraft(finalTitle){
+  if(!currentReceiptScanDraft) return;
+
+  const rawMerchant = currentReceiptScanDraft.rawMerchant || "";
+  const cleanTitle = String(finalTitle || "").trim();
+
+  if(!rawMerchant || !cleanTitle) return;
+
+  const rawKey = normalizeMerchantKey(rawMerchant);
+  const cleanKey = normalizeMerchantKey(cleanTitle);
+
+  if(!rawKey || !cleanKey) return;
+
+  // Learn when the user corrects it, or reinforce when the scan is accepted.
+  saveMerchantAlias(rawMerchant, cleanTitle);
+}
+
 function createBudgetTransactionFromDrawer(){
   const title = budgetTxTitle?.value?.trim() || "";
   const rawAmount = Number(budgetTxAmount?.value || 0);
@@ -3521,6 +3703,7 @@ const amount = (budgetTxType?.value === "income" ? -1 : 1) * Math.abs(rawAmount)
   view = ymdToDate(date);
   monthLabel.textContent = fmtMonthYear(view);
 
+  learnMerchantAliasFromCurrentDraft(title);
   resetBudgetTransactionForm();
 
   renderBudgetPage();
