@@ -1,4 +1,4 @@
-const CACHE_NAME = "my-calendar-pwa-v9";
+const CACHE_NAME = "my-calendar-pwa-v10";
 
 const APP_SHELL = [
   "./",
