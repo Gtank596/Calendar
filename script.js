@@ -2133,7 +2133,15 @@ function money(n){
 
 function pct(part, total){
   if(!total) return "0%";
-  return `${Math.round((Number(part || 0) / Number(total || 1)) * 100)}%`;
+
+  const value =
+    (Number(part || 0) / Number(total || 1)) * 100;
+
+  if(value > 0 && value < 1){
+    return ">1%";
+  }
+
+  return `${Math.round(value)}%`;
 }
 
 function updateBudgetTypeSlider(){
@@ -4278,12 +4286,76 @@ function groupBudgetItems(items, range){
   return Array.from(map.values());
 }
 
-function updateBudgetTransactionPrice(eventId, date, amount){
-  const price = Number(amount);
+function updateBudgetTransactionPrice(eventId, date, amount, opts = {}){
+  const rawPrice = Number(amount);
 
-  if(!eventId || !Number.isFinite(price) || price < 0) return;
+  if(!eventId || !Number.isFinite(rawPrice) || rawPrice < 0) return;
+
+  const isOccurrence = !!opts.isOccurrence;
+  const occursOn = opts.occursOn || date;
 
   const before = snapshotBeforeChange();
+
+  if(isOccurrence){
+    const masterKey = findMasterDateById(eventId);
+    if(!masterKey) return;
+
+    const masterList = getEventsForDay(masterKey);
+    const idx = masterList.findIndex(ev => ev.id === eventId && ev.source === "budget");
+    if(idx < 0) return;
+
+    const master = masterList[idx];
+
+    const oldPrice = Number(master.price || 0);
+    const nextPrice =
+      oldPrice < 0
+        ? -Math.abs(rawPrice)
+        : Math.abs(rawPrice);
+
+    const ex = Array.isArray(master.recurrence?.exceptions)
+      ? [...master.recurrence.exceptions]
+      : [];
+
+    if(!ex.includes(occursOn)){
+      ex.push(occursOn);
+    }
+
+    masterList[idx] = {
+      ...master,
+      recurrence: {
+        ...(master.recurrence || {}),
+        exceptions: ex
+      }
+    };
+
+    events[masterKey] = masterList;
+
+    const standalone = {
+      ...master,
+      id: cryptoId(),
+      price: nextPrice,
+      startDate: occursOn,
+      recurrence: {
+        freq: "none",
+        until: "",
+        interval: 1,
+        exceptions: [],
+        days: []
+      }
+    };
+
+    const targetList = getEventsForDay(occursOn);
+    targetList.push(standalone);
+    events[occursOn] = targetList;
+
+    saveEvents(before);
+    syncStateFromLegacy();
+
+    renderBudgetPage();
+    renderEventList();
+    render();
+    return;
+  }
 
   let storageKey = date;
   let list = getEventsForDay(storageKey);
@@ -4299,9 +4371,15 @@ function updateBudgetTransactionPrice(eventId, date, amount){
 
   if(idx < 0) return;
 
+  const oldPrice = Number(list[idx].price || 0);
+  const nextPrice =
+    oldPrice < 0
+      ? -Math.abs(rawPrice)
+      : Math.abs(rawPrice);
+
   list[idx] = {
     ...list[idx],
-    price
+    price: nextPrice
   };
 
   events[storageKey] = list;
@@ -4313,7 +4391,6 @@ function updateBudgetTransactionPrice(eventId, date, amount){
   renderEventList();
   render();
 }
-
 function renderBudgetCashflow(incomeTotal, expenseTotal, netTotal, items = [], range = null){
   const max = Math.max(incomeTotal, expenseTotal, 1);
 
@@ -4752,14 +4829,16 @@ if(budgetBars){
               <span class="budgetTxDollar">$</span>
 
               <input
-                class="budgetTxPriceInput"
-                type="number"
-                min="0"
-                step="0.01"
-                value="${Math.abs(Number(item.price || 0)).toFixed(2)}"
-                data-event-id="${escapeHtml(item.eventId)}"
-                data-date="${escapeHtml(item.date)}"
-              />
+  class="budgetTxPriceInput"
+  type="number"
+  min="0"
+  step="0.01"
+  value="${Math.abs(Number(item.price || 0)).toFixed(2)}"
+  data-event-id="${escapeHtml(item.eventId)}"
+  data-date="${escapeHtml(item.date)}"
+  data-is-occurrence="${item.isOccurrence ? "1" : "0"}"
+  data-occurs-on="${escapeHtml(item.occursOn || item.date)}"
+/>
             </div>
 
             ${
@@ -5095,10 +5174,14 @@ budgetTransactionList?.addEventListener("change", (e) => {
   if(!input) return;
 
   updateBudgetTransactionPrice(
-    input.dataset.eventId,
-    input.dataset.date,
-    input.value
-  );
+  input.dataset.eventId,
+  input.dataset.date,
+  input.value,
+  {
+    isOccurrence: input.dataset.isOccurrence === "1",
+    occursOn: input.dataset.occursOn || input.dataset.date
+  }
+);
 });
 
 budgetCatDDButton?.addEventListener("click", (e) => {
@@ -8170,9 +8253,35 @@ for(const item of railLabels){
     pill.style.zIndex = "2";
 
     pill.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openEventInEditor(ev, ev._segmentBaseDate || dayISO);
-    });
+  e.stopPropagation();
+
+  const isMobileDayPill =
+    isMobileViewport() &&
+    viewMode === "day" &&
+    pill.closest(".dayViewDay");
+
+  if(isMobileDayPill){
+    selectedEventId = ev._masterId || ev.id;
+    editBaseDateISO = cellISO;
+    populateFormFromSelected();
+    renderEventList();
+    return;
+  }
+
+  openEventInEditor(ev, cellISO);
+});
+
+pill.addEventListener("dblclick", (e) => {
+  e.stopPropagation();
+
+  if(
+    isMobileViewport() &&
+    viewMode === "day" &&
+    pill.closest(".dayViewDay")
+  ){
+    openEventInEditor(ev, cellISO);
+  }
+});
 
     const topHandle = pill.querySelector(".resizeHandleTop");
     const bottomHandle = pill.querySelector(".resizeHandleBottom");

@@ -6096,3 +6096,62 @@ body{
     flex:0 0 auto;
   }
 }
+
+/* Hide old file/manual sync tools on mobile once cloud is connected */
+@media (max-width:760px){
+  body:has(.cloudSyncBox.isConnected) #manualSyncRow,
+  body:has(.cloudSyncBox.isConnected) #connectSyncBtn,
+  body:has(.cloudSyncBox.isConnected) #exportBtn,
+  body:has(.cloudSyncBox.isConnected) #importBtn,
+  body:has(.cloudSyncBox.isConnected) input[type="file"]{
+    display:none !important;
+  }
+
+  body:has(.cloudSyncBox.isConnected) .syncStatus{
+    display:none !important;
+  }
+}
+
+/* Mobile compact month: show trip bands without showing full event pills */
+@media (max-width:760px){
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox{
+    display:block !important;
+    position:static !important;
+    height:auto !important;
+    min-height:0 !important;
+    margin:0 !important;
+    padding:0 !important;
+    border:0 !important;
+    background:transparent !important;
+    overflow:visible !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox .dayHeader{
+    margin:0 !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox .spanBand{
+    display:block !important;
+    position:absolute !important;
+    left:5px !important;
+    right:5px !important;
+    top:auto !important;
+    bottom:4px !important;
+    height:3px !important;
+    min-height:3px !important;
+    padding:0 !important;
+    border-radius:999px !important;
+    overflow:hidden !important;
+    font-size:0 !important;
+    color:transparent !important;
+    z-index:3 !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox .spanBand:nth-of-type(3){
+    bottom:8px !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox .spanBand:nth-of-type(4){
+    bottom:12px !important;
+  }
+}
