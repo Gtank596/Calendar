@@ -6290,3 +6290,16 @@ body{
     gap:12px !important;
   }
 }
+
+/* Mobile: keep all custom dropdowns inside the screen, even with many categories */
+@media (max-width:760px){
+  #calendarPage .dd.open .ddMenu,
+  #budgetTxDrawer .dd.open .ddMenu{
+    top:auto !important;
+    bottom:calc(100% + 8px) !important;
+    max-height:min(46dvh, 320px) !important;
+    overflow-y:auto !important;
+    -webkit-overflow-scrolling:touch;
+    z-index:10050 !important;
+  }
+}

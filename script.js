@@ -3492,11 +3492,16 @@ function getReceiptCategoryGuess(text){
 
   const guesses = [
     ["food", [
-      "restaurant", "cafe", "coffee", "chick-fil-a", "chick fil a",
-      "mcdonald", "wendy", "subway", "taco", "pizza", "chuy",
-      "chipotle", "panera", "starbucks", "dutch bros", "sonic",
-      "burger", "grill", "bbq", "barbecue", "fries", "sandwich"
-    ]],
+  "restaurant", "cafe", "coffee", "chick-fil-a", "chick fil a",
+  "mcdonald", "wendy", "subway", "taco", "pizza", "chuy",
+  "chipotle", "panera", "starbucks", "dutch bros", "sonic",
+  "burger", "grill", "bbq", "barbecue", "fries", "sandwich",
+
+  // Restaurant receipts / menu words
+  "olive garden", "red robin", "server", "table", "guest", "guests",
+  "lasagna", "alfredo", "pasta", "spaghetti", "ravioli", "breadstick",
+  "appetizer", "entree", "dine in", "gratuity"
+]],
 
     ["groceries", [
       "grocery", "king soopers", "safeway", "walmart", "target",
@@ -3717,29 +3722,42 @@ function getBestReceiptAmount(result = {}){
     const matches = [...line.matchAll(moneyRe)];
     if(!matches.length) continue;
 
+    const lower = line.toLowerCase();
+
     for(const match of matches){
       const value = Number(match[1].replace(/[$,\s]/g, ""));
       if(!Number.isFinite(value) || value <= 0) continue;
 
       let score = 0;
 
-      if(/\b(total\s+paid|paid\s+total|amount\s+paid|grand\s+total)\b/i.test(line)) score += 140;
-      else if(/\btotal\b/i.test(line)) score += 85;
-      else if(/\bpurchase\s+amount\b/i.test(line)) score += 50;
-      else if(/\b(card|visa|mastercard|amex|debit|credit)\b/i.test(line)) score += 25;
+      if(/\b(total\s+paid|paid\s+total|amount\s+paid|grand\s+total)\b/i.test(line)) score += 1000;
+      else if(/\btotal\b/i.test(line)) score += 700;
+      else if(/\bpurchase\s+amount\b/i.test(line)) score += 500;
+      else if(/\b(card|visa|mastercard|amex|debit|credit)\b/i.test(line)) score += 80;
 
-      if(/\b(subtotal|sub\s*total)\b/i.test(line)) score -= 80;
-      if(/\b(tax|tip|gratuity|discount|change|balance due|cash back)\b/i.test(line)) score -= 130;
-      if(/\b(auth|aid|rrn|tid|trn|tvr|iad|arc|mode|issuer)\b/i.test(line)) score -= 100;
+      // Never let tiny goblins like tax/tip/gratuity win.
+      if(/\b(tax|tip|gratuity|discount|change|balance due|cash back)\b/i.test(line)) score -= 10000;
+      if(/\b(subtotal|sub\s*total)\b/i.test(line)) score -= 5000;
+      if(/\b(auth|aid|rrn|tid|trn|tvr|iad|arc|mode|issuer)\b/i.test(line)) score -= 2000;
 
-      candidates.push({ value, score, line });
+      candidates.push({ value, score, line, lower });
     }
   }
 
-  candidates.sort((a, b) => b.score - a.score || b.value - a.value);
+  const preferred = candidates
+    .filter(c =>
+      c.score > 0 &&
+      /\b(total\s+paid|paid\s+total|amount\s+paid|grand\s+total|total|purchase\s+amount)\b/i.test(c.line)
+    )
+    .sort((a, b) => b.score - a.score || b.value - a.value);
 
-  const best = candidates.find(c => c.score > 0);
-  if(best) return best.value;
+  if(preferred.length) return preferred[0].value;
+
+  const fallbackCandidate = candidates
+    .filter(c => c.score > 0)
+    .sort((a, b) => b.score - a.score || b.value - a.value)[0];
+
+  if(fallbackCandidate) return fallbackCandidate.value;
 
   const fallback = Number(result.grandTotal ?? result.total ?? result.amount ?? 0);
   return Number.isFinite(fallback) ? fallback : 0;
