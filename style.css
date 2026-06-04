@@ -6030,3 +6030,263 @@ body{
   touch-action: manipulation;
   overscroll-behavior: none;
 }
+
+
+/* ===== Receipt OCR scan flow ===== */
+.budgetReceiptScanBtn{
+  border-color:rgba(125,255,191,.22);
+  background:
+    linear-gradient(135deg, rgba(125,255,191,.12), rgba(122,90,255,.12));
+  color:rgba(230,255,245,.94);
+}
+
+.budgetReceiptScanBtn:hover{
+  border-color:rgba(125,255,191,.40);
+  background:
+    linear-gradient(135deg, rgba(125,255,191,.18), rgba(122,90,255,.18));
+}
+
+.budgetReceiptScanBtn:disabled{
+  opacity:.68;
+  cursor:progress;
+  transform:none;
+}
+
+.budgetReceiptScanStatus{
+  margin:0 0 12px;
+  padding:10px 12px;
+  border-radius:14px;
+  border:1px solid rgba(255,255,255,.10);
+  background:rgba(255,255,255,.04);
+  color:rgba(233,236,255,.78);
+  font-size:12px;
+  font-weight:750;
+  line-height:1.35;
+}
+
+.budgetReceiptScanStatus.info{
+  border-color:rgba(140,110,255,.30);
+  background:rgba(120,90,255,.12);
+}
+
+.budgetReceiptScanStatus.success{
+  border-color:rgba(125,255,191,.26);
+  background:rgba(80,220,160,.10);
+  color:rgba(225,255,242,.92);
+}
+
+.budgetReceiptScanStatus.error{
+  border-color:rgba(255,110,130,.32);
+  background:rgba(255,70,100,.10);
+  color:rgba(255,220,226,.94);
+}
+
+.budgetReceiptScanStatus.hidden{
+  display:none;
+}
+
+@media (max-width:520px){
+  .budgetTransactionHeaderRight{
+    flex-wrap:wrap;
+    justify-content:flex-end;
+  }
+
+  .budgetReceiptScanBtn,
+  #budgetTxDrawerOpenBtn{
+    flex:0 0 auto;
+  }
+}
+
+/* Hide old file/manual sync tools on mobile once cloud is connected */
+@media (max-width:760px){
+  body:has(.cloudSyncBox.isConnected) #manualSyncRow,
+  body:has(.cloudSyncBox.isConnected) #connectSyncBtn,
+  body:has(.cloudSyncBox.isConnected) #exportBtn,
+  body:has(.cloudSyncBox.isConnected) #importBtn,
+  body:has(.cloudSyncBox.isConnected) input[type="file"]{
+    display:none !important;
+  }
+
+  body:has(.cloudSyncBox.isConnected) .syncStatus{
+    display:none !important;
+  }
+}
+
+/* Mobile compact month: show trip bands without showing full event pills */
+@media (max-width:760px){
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox{
+    display:block !important;
+    position:static !important;
+    height:auto !important;
+    min-height:0 !important;
+    margin:0 !important;
+    padding:0 !important;
+    border:0 !important;
+    background:transparent !important;
+    overflow:visible !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox .dayHeader{
+    margin:0 !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox .spanBand{
+    display:block !important;
+    position:absolute !important;
+    left:5px !important;
+    right:5px !important;
+    top:auto !important;
+    bottom:4px !important;
+    height:3px !important;
+    min-height:3px !important;
+    padding:0 !important;
+    border-radius:999px !important;
+    overflow:hidden !important;
+    font-size:0 !important;
+    color:transparent !important;
+    z-index:3 !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox .spanBand:nth-of-type(3){
+    bottom:8px !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox .spanBand:nth-of-type(4){
+    bottom:12px !important;
+  }
+}
+
+/* Mobile: hide legacy file picker controls in the calendar editor */
+@media (max-width:760px){
+  #editorSection input[type="file"],
+  .panel input[type="file"]{
+    display:none !important;
+  }
+}
+
+/* Mobile: let editor dropdowns spill outside the panel */
+@media (max-width:760px){
+  #calendarPage .panel{
+    overflow:visible !important;
+  }
+
+  #calendarPage .editorSection,
+  #calendarPage .panelBody{
+    overflow:visible !important;
+  }
+
+  #calendarPage .dd.open{
+    z-index:9000 !important;
+  }
+
+  #calendarPage .dd.open .ddMenu{
+    z-index:9001 !important;
+  }
+}
+
+/* Mobile compact month: keep trip bands away from event-count badge */
+@media (max-width:760px){
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .tripBox .spanBand{
+    right:24px !important;
+    left:5px !important;
+  }
+
+  body[data-calendar-view="month"][data-mobile-calendar-style="compact"] #calendarPage .mobileEventCountBadge{
+    z-index:6 !important;
+  }
+}
+
+/* Mobile calendar nav: match budget nav layout */
+.calendarMobileDateLabel{
+  display:none;
+}
+
+@media (max-width:700px){
+  #calendarSubbar{
+    margin:0 0 14px !important;
+    padding:10px 16px 12px !important;
+    overflow:hidden !important;
+  }
+
+  #calendarSubbar .controlsCenter{
+    width:100% !important;
+    display:grid !important;
+    grid-template-columns:auto 1fr auto auto auto !important;
+    gap:8px !important;
+    padding:0 !important;
+    border:0 !important;
+    background:transparent !important;
+    box-shadow:none !important;
+  }
+
+  #calendarSubbar .dividerVert{
+    display:none !important;
+  }
+
+  #prevBtn,
+  #todayBtn,
+  #nextBtn,
+  #undoBtn,
+  #redoBtn{
+    display:inline-flex !important;
+  }
+
+  #todayBtn{
+    width:100% !important;
+    min-width:0 !important;
+  }
+
+  .calendarMobileDateLabel{
+    display:block !important;
+    grid-column:1 / -1 !important;
+    text-align:center !important;
+    font-size:13px !important;
+    font-weight:700 !important;
+    letter-spacing:.08em !important;
+    text-transform:uppercase !important;
+    color:rgba(233,236,255,.72) !important;
+    margin-top:2px !important;
+  }
+
+  #calendarSubbar .viewSwitcher{
+    grid-column:1 / -1 !important;
+    width:100% !important;
+    display:grid !important;
+    grid-template-columns:repeat(3, 1fr) !important;
+    gap:4px !important;
+    padding:4px !important;
+    border-radius:18px !important;
+  }
+
+  #calendarSubbar .navBtnView{
+    width:100% !important;
+    min-width:0 !important;
+    height:42px !important;
+    padding:0 !important;
+    font-size:14px !important;
+  }
+
+  #calendarSubbar .viewSliderThumb{
+    height:42px !important;
+  }
+}
+
+/* Mobile: make Add Transaction date field match the other drawer inputs */
+@media (max-width:760px){
+  #budgetTxDrawer #budgetTxDate{
+    height:52px !important;
+    min-height:52px !important;
+    padding:0 14px !important;
+    font-size:16px !important;
+    line-height:52px !important;
+    border-radius:16px !important;
+    display:flex !important;
+    align-items:center !important;
+    appearance:none;
+    -webkit-appearance:none;
+  }
+
+  #budgetTxDrawer .budgetDateRepeatGrid{
+    gap:12px !important;
+  }
+}

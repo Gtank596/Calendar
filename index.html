@@ -53,7 +53,9 @@
       <button id="undoBtn" class="navBtn navBtnUndo" type="button" title="Undo (Ctrl/Cmd+Z)">↶</button>
       <button id="redoBtn" class="navBtn navBtnUndo" type="button" title="Redo (Ctrl/Cmd+Y / Ctrl+Shift+Z)">↷</button>
 
-      <div class="dividerVert"></div>
+<div class="calendarMobileDateLabel" id="calendarMobileDateLabel"></div>
+
+<div class="dividerVert"></div>
 
       <div class="viewSwitcher" id="viewSwitcher">
         <div class="viewSliderThumb" id="viewSliderThumb"></div>
@@ -359,11 +361,11 @@
         <div class="dividerVert"></div>
 
         <div class="budgetViewSwitcher" id="budgetViewSwitcher">
-          <div class="budgetSliderThumb" id="budgetSliderThumb"></div>
-          <button id="budgetWeekBtn" class="budgetViewBtn active" type="button">Week</button>
-          <button id="budgetMonthBtn" class="budgetViewBtn" type="button">Month</button>
-          <button id="budgetYearBtn" class="budgetViewBtn" type="button">Year</button>
-        </div>
+  <div class="budgetSliderThumb" id="budgetSliderThumb"></div>
+  <button id="budgetMonthBtn" class="budgetViewBtn active" type="button">Month</button>
+  <button id="budgetWeekBtn" class="budgetViewBtn" type="button">Week</button>
+  <button id="budgetYearBtn" class="budgetViewBtn" type="button">Year</button>
+</div>
       </div>
     </div>
 
@@ -488,6 +490,8 @@
   </svg>
 </button>
 
+<button id="budgetReceiptScanBtn" class="tiny budgetReceiptScanBtn" type="button" title="Scan a receipt and prefill this transaction">Scan Receipt</button>
+<input id="budgetReceiptScanInput" type="file" accept="image/*" capture="environment" hidden />
 <button id="budgetTxDrawerOpenBtn" class="tiny" type="button">+ New</button>
     </div>
   </div>
@@ -555,6 +559,8 @@
 
         <button id="budgetTxDrawerCloseBtn" class="navBtn navBtnIcon" type="button">×</button>
       </div>
+
+      <div id="budgetReceiptScanStatus" class="budgetReceiptScanStatus hidden" aria-live="polite"></div>
 
       <label class="label">Transaction name</label>
       <input id="budgetTxTitle" class="input" placeholder="e.g., Groceries" />
