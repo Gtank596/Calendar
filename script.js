@@ -3211,9 +3211,11 @@ const features = buildReceiptTrainingFeatures({ merchant, amount, phrases });
     id: cryptoId(),
     createdAt: Date.now(),
 
-    merchant: finalTransaction.title || currentReceiptScanDraft.normalizedMerchant || "",
+    merchant,
+amount,
+features,
+featureCount: features.length,
     rawMerchant: currentReceiptScanDraft.rawMerchant || "",
-    amount: Math.abs(Number(finalTransaction.price || currentReceiptScanDraft.amount || 0)),
     date: finalTransaction.startDate || currentReceiptScanDraft.date || "",
 
     phrases,
