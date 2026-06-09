@@ -3111,10 +3111,16 @@ function budgetRangeForMode(){
 const RECEIPT_SCAN_FUNCTION = "scan-receipt";
 const MERCHANT_ALIASES_KEY = "myCalendarMerchantAliases_v1";
 const RECEIPT_ITEM_MEMORY_KEY = "myCalendarReceiptItemCategoryMemory_v1";
+const RECEIPT_MEMORY_LIMIT = 5000;
+const MERCHANT_MEMORY_LIMIT = 1000;
+const RECEIPT_TRAINING_RECORDS_KEY = "myCalendarReceiptTrainingRecords_v1";
+const RECEIPT_TRAINING_RECORD_LIMIT = 2000;
 let receiptScanBusy = false;
 let currentReceiptScanDraft = null;
 let merchantAliases = loadMerchantAliases();
 let receiptItemCategoryMemory = loadReceiptItemCategoryMemory();
+let receiptTrainingRecords = loadReceiptTrainingRecords();
+
 
 function loadMerchantAliases(){
   try{
@@ -3134,7 +3140,104 @@ function loadReceiptItemCategoryMemory(){
   }
 }
 
-function saveReceiptItemCategoryMemory(){
+function loadReceiptTrainingRecords(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(RECEIPT_TRAINING_RECORDS_KEY));
+    return Array.isArray(saved) ? saved : [];
+  }catch{
+    return [];
+  }
+}
+
+function persistReceiptTrainingRecords(){
+  localStorage.setItem(
+    RECEIPT_TRAINING_RECORDS_KEY,
+    JSON.stringify(receiptTrainingRecords)
+  );
+
+  setLocalPayload({ updatedAt: Date.now(), events });
+  cloudWriteDebounced();
+}
+
+function buildReceiptTrainingFeatures({ merchant = "", amount = 0, phrases = [] } = {}){
+  const features = [];
+
+  const merchantKey = normalizeMerchantKey(merchant);
+  if(merchantKey){
+    features.push(`merchant:${merchantKey}`);
+  }
+
+  const roundedAmount = Math.round(Number(amount || 0));
+
+  if(roundedAmount > 0){
+    if(roundedAmount < 10) features.push("amount:under_10");
+    else if(roundedAmount < 25) features.push("amount:10_25");
+    else if(roundedAmount < 50) features.push("amount:25_50");
+    else if(roundedAmount < 100) features.push("amount:50_100");
+    else features.push("amount:100_plus");
+  }
+
+  for(const phrase of phrases || []){
+    if(!phrase) continue;
+
+    features.push(`phrase:${phrase}`);
+
+    for(const keyword of extractReceiptLearningKeywords(phrase)){
+      features.push(`word:${keyword}`);
+    }
+  }
+
+  return Array.from(new Set(features)).slice(0, 80);
+}
+
+function saveReceiptTrainingRecordFromDraft(finalTransaction = {}){
+  if(!currentReceiptScanDraft) return;
+
+  const rawText = currentReceiptScanDraft.rawText || "";
+  const finalCategoryId = finalTransaction.categoryId || "other";
+
+  if(!rawText || !finalCategoryId || finalCategoryId === "other") return;
+
+  const predictedCategoryId =
+    Object.entries(currentReceiptScanDraft.categoryScores || {})
+      .sort((a, b) => Number(b[1]) - Number(a[1]))[0]?.[0] || "";
+
+  const phrases = extractReceiptLearningPhrases(rawText).slice(0, 20);
+const merchant = finalTransaction.title || currentReceiptScanDraft.normalizedMerchant || "";
+const amount = Math.abs(Number(finalTransaction.price || currentReceiptScanDraft.amount || 0));
+const features = buildReceiptTrainingFeatures({ merchant, amount, phrases });
+
+  const record = {
+    id: cryptoId(),
+    createdAt: Date.now(),
+
+    merchant: finalTransaction.title || currentReceiptScanDraft.normalizedMerchant || "",
+    rawMerchant: currentReceiptScanDraft.rawMerchant || "",
+    amount: Math.abs(Number(finalTransaction.price || currentReceiptScanDraft.amount || 0)),
+    date: finalTransaction.startDate || currentReceiptScanDraft.date || "",
+
+    phrases,
+    phraseCount: phrases.length,
+
+    predictedCategoryId,
+    finalCategoryId,
+    predictionWasCorrect: !!predictedCategoryId && predictedCategoryId === finalCategoryId,
+
+    confidence: Number(currentReceiptScanDraft.categoryConfidence || 0)
+  };
+
+  receiptTrainingRecords.push(record);
+
+  if(receiptTrainingRecords.length > RECEIPT_TRAINING_RECORD_LIMIT){
+    receiptTrainingRecords = receiptTrainingRecords.slice(
+      receiptTrainingRecords.length - RECEIPT_TRAINING_RECORD_LIMIT
+    );
+  }
+
+  persistReceiptTrainingRecords();
+}
+
+function persistReceiptItemCategoryMemory(){
   localStorage.setItem(
     RECEIPT_ITEM_MEMORY_KEY,
     JSON.stringify(receiptItemCategoryMemory)
@@ -3147,7 +3250,6 @@ function saveReceiptItemCategoryMemory(){
 function normalizeReceiptItemPhrase(line = ""){
   let phrase = String(line || "").toLowerCase();
 
-  // Drop prices, quantities, SKU-ish fragments, and punctuation noise.
   phrase = phrase
     .replace(/\$?\d{1,4}(?:,\d{3})*\.\d{2}/g, " ")
     .replace(/\b\d+\s*(ct|oz|lb|lbs|gal|ml|l|ea|pk|pack|qty)\b/g, " ")
@@ -3161,13 +3263,39 @@ function normalizeReceiptItemPhrase(line = ""){
     !phrase ||
     phrase.length < 3 ||
     phrase.length > 36 ||
-    /\b(total|subtotal|sub total|tax|change|cash|card|visa|mastercard|amex|debit|credit|balance|approved|thank|survey|receipt|cashier|phone|address|www|http|items sold)\b/i.test(phrase);
+    /\b(total|subtotal|sub total|tax|tip|gratuity|change|cash|card|visa|mastercard|amex|debit|credit|balance|approved|thank|survey|receipt|cashier|phone|address|www|http|items sold)\b/i.test(phrase);
 
   if(badLine) return "";
 
-  // Keep compact phrases. Long receipt descriptions are usually noise.
   const words = phrase.split(/\s+/).filter(Boolean);
   return words.slice(0, 4).join(" ");
+}
+
+const RECEIPT_LEARNING_STOPWORDS = new Set([
+  "the", "and", "with", "for", "you", "your", "our", "qty",
+  "item", "items", "sale", "regular", "small", "large", "medium",
+  "fresh", "hot", "cold", "new", "old"
+]);
+
+function getReceiptPhraseBaseWeight(phrase = ""){
+  const words = String(phrase || "").split(/\s+/).filter(Boolean);
+
+  if(words.length >= 3) return 2.25;
+  if(words.length === 2) return 1.65;
+  return 1;
+}
+
+function extractReceiptLearningKeywords(phrase = ""){
+  return String(phrase || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .map(word => word.replace(/[^a-z0-9'-]/g, ""))
+    .filter(word =>
+      word.length >= 4 &&
+      !RECEIPT_LEARNING_STOPWORDS.has(word) &&
+      !/^\d+$/.test(word)
+    )
+    .slice(0, 5);
 }
 
 function extractReceiptLearningPhrases(rawText = ""){
@@ -3197,7 +3325,12 @@ function getReceiptMemoryCategoryScores(text = ""){
   const scores = new Map();
 
   for(const [phrase, memory] of Object.entries(receiptItemCategoryMemory || {})){
-    if(!phrase || !lower.includes(phrase)) continue;
+    if(!phrase) continue;
+
+    const isWordMemory = phrase.startsWith("word:");
+    const needle = isWordMemory ? phrase.replace("word:", "") : phrase;
+
+    if(!lower.includes(needle)) continue;
 
     const categories = memory?.categories || {};
 
@@ -3205,11 +3338,23 @@ function getReceiptMemoryCategoryScores(text = ""){
       const cat = getBudgetCategory(categoryId);
       if(!cat) continue;
 
+      const weight = Number(meta?.weight || 0);
       const count = Number(meta?.count || 0);
-      if(count <= 0) continue;
+      const successful = Number(meta?.successfulPredictionCount || 0);
+      const corrections = Number(meta?.correctionCount || 0);
 
-      // A learned phrase should matter, but not bully a strong static match.
-      const boost = Math.min(4, 1.25 + count * 0.65);
+      const rawScore =
+        weight +
+        (count * 0.4) +
+        (successful * 2) -
+        (corrections * 3);
+
+      if(rawScore <= 0) continue;
+
+      const boost = isWordMemory
+        ? Math.min(7, rawScore)
+        : Math.min(16, rawScore);
+
       scores.set(categoryId, (scores.get(categoryId) || 0) + boost);
     }
   }
@@ -3217,7 +3362,70 @@ function getReceiptMemoryCategoryScores(text = ""){
   return scores;
 }
 
-function saveReceiptItemCategoryMemory(rawText = "", categoryId = "other"){
+function getReceiptCategoryMemoryScore(meta = {}){
+  return (
+    Number(meta.weight || 0) +
+    (Number(meta.correctionCount || 0) * 5) +
+    (Number(meta.successfulPredictionCount || 0) * 2)
+  );
+}
+
+function getReceiptMemoryTotalScore(memory = {}){
+  return Object.values(memory.categories || {})
+    .reduce((sum, meta) => sum + getReceiptCategoryMemoryScore(meta), 0);
+}
+
+function pruneReceiptItemCategoryMemory(){
+  const entries = Object.entries(receiptItemCategoryMemory || {});
+
+  if(entries.length <= RECEIPT_MEMORY_LIMIT) return;
+
+  entries.sort((a, b) => {
+    const scoreDiff =
+      getReceiptMemoryTotalScore(b[1]) -
+      getReceiptMemoryTotalScore(a[1]);
+
+    if(scoreDiff) return scoreDiff;
+
+    return Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0);
+  });
+
+  receiptItemCategoryMemory = Object.fromEntries(
+    entries.slice(0, RECEIPT_MEMORY_LIMIT)
+  );
+}
+
+function getMerchantAliasScore(alias = {}){
+  const statsScore = Object.values(alias.categoryStats || {}).reduce((sum, stat) => {
+    return sum +
+      Number(stat.weight || 0) +
+      (Number(stat.count || 0) * 2);
+  }, 0);
+
+  return (
+    statsScore +
+    (Number(alias.useCount || 0) * 3) +
+    (Number(alias.correctionCount || 0) * 5)
+  );
+}
+
+function pruneMerchantAliases(){
+  const entries = Object.entries(merchantAliases || {});
+
+  if(entries.length <= MERCHANT_MEMORY_LIMIT) return;
+
+  entries.sort((a, b) => {
+    const scoreDiff = getMerchantAliasScore(b[1]) - getMerchantAliasScore(a[1]);
+    if(scoreDiff) return scoreDiff;
+
+    return Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0);
+  });
+
+  merchantAliases = Object.fromEntries(entries.slice(0, MERCHANT_MEMORY_LIMIT));
+  saveMerchantAliases();
+}
+
+function learnReceiptItemCategoryWeights(rawText = "", categoryId = "other"){
   const cat = getBudgetCategory(categoryId);
   if(!cat || !categoryId || categoryId === "other") return;
 
@@ -3225,6 +3433,8 @@ function saveReceiptItemCategoryMemory(rawText = "", categoryId = "other"){
   if(!phrases.length) return;
 
   for(const phrase of phrases){
+    const baseWeight = getReceiptPhraseBaseWeight(phrase);
+
     const existing = receiptItemCategoryMemory[phrase] || {
       phrase,
       createdAt: Date.now(),
@@ -3233,43 +3443,271 @@ function saveReceiptItemCategoryMemory(rawText = "", categoryId = "other"){
 
     const catMemory = existing.categories[categoryId] || {
       count: 0,
+      weight: 0,
       firstSeenAt: Date.now()
     };
 
     existing.categories[categoryId] = {
       ...catMemory,
       count: Number(catMemory.count || 0) + 1,
+      weight: Math.min(30, Number(catMemory.weight || 0) + baseWeight),
       lastSeenAt: Date.now()
     };
 
     existing.updatedAt = Date.now();
     receiptItemCategoryMemory[phrase] = existing;
-  }
+    // Also learn strong individual words inside the phrase.
+    // Example: "chicken alfredo" teaches both the phrase and "alfredo".
+    for(const keyword of extractReceiptLearningKeywords(phrase)){
+      const keywordKey = `word:${keyword}`;
 
-  // Keep the tiny local brain tiny. Oldest/least-used phrases get pruned first.
-  const entries = Object.entries(receiptItemCategoryMemory);
-  if(entries.length > 500){
-    entries.sort((a, b) => {
-      const aCount = Object.values(a[1]?.categories || {})
-        .reduce((sum, x) => sum + Number(x?.count || 0), 0);
-      const bCount = Object.values(b[1]?.categories || {})
-        .reduce((sum, x) => sum + Number(x?.count || 0), 0);
+      const wordExisting = receiptItemCategoryMemory[keywordKey] || {
+        phrase: keywordKey,
+        displayWord: keyword,
+        createdAt: Date.now(),
+        categories: {}
+      };
 
-      if(aCount !== bCount) return aCount - bCount;
-      return Number(a[1]?.updatedAt || 0) - Number(b[1]?.updatedAt || 0);
-    });
+      const wordMemory = wordExisting.categories[categoryId] || {
+        count: 0,
+        weight: 0,
+        firstSeenAt: Date.now()
+      };
 
-    for(const [key] of entries.slice(0, entries.length - 500)){
-      delete receiptItemCategoryMemory[key];
+      wordExisting.categories[categoryId] = {
+        ...wordMemory,
+        count: Number(wordMemory.count || 0) + 1,
+        weight: Math.min(20, Number(wordMemory.weight || 0) + 1.4),
+        lastSeenAt: Date.now()
+      };
+
+      wordExisting.updatedAt = Date.now();
+      receiptItemCategoryMemory[keywordKey] = wordExisting;
     }
   }
 
-  saveReceiptItemCategoryMemory();
+  pruneReceiptItemCategoryMemory();
+
+  persistReceiptItemCategoryMemory();
+}
+
+function mergeReceiptCategoryScoreMap(target, source){
+  for(const [categoryId, score] of source.entries()){
+    target.set(categoryId, (target.get(categoryId) || 0) + score);
+  }
+
+  return target;
+}
+
+function getReceiptMerchantCategoryScores(merchant = ""){
+  const key = normalizeMerchantKey(merchant);
+  const scores = new Map();
+
+  if(!key) return scores;
+
+  const alias = merchantAliases[key];
+  const stats = alias?.categoryStats || {};
+
+  for(const [categoryId, stat] of Object.entries(stats)){
+    const weight = Number(stat?.weight || 0);
+    const count = Number(stat?.count || 0);
+    const successful = Number(stat?.successfulPredictionCount || 0);
+    const corrections = Number(stat?.correctionCount || 0);
+
+    const score =
+      weight +
+      (count * 0.5) +
+      (successful * 2) -
+      (corrections * 3);
+
+    if(score <= 0) continue;
+
+    scores.set(categoryId, Math.min(18, score));
+  }
+
+  return scores;
+}
+
+function learnReceiptMerchantCategoryWeights(
+  merchant = "",
+  categoryId = "other",
+  predictedCategoryId = ""
+){
+  if(!merchant || !categoryId || categoryId === "other") return;
+
+  const cat = getBudgetCategory(categoryId);
+  if(!cat) return;
+
+  const key = normalizeMerchantKey(merchant);
+  if(!key) return;
+
+  const predictionWasCorrect =
+    predictedCategoryId && predictedCategoryId === categoryId;
+
+  const existing = merchantAliases[key] || {
+    rawName: merchant,
+    normalizedName: merchant,
+    createdAt: Date.now(),
+    useCount: 0
+  };
+
+  const categoryStats = existing.categoryStats || {};
+  const stat = categoryStats[categoryId] || {
+    count: 0,
+    weight: 0,
+    successfulPredictionCount: 0,
+    correctionCount: 0,
+    firstSeenAt: Date.now()
+  };
+
+  categoryStats[categoryId] = {
+    ...stat,
+    count: Number(stat.count || 0) + 1,
+    weight: Math.min(40, Number(stat.weight || 0) + 2.5),
+    successfulPredictionCount:
+      Number(stat.successfulPredictionCount || 0) + (predictionWasCorrect ? 1 : 0),
+    correctionCount:
+      Number(stat.correctionCount || 0) + (predictionWasCorrect ? 0 : 1),
+    lastOutcomeAt: Date.now(),
+    lastSeenAt: Date.now()
+  };
+
+  merchantAliases[key] = {
+    ...existing,
+    normalizedName: existing.normalizedName || merchant,
+    categoryStats,
+    updatedAt: Date.now()
+  };
+
+  saveMerchantAliases();
+  pruneMerchantAliases?.();
+}
+function weakenReceiptWrongCategory(rawText = "", wrongCategoryId = ""){
+  if(!rawText || !wrongCategoryId || wrongCategoryId === "other") return;
+
+  const phrases = extractReceiptLearningPhrases(rawText);
+
+  for(const phrase of phrases){
+    const memory = receiptItemCategoryMemory[phrase];
+    const catMemory = memory?.categories?.[wrongCategoryId];
+
+    if(catMemory){
+      catMemory.weight = Math.max(0, Number(catMemory.weight || 0) - 1.25);
+      catMemory.lastWeakenedAt = Date.now();
+    }
+
+    for(const keyword of extractReceiptLearningKeywords(phrase)){
+      const wordKey = `word:${keyword}`;
+      const wordMemory = receiptItemCategoryMemory[wordKey]?.categories?.[wrongCategoryId];
+
+      if(wordMemory){
+        wordMemory.weight = Math.max(0, Number(wordMemory.weight || 0) - 0.7);
+        wordMemory.lastWeakenedAt = Date.now();
+      }
+    }
+  }
+
+  persistReceiptItemCategoryMemory();
+}
+
+function cleanupReceiptLearningMemory(){
+  for(const [phrase, memory] of Object.entries(receiptItemCategoryMemory || {})){
+    for(const [categoryId, meta] of Object.entries(memory.categories || {})){
+      if(Number(meta?.weight || 0) <= 0){
+        delete memory.categories[categoryId];
+      }
+    }
+
+    if(!Object.keys(memory.categories || {}).length){
+      delete receiptItemCategoryMemory[phrase];
+    }
+  }
+
+  for(const [merchantKey, alias] of Object.entries(merchantAliases || {})){
+    for(const [categoryId, stat] of Object.entries(alias.categoryStats || {})){
+      if(Number(stat?.weight || 0) <= 0){
+        delete alias.categoryStats[categoryId];
+      }
+    }
+
+    if(alias.categoryStats && !Object.keys(alias.categoryStats).length){
+      delete alias.categoryStats;
+    }
+  }
+
+  persistReceiptItemCategoryMemory();
+  saveMerchantAliases();
+}
+
+function markReceiptPredictionOutcome(rawText = "", predictedCategoryId = "", actualCategoryId = ""){
+  if(!rawText || !actualCategoryId || actualCategoryId === "other") return;
+
+  const predictionWasCorrect =
+    predictedCategoryId && predictedCategoryId === actualCategoryId;
+
+  const phrases = extractReceiptLearningPhrases(rawText);
+
+  for(const phrase of phrases){
+    const memory = receiptItemCategoryMemory[phrase];
+    const actualMemory = memory?.categories?.[actualCategoryId];
+
+    if(actualMemory){
+      if(predictionWasCorrect){
+        actualMemory.successfulPredictionCount =
+          Number(actualMemory.successfulPredictionCount || 0) + 1;
+      }else{
+        actualMemory.correctionCount =
+          Number(actualMemory.correctionCount || 0) + 1;
+      }
+
+      actualMemory.lastOutcomeAt = Date.now();
+    }
+
+    for(const keyword of extractReceiptLearningKeywords(phrase)){
+      const wordKey = `word:${keyword}`;
+      const wordMemory = receiptItemCategoryMemory[wordKey]?.categories?.[actualCategoryId];
+
+      if(wordMemory){
+        if(predictionWasCorrect){
+          wordMemory.successfulPredictionCount =
+            Number(wordMemory.successfulPredictionCount || 0) + 1;
+        }else{
+          wordMemory.correctionCount =
+            Number(wordMemory.correctionCount || 0) + 1;
+        }
+
+        wordMemory.lastOutcomeAt = Date.now();
+      }
+    }
+  }
 }
 
 function learnReceiptCategoryFromCurrentDraft(categoryId){
   if(!currentReceiptScanDraft) return;
-  saveReceiptItemCategoryMemory(currentReceiptScanDraft.rawText || "", categoryId);
+
+  const predictedCategoryId =
+    Object.entries(currentReceiptScanDraft.categoryScores || {})
+      .sort((a, b) => Number(b[1]) - Number(a[1]))[0]?.[0];
+
+  if(predictedCategoryId && predictedCategoryId !== categoryId){
+    weakenReceiptWrongCategory(currentReceiptScanDraft.rawText || "", predictedCategoryId);
+  }
+
+  learnReceiptItemCategoryWeights(currentReceiptScanDraft.rawText || "", categoryId);
+
+markReceiptPredictionOutcome(
+  currentReceiptScanDraft.rawText || "",
+  predictedCategoryId,
+  categoryId
+);
+
+  learnReceiptMerchantCategoryWeights(
+  currentReceiptScanDraft.normalizedMerchant || currentReceiptScanDraft.rawMerchant || "",
+  categoryId,
+  predictedCategoryId
+);
+
+cleanupReceiptLearningMemory();
 }
 
 function normalizeMerchantKey(name = ""){
@@ -3714,50 +4152,45 @@ function getBestReceiptTitle(result = {}){
 
 function getBestReceiptAmount(result = {}){
   const rawText = String(result.rawText || result.text || "");
-  const moneyRe = /(-?\$?\s*\d{1,4}(?:,\d{3})*\.\d{2})/g;
   const lines = rawText.split(/\n+/).map(cleanReceiptLine).filter(Boolean);
+  const moneyRe = /(-?\$?\s*(?:usd\$?\s*)?\d{1,4}(?:,\d{3})*\.\d{2})/gi;
   const candidates = [];
 
-  for(const line of lines){
+  for(let i = 0; i < lines.length; i++){
+    const line = lines[i];
     const matches = [...line.matchAll(moneyRe)];
     if(!matches.length) continue;
 
-    const lower = line.toLowerCase();
+    const prev = lines[i - 1] || "";
+    const next = lines[i + 1] || "";
+    const tightContext = `${prev} ${line} ${next}`.toLowerCase();
+    const sameLine = line.toLowerCase();
 
     for(const match of matches){
-      const value = Number(match[1].replace(/[$,\s]/g, ""));
+      const value = Number(match[1].replace(/usd|\$|,|\s/gi, ""));
       if(!Number.isFinite(value) || value <= 0) continue;
 
       let score = 0;
 
-      if(/\b(total\s+paid|paid\s+total|amount\s+paid|grand\s+total)\b/i.test(line)) score += 1000;
-      else if(/\btotal\b/i.test(line)) score += 700;
-      else if(/\bpurchase\s+amount\b/i.test(line)) score += 500;
-      else if(/\b(card|visa|mastercard|amex|debit|credit)\b/i.test(line)) score += 80;
+      if(/\b(total\s+paid|paid\s+total|amount\s+paid|grand\s+total)\b/i.test(tightContext)) score += 5000;
+      else if(/\bpurchase\s+amount\b/i.test(tightContext)) score += 1200;
+      else if(/\btotal\b/i.test(tightContext)) score += 1000;
+      else if(/\b(card|visa|mastercard|amex|debit|credit)\b/i.test(tightContext)) score += 100;
 
-      // Never let tiny goblins like tax/tip/gratuity win.
-      if(/\b(tax|tip|gratuity|discount|change|balance due|cash back)\b/i.test(line)) score -= 10000;
-      if(/\b(subtotal|sub\s*total)\b/i.test(line)) score -= 5000;
-      if(/\b(auth|aid|rrn|tid|trn|tvr|iad|arc|mode|issuer)\b/i.test(line)) score -= 2000;
+      // Only punish if the bad label is on the same line as this amount.
+      if(/\b(tax|tip|gratuity|discount|change|balance due|cash back)\b/i.test(sameLine)) score -= 10000;
+      if(/\b(subtotal|sub\s*total)\b/i.test(sameLine)) score -= 5000;
+      if(/\b(auth|aid|rrn|tid|trn|tvr|iad|arc|mode|issuer)\b/i.test(sameLine)) score -= 2000;
 
-      candidates.push({ value, score, line, lower });
+      candidates.push({ value, score, line, tightContext });
     }
   }
 
   const preferred = candidates
-    .filter(c =>
-      c.score > 0 &&
-      /\b(total\s+paid|paid\s+total|amount\s+paid|grand\s+total|total|purchase\s+amount)\b/i.test(c.line)
-    )
+    .filter(c => c.score > 0)
     .sort((a, b) => b.score - a.score || b.value - a.value);
 
   if(preferred.length) return preferred[0].value;
-
-  const fallbackCandidate = candidates
-    .filter(c => c.score > 0)
-    .sort((a, b) => b.score - a.score || b.value - a.value)[0];
-
-  if(fallbackCandidate) return fallbackCandidate.value;
 
   const fallback = Number(result.grandTotal ?? result.total ?? result.amount ?? 0);
   return Number.isFinite(fallback) ? fallback : 0;
@@ -3802,6 +4235,13 @@ function findPossibleReceiptDuplicate({ merchant = "", amount = 0, date = "" } =
   }
 
   return best && best.score >= 75 ? best : null;
+}
+
+function getReceiptCategoryPredictionSummary(scoreList = []){
+  return scoreList.slice(0, 3).map(([categoryId, score]) => {
+    const cat = getBudgetCategory(categoryId);
+    return `${cat?.name || categoryId} ${Math.round(score)}`;
+  }).join(", ");
 }
 
 function applyReceiptScanResult(result = {}){
@@ -3849,10 +4289,33 @@ currentReceiptScanDraft = {
   setBudgetTxType("expense");
 
   const categoryGuess = result.categoryId || getReceiptCategoryGuess(categoryText);
-  if(categoryGuess && budgetTxCategory){
-    budgetTxCategory.value = categoryGuess;
-    renderBudgetCategoryOptions();
-  }
+
+const scoreMap = getReceiptMemoryCategoryScores(categoryText);
+
+mergeReceiptCategoryScoreMap(
+  scoreMap,
+  getReceiptMerchantCategoryScores(store)
+);
+const scoreList = Array.from(scoreMap.entries())
+  .sort((a, b) => b[1] - a[1]);
+
+const topScore = scoreList[0]?.[1] || 0;
+const secondScore = scoreList[1]?.[1] || 0;
+const confidence = topScore > 0
+  ? Math.round((topScore / Math.max(1, topScore + secondScore)) * 100)
+  : 0;
+
+if(scoreList[0]?.[0]){
+  currentReceiptScanDraft.categoryConfidence = confidence;
+  currentReceiptScanDraft.categoryScores = Object.fromEntries(scoreList);
+}
+  const learnedGuess = scoreList[0]?.[0];
+const finalGuess = learnedGuess || categoryGuess;
+
+if(finalGuess && budgetTxCategory){
+  budgetTxCategory.value = finalGuess;
+  renderBudgetCategoryOptions();
+}
 
   openBudgetTxDrawer();
 
@@ -3860,6 +4323,20 @@ currentReceiptScanDraft = {
   if(store) pieces.push(store);
   if(Number.isFinite(amount) && amount > 0) pieces.push(money(amount));
   if(date) pieces.push(date);
+if(currentReceiptScanDraft?.categoryConfidence){
+  const cat = getBudgetCategory(budgetTxCategory?.value || "other");
+  const contenders = getReceiptCategoryPredictionSummary(scoreList);
+
+  pieces.push(`${cat?.name || "Category"} ${currentReceiptScanDraft.categoryConfidence}%`);
+
+  if(contenders){
+    currentReceiptScanDraft.categoryExplanation = contenders;
+  }
+}
+
+const explanationText = currentReceiptScanDraft?.categoryExplanation
+  ? ` Top matches: ${currentReceiptScanDraft.categoryExplanation}.`
+  : "";
 
   const duplicateText = possibleDuplicate
   ? ` ⚠️ Possible duplicate: ${possibleDuplicate.item.title} on ${fmtPrettyISO(possibleDuplicate.item.date)} for ${money(Math.abs(possibleDuplicate.item.price))}.`
@@ -3867,8 +4344,8 @@ currentReceiptScanDraft = {
 
 setReceiptScanStatus(
   pieces.length
-    ? `Receipt scanned: ${pieces.join(" • ")}. Review before adding.${duplicateText}`
-    : `Receipt scanned. Review the fields before adding.${duplicateText}`,
+    ? `Receipt scanned: ${pieces.join(" • ")}. Review before adding.${explanationText}${duplicateText}`
+: `Receipt scanned. Review the fields before adding.${explanationText}${duplicateText}`,
   possibleDuplicate ? "info" : "success"
 );
 }
@@ -4039,6 +4516,7 @@ const amount = (budgetTxType?.value === "income" ? -1 : 1) * Math.abs(rawAmount)
 
   learnMerchantAliasFromCurrentDraft(title);
   learnReceiptCategoryFromCurrentDraft(newEv.categoryId);
+saveReceiptTrainingRecordFromDraft(newEv);
   resetBudgetTransactionForm();
 
   renderBudgetPage();
