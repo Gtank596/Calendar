@@ -3257,35 +3257,206 @@ function persistReceiptItemCategoryMemory(){
   cloudWriteDebounced();
 }
 
+function normalizeReceiptTrainingText(text = ""){
+  return String(text || "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^\w\s.$:#@/'%-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function normalizeReceiptItemPhrase(line = ""){
-  let phrase = String(line || "").toLowerCase();
+  let phrase = normalizeReceiptTrainingText(line);
 
   phrase = phrase
-    .replace(/\$?\d{1,4}(?:,\d{3})*\.\d{2}/g, " ")
-    .replace(/\b\d+\s*(ct|oz|lb|lbs|gal|ml|l|ea|pk|pack|qty)\b/g, " ")
-    .replace(/\b(upc|sku|tc|op|te|tr|ref|auth|aid|term|terminal)\s*#?\s*\w+\b/g, " ")
-    .replace(/[^a-z0-9 &'-]/g, " ")
+    // Remove money amounts like $33.21 or 33.21
+    .replace(/\$?\d{1,5}(?:,\d{3})*\.\d{2}\b/g, " ")
+
+    // Remove common quantity/unit chunks like 16 oz, 2 ct, 8.696 gal
+    .replace(/\b\d+(?:\.\d+)?\s*(ct|oz|lb|lbs|gal|gals|gallon|gallons|ml|l|ea|pk|pack|qty)\b/g, " ")
+
+    // Remove common receipt IDs
+    .replace(/\b(upc|sku|tc|op|te|tr|ref|auth|aid|tvr|iad|tsi|arc|term|terminal|invoice|trace|site)\s*#?\s*[a-z0-9-]*\b/g, " ")
+
+    // Remove standalone numbers after the meaningful ID/unit cleanup
     .replace(/\b\d+\b/g, " ")
+
+    .replace(/[^\w\s&'-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  const badLine =
-    !phrase ||
-    phrase.length < 3 ||
-    phrase.length > 36 ||
-    /\b(total|subtotal|sub total|tax|tip|gratuity|change|cash|card|visa|mastercard|amex|debit|credit|balance|approved|thank|survey|receipt|cashier|phone|address|www|http|items sold)\b/i.test(phrase);
-
-  if(badLine) return "";
+  if(!phrase || phrase.length < 3 || phrase.length > 42) return "";
 
   const words = phrase.split(/\s+/).filter(Boolean);
-  return words.slice(0, 4).join(" ");
+
+  return words.slice(0, 5).join(" ");
 }
 
 const RECEIPT_LEARNING_STOPWORDS = new Set([
-  "the", "and", "with", "for", "you", "your", "our", "qty",
-  "item", "items", "sale", "regular", "small", "large", "medium",
-  "fresh", "hot", "cold", "new", "old"
+  "the", "and", "with", "for", "you", "your", "our", "are",
+  "this", "that", "from", "have", "has", "had", "was", "were",
+  "here", "there", "please", "thanks", "thank",
+
+  "qty", "item", "items", "sale", "regular", "small", "large",
+  "medium", "fresh", "hot", "cold", "new", "old",
+
+  "each", "unit", "price", "amount", "total", "subtotal",
+  "tax", "tip", "cash", "card"
 ]);
+
+const RECEIPT_TRAINING_NOISE_WORDS = new Set([
+  // Payment/card terminal
+  "auth", "authorization", "approved", "approval", "aid", "tvr",
+  "iad", "tsi", "arc", "terminal", "term", "trace", "invoice",
+  "site", "merchant", "merch", "entry", "method", "issuer",
+  "application", "contactless", "chip", "swipe", "pin",
+
+  // Tender/payment
+  "card", "cards", "debit", "credit", "visa", "mastercard",
+  "amex", "discover", "cash", "change", "tender", "balance",
+
+  // Receipt structure
+  "receipt", "transaction", "trans", "txn", "register", "reg",
+  "cashier", "clerk", "server", "order", "store", "terminal",
+
+  // Totals/fees
+  "subtotal", "total", "tax", "tip", "tips", "gratuity",
+  "discount", "change", "amount", "paid", "due",
+
+  // Address/contact
+  "street", "st", "road", "rd", "avenue", "ave", "blvd",
+  "boulevard", "drive", "dr", "lane", "ln", "highway", "hwy",
+  "suite", "ste", "unit", "apt", "phone", "tel", "fax",
+
+  // Promo/footer
+  "survey", "reward", "rewards", "coupon", "promo", "offer",
+  "download", "app", "visit", "website", "customer", "service",
+
+  // Gas/quantity labels that are usually not item names by themselves
+  "product", "price", "qty", "quantity", "net", "gal", "gals"
+]);
+
+const RECEIPT_PRODUCT_SIGNAL_WORDS = new Set([
+  // Gas / auto
+  "fuel", "gas", "unleaded", "diesel", "premium", "regular",
+  "pump", "oil", "tire", "tires", "auto",
+
+  // Food / grocery
+  "grocery", "market", "produce", "milk", "bread", "eggs",
+  "cheese", "chicken", "beef", "pork", "fish", "rice", "pasta",
+  "pizza", "burger", "sandwich", "coffee", "tea", "soda",
+  "water", "juice", "apple", "banana", "orange",
+
+  // Household / retail
+  "soap", "detergent", "towel", "paper", "trash", "battery",
+  "batteries", "hardware", "clothing", "shirt", "pants",
+
+  // Health
+  "pharmacy", "medicine", "medication", "vitamin", "rx"
+]);
+
+function receiptTokens(text = ""){
+  return normalizeReceiptTrainingText(text)
+    .split(/\s+/)
+    .map(t => t.replace(/[^a-z0-9'-]/g, ""))
+    .filter(Boolean);
+}
+
+function isReceiptTrainingItemSectionStart(line = ""){
+  const p = normalizeReceiptTrainingText(line);
+
+  return (
+    /^\s*(item|items|product|products|description|descriptions)\s*:?\s*$/.test(p) ||
+    /\b(item|product|description)\s*[:#]\b/.test(p)
+  );
+}
+
+function isReceiptTrainingHardStopLine(line = ""){
+  const p = normalizeReceiptTrainingText(line);
+
+  return (
+    /\b(sub\s*total|subtotal|total|net total|grand total|tax|tip|gratuity|balance|amount due|change due)\b/.test(p) ||
+    /\b(card amt|card amount|payment|tender|cash|credit|debit|approved|approval|auth|pin used)\b/.test(p) ||
+    /\b(thank you|customer service|survey|reward|rewards|coupon|download|visit us|tell us|save on)\b/.test(p)
+  );
+}
+
+function lineLooksLikeReceiptItem(line = ""){
+  const p = normalizeReceiptTrainingText(line);
+
+  if(!p || isReceiptTrainingHardStopLine(p)) return false;
+  if(isReceiptBoilerplatePhrase(p)) return false;
+
+  return (
+    /\$?\d{1,5}(?:,\d{3})*\.\d{2}\b/.test(p) ||
+    /\b\d+(?:\.\d+)?\s*(ct|oz|lb|lbs|gal|gals|ml|l|ea|pk|pack)\b/.test(p) ||
+    RECEIPT_PRODUCT_SIGNAL_WORDS.has(p)
+  );
+}
+
+function isReceiptBoilerplatePhrase(phrase = ""){
+  const p = normalizeReceiptTrainingText(phrase);
+  if(!p || p.length < 3) return true;
+
+  const tokens = receiptTokens(p);
+  if(!tokens.length) return true;
+
+  // Mostly numbers, punctuation, receipt separators, or money.
+  if(/^[\d\s.$:#*%-]+$/.test(p)) return true;
+
+  // URLs/domains, including OCR-mangled "murphyusa com".
+  if(/\b(?:www\s*)?[a-z0-9-]{3,}\s*(?:\.|\sdot\s)\s*(com|net|org|gov|edu|co)\b/.test(p)) return true;
+  if(/\b[a-z0-9-]{4,}\s+(com|net|org|gov|edu)\b/.test(p)) return true;
+
+  // Email-ish strings.
+  if(/\b[a-z0-9._%+-]+\s*@\s*[a-z0-9.-]+\s*\.\s*[a-z]{2,}\b/.test(p)) return true;
+
+  // Phone numbers.
+  if(/\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/.test(p)) return true;
+  if(/\b\d[-.\s]?\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/.test(p)) return true;
+
+  // Long IDs / approval codes / hex-ish payment fields.
+  if(/\b[a-f0-9]{8,}\b/i.test(p)) return true;
+  if(/\b[a-z]{1,5}\s*[a-f0-9]{6,}\b/i.test(p)) return true;
+
+  // Zip codes / long standalone numbers, unless the line clearly has product-unit context.
+  if(/\b\d{5}(?:-\d{4})?\b/.test(p)) return true;
+
+  const digitCount = (p.match(/\d/g) || []).length;
+  const hasUnitContext = /\b(ct|oz|lb|lbs|gal|gals|ml|l|ea|pk|pack)\b/.test(p);
+  if(digitCount >= 5 && !hasUnitContext) return true;
+
+  // Address lines.
+  if(/\b(street|road|avenue|blvd|boulevard|drive|lane|highway|suite|unit|apt)\b/.test(p)) return true;
+  if(/\b(st|rd|ave|dr|ln|hwy|ste)\b/.test(p) && tokens.length <= 5) return true;
+
+  // Promo/footer lines are often long sentences, not category clues.
+  if(tokens.length > 6) return true;
+
+  // Lines made only of receipt-control words.
+  if(tokens.every(t =>
+    RECEIPT_LEARNING_STOPWORDS.has(t) ||
+    RECEIPT_TRAINING_NOISE_WORDS.has(t)
+  )){
+    return true;
+  }
+
+  // Any phrase heavily dominated by receipt-control words is probably not useful.
+  const noiseCount = tokens.filter(t =>
+    RECEIPT_TRAINING_NOISE_WORDS.has(t)
+  ).length;
+
+  if(tokens.length <= 3 && noiseCount >= 1 && noiseCount === tokens.length){
+    return true;
+  }
+
+  if(tokens.length >= 3 && noiseCount / tokens.length >= 0.6){
+    return true;
+  }
+
+  return false;
+}
 
 function getReceiptPhraseBaseWeight(phrase = ""){
   const words = String(phrase || "").split(/\s+/).filter(Boolean);
@@ -3296,52 +3467,43 @@ function getReceiptPhraseBaseWeight(phrase = ""){
 }
 
 function isUsefulReceiptTrainingPhrase(phrase = ""){
-  const p = String(phrase || "").toLowerCase().trim();
-
+  const p = normalizeReceiptTrainingText(phrase);
   if(!p || p.length < 3) return false;
 
-  const junkExact = new Set([
-    "site", "trace", "sale", "merch", "invoice", "auth",
-    "aid", "tvr", "iad", "tsi", "arc",
-    "application name us", "application name",
-    "mode issuer", "contactless", "verified by pin", "pin used",
-    "entry method", "entry method l",
-    "card amt", "debit", "visa debit", "approved"
-  ]);
+  if(isReceiptBoilerplatePhrase(p)) return false;
 
-  if(junkExact.has(p)) return false;
+  const tokens = receiptTokens(p);
 
-  const junkContains = [
-    "entry method",
-    "application name",
-    "verified by pin",
-    "pin used",
-    "customer service",
-    "download the",
-    "rewards app",
-    "deals on drinks",
-    "snacks and save"
-  ];
+  const usefulTokens = tokens.filter(t =>
+    t.length >= 3 &&
+    !RECEIPT_LEARNING_STOPWORDS.has(t) &&
+    !RECEIPT_TRAINING_NOISE_WORDS.has(t) &&
+    !/^\d+$/.test(t)
+  );
 
-  if(junkContains.some(x => p.includes(x))) return false;
+  if(!usefulTokens.length) return false;
 
-  if(/^[\d\s.$:-]+$/.test(p)) return false;
-  if(/\b[a-z]{1,4}\s*[a-f0-9]{6,}\b/i.test(p)) return false;
-  if(/\b[a-f0-9]{8,}\b/i.test(p)) return false;
-  if(/\b\d{5,}\b/.test(p)) return false;
+  const hasProductSignal = usefulTokens.some(t =>
+    RECEIPT_PRODUCT_SIGNAL_WORDS.has(t)
+  );
 
+  // Single useful words are okay if they are strong, like "unleaded", "pump", "alfredo".
+  if(usefulTokens.length === 1){
+    return usefulTokens[0].length >= 4 || hasProductSignal;
+  }
+
+  // Multi-word item names are usually useful unless caught by boilerplate rules.
   return true;
 }
 
 function extractReceiptLearningKeywords(phrase = ""){
-  return String(phrase || "")
-    .toLowerCase()
-    .split(/\s+/)
-    .map(word => word.replace(/[^a-z0-9'-]/g, ""))
+  return receiptTokens(phrase)
     .filter(word =>
       word.length >= 4 &&
       !RECEIPT_LEARNING_STOPWORDS.has(word) &&
-      !/^\d+$/.test(word)
+      !RECEIPT_TRAINING_NOISE_WORDS.has(word) &&
+      !/^\d+$/.test(word) &&
+      !isReceiptBoilerplatePhrase(word)
     )
     .slice(0, 5);
 }
@@ -3350,19 +3512,58 @@ function extractReceiptLearningPhrases(rawText = ""){
   const seen = new Set();
   const phrases = [];
 
-  const lines = String(rawText || "")
+  const rawLines = String(rawText || "")
     .split(/\n+/)
     .map(cleanReceiptLine)
     .filter(Boolean);
 
-  for(const line of lines){
-    const phrase = normalizeReceiptItemPhrase(line);
-    if(!phrase || seen.has(phrase)) continue;
+  let inItemZone = false;
+  let sawUsefulPhrase = false;
+
+  for(let i = 0; i < rawLines.length; i++){
+    const rawLine = rawLines[i];
+    const cleanLine = normalizeReceiptTrainingText(rawLine);
+
+    if(!cleanLine) continue;
+
+    if(isReceiptTrainingItemSectionStart(cleanLine)){
+      inItemZone = true;
+      continue;
+    }
+
+    // If we have started collecting useful item clues, totals/payment/footer usually means stop.
+    if(isReceiptTrainingHardStopLine(cleanLine)){
+      if(sawUsefulPhrase || inItemZone) break;
+      continue;
+    }
+
+    // Skip the usual receipt header: merchant/address/date/store info.
+    // Merchant is already saved separately as merchant:<name>, so we do not need it duplicated here.
+    const likelyHeaderLine =
+      i < 5 &&
+      !inItemZone &&
+      !lineLooksLikeReceiptItem(rawLine);
+
+    if(likelyHeaderLine) continue;
+
+    const shouldTryLine =
+      inItemZone ||
+      lineLooksLikeReceiptItem(rawLine) ||
+      (i >= 5 && !isReceiptBoilerplatePhrase(cleanLine));
+
+    if(!shouldTryLine) continue;
+
+    const phrase = normalizeReceiptItemPhrase(rawLine);
+
+    if(!phrase) continue;
+    if(!isUsefulReceiptTrainingPhrase(phrase)) continue;
+    if(seen.has(phrase)) continue;
 
     seen.add(phrase);
     phrases.push(phrase);
+    sawUsefulPhrase = true;
 
-    if(phrases.length >= 60) break;
+    if(phrases.length >= 40) break;
   }
 
   return phrases;
