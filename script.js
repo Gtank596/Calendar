@@ -4887,6 +4887,37 @@ function getBestReceiptTitle(result = {}){
     : fallbackStore || "Receipt";
 }
 
+function rebuildReceiptTrainingRecords(){
+  receiptTrainingRecords = (receiptTrainingRecords || []).map(record => {
+    const rawText = (record.trainingDebug || [])
+      .map(x => x.rawLine)
+      .join("\n");
+
+    const phrases = extractReceiptLearningPhrases(rawText)
+      .filter(isUsefulReceiptTrainingPhrase)
+      .slice(0, 20);
+
+    const features = buildReceiptTrainingFeatures({
+      merchant: record.merchant || record.rawMerchant || "",
+      amount: record.amount || 0,
+      phrases
+    });
+
+    return {
+      ...record,
+      phrases,
+      phraseCount: phrases.length,
+      features,
+      featureCount: features.length,
+      rebuiltAt: Date.now()
+    };
+  });
+
+  persistReceiptTrainingRecords();
+  console.log("Rebuilt receipt training records:", receiptTrainingRecords.length);
+  return receiptTrainingRecords;
+}
+
 function getBestReceiptAmount(result = {}){
   const rawText = String(result.rawText || result.text || "");
   const lines = rawText.split(/\n+/).map(cleanReceiptLine).filter(Boolean);
