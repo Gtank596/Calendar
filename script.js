@@ -3121,6 +3121,7 @@ const RECEIPT_MEMORY_LIMIT = 5000;
 const MERCHANT_MEMORY_LIMIT = 1000;
 const RECEIPT_TRAINING_RECORDS_KEY = "myCalendarReceiptTrainingRecords_v1";
 const RECEIPT_TRAINING_RECORD_LIMIT = 2000;
+const RECEIPT_TRAINING_DEBUG_ENABLED = true;
 let receiptScanBusy = false;
 let currentReceiptScanDraft = null;
 let merchantAliases = loadMerchantAliases();
@@ -3214,6 +3215,9 @@ function saveReceiptTrainingRecordFromDraft(finalTransaction = {}){
 const merchant = finalTransaction.title || currentReceiptScanDraft.normalizedMerchant || "";
 const amount = Math.abs(Number(finalTransaction.price || currentReceiptScanDraft.amount || 0));
 const features = buildReceiptTrainingFeatures({ merchant, amount, phrases });
+const trainingDebug = RECEIPT_TRAINING_DEBUG_ENABLED
+  ? buildReceiptTrainingDebugRows(rawText)
+  : [];
 
   const record = {
     id: cryptoId(),
@@ -3221,10 +3225,14 @@ const features = buildReceiptTrainingFeatures({ merchant, amount, phrases });
 
     merchant,
 amount,
+
 features,
 featureCount: features.length,
     rawMerchant: currentReceiptScanDraft.rawMerchant || "",
     date: finalTransaction.startDate || currentReceiptScanDraft.date || "",
+
+trainingDebug,
+trainingDebugCount: trainingDebug.length,
 
     phrases,
     phraseCount: phrases.length,
@@ -3508,6 +3516,222 @@ function extractReceiptLearningKeywords(phrase = ""){
     .slice(0, 5);
 }
 
+function receiptLineHasMoney(line = ""){
+  return /\$?\d{1,5}(?:,\d{3})*\.\d{2}\b/.test(
+    normalizeReceiptTrainingText(line)
+  );
+}
+
+function receiptLineHasUnit(line = ""){
+  return /\b\d+(?:\.\d+)?\s*(ct|oz|lb|lbs|gal|gals|gallon|gallons|ml|l|ea|pk|pack)\b/.test(
+    normalizeReceiptTrainingText(line)
+  );
+}
+
+function receiptLineHasProductSignal(line = ""){
+  const tokens = receiptTokens(line);
+
+  return tokens.some(t => RECEIPT_PRODUCT_SIGNAL_WORDS.has(t));
+}
+
+function scoreReceiptTrainingLine(rawLine = "", context = {}){
+  const cleanLine = normalizeReceiptTrainingText(rawLine);
+  const phrase = normalizeReceiptItemPhrase(rawLine);
+  const phraseTokens = receiptTokens(phrase);
+  const lineTokens = receiptTokens(cleanLine);
+
+  let score = 0;
+  const reasons = [];
+
+  const add = (points, reason) => {
+    score += points;
+    reasons.push(`${points > 0 ? "+" : ""}${points} ${reason}`);
+  };
+
+  if(!cleanLine){
+    return {
+      rawLine,
+      cleanLine,
+      phrase: "",
+      score: -999,
+      keep: false,
+      hardStop: false,
+      sectionStart: false,
+      reasons: ["empty line"]
+    };
+  }
+
+  if(isReceiptTrainingItemSectionStart(cleanLine)){
+    return {
+      rawLine,
+      cleanLine,
+      phrase: "",
+      score: 0,
+      keep: false,
+      hardStop: false,
+      sectionStart: true,
+      reasons: ["item/product section marker"]
+    };
+  }
+
+  if(isReceiptTrainingHardStopLine(cleanLine)){
+    return {
+      rawLine,
+      cleanLine,
+      phrase: "",
+      score: -999,
+      keep: false,
+      hardStop: true,
+      sectionStart: false,
+      reasons: ["totals/payment/footer stop line"]
+    };
+  }
+
+  const hasMoney = receiptLineHasMoney(cleanLine);
+  const hasUnit = receiptLineHasUnit(cleanLine);
+  const hasProductSignal = receiptLineHasProductSignal(cleanLine);
+  const boilerplateLine = isReceiptBoilerplatePhrase(cleanLine);
+  const boilerplatePhrase = phrase ? isReceiptBoilerplatePhrase(phrase) : true;
+
+  const usefulTokens = phraseTokens.filter(t =>
+    t.length >= 3 &&
+    !RECEIPT_LEARNING_STOPWORDS.has(t) &&
+    !RECEIPT_TRAINING_NOISE_WORDS.has(t) &&
+    !/^\d+$/.test(t)
+  );
+
+  const noiseCount = phraseTokens.filter(t =>
+    RECEIPT_LEARNING_STOPWORDS.has(t) ||
+    RECEIPT_TRAINING_NOISE_WORDS.has(t)
+  ).length;
+
+  if(context.inItemZone) add(2, "inside item/product area");
+  if(context.afterFirstKept) add(1, "after first useful item clue");
+
+  if(context.headerWindow){
+    add(-4, "top/header area");
+  }
+
+  if(hasMoney){
+    add(1, "has money amount");
+  }
+
+  if(hasUnit){
+    add(2, "has quantity/unit");
+  }
+
+  if(hasProductSignal){
+    add(5, "has product/category signal");
+  }
+
+  if(usefulTokens.length){
+    add(Math.min(3, usefulTokens.length), "has useful words");
+  }
+
+  if(boilerplateLine){
+    add(-8, "line looks like boilerplate");
+  }
+
+  if(boilerplatePhrase){
+    add(-5, "phrase looks like boilerplate");
+  }
+
+  if(phraseTokens.length && noiseCount / phraseTokens.length >= 0.5){
+    add(-4, "mostly receipt-control words");
+  }
+
+  if(!phrase){
+    add(-8, "no clean phrase");
+  }
+
+  if(!usefulTokens.length && !hasProductSignal){
+    add(-8, "no useful signal");
+  }
+
+  const keep =
+    !!phrase &&
+    score >= 4 &&
+    !boilerplatePhrase &&
+    (
+      hasProductSignal ||
+      (context.inItemZone && usefulTokens.length > 0) ||
+      (hasMoney && usefulTokens.length > 0)
+    );
+
+  return {
+    rawLine,
+    cleanLine,
+    phrase,
+    score,
+    keep,
+    hardStop: false,
+    sectionStart: false,
+    reasons
+  };
+}
+
+function buildReceiptTrainingDebugRows(rawText = ""){
+  const rows = [];
+
+  const rawLines = String(rawText || "")
+    .split(/\n+/)
+    .map(cleanReceiptLine)
+    .filter(Boolean);
+
+  let inItemZone = false;
+  let afterFirstKept = false;
+  let stopped = false;
+
+  for(let i = 0; i < rawLines.length; i++){
+    const rawLine = rawLines[i];
+
+    if(stopped){
+      rows.push({
+        line: i,
+        keep: false,
+        score: "",
+        phrase: "",
+        rawLine,
+        reasons: "after totals/payment/footer stop"
+      });
+      continue;
+    }
+
+    const result = scoreReceiptTrainingLine(rawLine, {
+      inItemZone,
+      afterFirstKept,
+      headerWindow: i < 6 && !inItemZone
+    });
+
+    rows.push({
+      line: i,
+      keep: !!result.keep,
+      score: result.score,
+      phrase: result.phrase || "",
+      rawLine: result.rawLine || rawLine,
+      reasons: result.reasons.join(" | ")
+    });
+
+    if(result.sectionStart){
+      inItemZone = true;
+      continue;
+    }
+
+    if(result.hardStop){
+      if(afterFirstKept || inItemZone){
+        stopped = true;
+      }
+      continue;
+    }
+
+    if(result.keep){
+      afterFirstKept = true;
+    }
+  }
+
+  return rows;
+}
+
 function extractReceiptLearningPhrases(rawText = ""){
   const seen = new Set();
   const phrases = [];
@@ -3518,55 +3742,105 @@ function extractReceiptLearningPhrases(rawText = ""){
     .filter(Boolean);
 
   let inItemZone = false;
-  let sawUsefulPhrase = false;
+  let afterFirstKept = false;
 
   for(let i = 0; i < rawLines.length; i++){
     const rawLine = rawLines[i];
-    const cleanLine = normalizeReceiptTrainingText(rawLine);
 
-    if(!cleanLine) continue;
+    const result = scoreReceiptTrainingLine(rawLine, {
+      inItemZone,
+      afterFirstKept,
+      headerWindow: i < 6 && !inItemZone
+    });
 
-    if(isReceiptTrainingItemSectionStart(cleanLine)){
+    if(result.sectionStart){
       inItemZone = true;
       continue;
     }
 
-    // If we have started collecting useful item clues, totals/payment/footer usually means stop.
-    if(isReceiptTrainingHardStopLine(cleanLine)){
-      if(sawUsefulPhrase || inItemZone) break;
+    if(result.hardStop){
+      if(afterFirstKept || inItemZone) break;
       continue;
     }
 
-    // Skip the usual receipt header: merchant/address/date/store info.
-    // Merchant is already saved separately as merchant:<name>, so we do not need it duplicated here.
-    const likelyHeaderLine =
-      i < 5 &&
-      !inItemZone &&
-      !lineLooksLikeReceiptItem(rawLine);
+    if(!result.keep) continue;
+    if(seen.has(result.phrase)) continue;
 
-    if(likelyHeaderLine) continue;
-
-    const shouldTryLine =
-      inItemZone ||
-      lineLooksLikeReceiptItem(rawLine) ||
-      (i >= 5 && !isReceiptBoilerplatePhrase(cleanLine));
-
-    if(!shouldTryLine) continue;
-
-    const phrase = normalizeReceiptItemPhrase(rawLine);
-
-    if(!phrase) continue;
-    if(!isUsefulReceiptTrainingPhrase(phrase)) continue;
-    if(seen.has(phrase)) continue;
-
-    seen.add(phrase);
-    phrases.push(phrase);
-    sawUsefulPhrase = true;
+    seen.add(result.phrase);
+    phrases.push(result.phrase);
+    afterFirstKept = true;
 
     if(phrases.length >= 40) break;
   }
 
   return phrases;
+}
+
+function debugReceiptTrainingExtraction(rawText = currentReceiptScanDraft?.rawText || ""){
+  if(!rawText){
+    console.warn("Scan a receipt first, then run debugReceiptTrainingExtraction() before clicking Add.");
+    return [];
+  }
+
+  const rows = [];
+  const rawLines = String(rawText || "")
+    .split(/\n+/)
+    .map(cleanReceiptLine)
+    .filter(Boolean);
+
+  let inItemZone = false;
+  let afterFirstKept = false;
+  let stopped = false;
+
+  for(let i = 0; i < rawLines.length; i++){
+    const rawLine = rawLines[i];
+
+    if(stopped){
+      rows.push({
+        line: i,
+        keep: false,
+        score: "",
+        phrase: "",
+        rawLine,
+        reasons: "after totals/payment/footer stop"
+      });
+      continue;
+    }
+
+    const result = scoreReceiptTrainingLine(rawLine, {
+      inItemZone,
+      afterFirstKept,
+      headerWindow: i < 6 && !inItemZone
+    });
+
+    rows.push({
+      line: i,
+      keep: result.keep,
+      score: result.score,
+      phrase: result.phrase,
+      rawLine: result.rawLine,
+      reasons: result.reasons.join(" | ")
+    });
+
+    if(result.sectionStart){
+      inItemZone = true;
+      continue;
+    }
+
+    if(result.hardStop){
+      if(afterFirstKept || inItemZone){
+        stopped = true;
+      }
+      continue;
+    }
+
+    if(result.keep){
+      afterFirstKept = true;
+    }
+  }
+
+  console.table(rows);
+  return rows;
 }
 
 function getReceiptMemoryCategoryScores(text = ""){
