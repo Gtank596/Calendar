@@ -3300,16 +3300,35 @@ function isUsefulReceiptTrainingPhrase(phrase = ""){
 
   if(!p || p.length < 3) return false;
 
-  const junk = [
-    "site", "trace", "merch", "sale", "entry method", "invoice",
-    "auth", "aid", "tvr", "iad", "tsi", "arc", "application name",
+  const junkExact = new Set([
+    "site", "trace", "sale", "merch", "invoice", "auth",
+    "aid", "tvr", "iad", "tsi", "arc",
+    "application name us", "application name",
     "mode issuer", "contactless", "verified by pin", "pin used",
-    "approved", "debit", "visa debit", "card amt"
+    "entry method", "entry method l",
+    "card amt", "debit", "visa debit", "approved"
+  ]);
+
+  if(junkExact.has(p)) return false;
+
+  const junkContains = [
+    "entry method",
+    "application name",
+    "verified by pin",
+    "pin used",
+    "customer service",
+    "download the",
+    "rewards app",
+    "deals on drinks",
+    "snacks and save"
   ];
 
-  if(junk.some(x => p.includes(x))) return false;
+  if(junkContains.some(x => p.includes(x))) return false;
+
   if(/^[\d\s.$:-]+$/.test(p)) return false;
-  if(/[a-z]*\d{5,}/.test(p)) return false;
+  if(/\b[a-z]{1,4}\s*[a-f0-9]{6,}\b/i.test(p)) return false;
+  if(/\b[a-f0-9]{8,}\b/i.test(p)) return false;
+  if(/\b\d{5,}\b/.test(p)) return false;
 
   return true;
 }
