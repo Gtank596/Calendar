@@ -3121,7 +3121,10 @@ const RECEIPT_MEMORY_LIMIT = 5000;
 const MERCHANT_MEMORY_LIMIT = 1000;
 const RECEIPT_TRAINING_RECORDS_KEY = "myCalendarReceiptTrainingRecords_v1";
 const RECEIPT_TRAINING_RECORD_LIMIT = 2000;
-const RECEIPT_TRAINING_DEBUG_ENABLED = true;
+const RECEIPT_NAIVE_BAYES_MIN_RECORDS = 6;
+const RECEIPT_NAIVE_BAYES_MAX_FEATURES = 40;
+const RECEIPT_NAIVE_BAYES_SCORE_SCALE = 24;
+const RECEIPT_TRAINING_DEBUG_ENABLED = false;
 let receiptScanBusy = false;
 let currentReceiptScanDraft = null;
 let merchantAliases = loadMerchantAliases();
@@ -3197,6 +3200,213 @@ function buildReceiptTrainingFeatures({ merchant = "", amount = 0, phrases = [] 
   return Array.from(new Set(features)).slice(0, 80);
 }
 
+function getReceiptNaiveBayesFeatureWeight(feature = ""){
+  const f = String(feature || "");
+
+  if(f.startsWith("merchant:")) return 2.4;
+  if(f.startsWith("phrase:")) return 1.7;
+  if(f.startsWith("word:")) return 1.0;
+  if(f.startsWith("amount:")) return 0.45;
+
+  return 1;
+}
+
+function getReceiptNaiveBayesFeatureList(features = []){
+  return Array.from(
+    new Set(
+      (features || [])
+        .map(f => String(f || "").toLowerCase().trim())
+        .filter(Boolean)
+    )
+  ).slice(0, RECEIPT_NAIVE_BAYES_MAX_FEATURES);
+}
+
+function buildReceiptNaiveBayesModel(records = receiptTrainingRecords){
+  const categories = {};
+  const vocabulary = new Set();
+  let recordCount = 0;
+
+  for(const record of records || []){
+    const categoryId = record?.finalCategoryId || "";
+
+    if(!categoryId || categoryId === "other") continue;
+    if(!getBudgetCategory(categoryId)) continue;
+
+    const featureSource =
+      Array.isArray(record.features) && record.features.length
+        ? record.features
+        : buildReceiptTrainingFeatures({
+            merchant: record.merchant || "",
+            amount: record.amount || 0,
+            phrases: record.phrases || []
+          });
+
+    const features = getReceiptNaiveBayesFeatureList(featureSource);
+
+    if(!features.length) continue;
+
+    if(!categories[categoryId]){
+      categories[categoryId] = {
+        recordCount: 0,
+        featureCounts: {}
+      };
+    }
+
+    categories[categoryId].recordCount++;
+    recordCount++;
+
+    // Binary feature model: one feature can only count once per receipt.
+    for(const feature of features){
+      vocabulary.add(feature);
+
+      categories[categoryId].featureCounts[feature] =
+        Number(categories[categoryId].featureCounts[feature] || 0) + 1;
+    }
+  }
+
+  return {
+    recordCount,
+    categoryCount: Object.keys(categories).length,
+    categories,
+    vocabulary,
+    vocabularySize: vocabulary.size
+  };
+}
+
+function normalizeNaiveBayesLogScores(rows = []){
+  if(!rows.length) return [];
+
+  const maxLog = Math.max(...rows.map(row => row.logScore));
+  const expanded = rows.map(row => ({
+    ...row,
+    expScore: Math.exp(row.logScore - maxLog)
+  }));
+
+  const total = expanded.reduce((sum, row) => sum + row.expScore, 0) || 1;
+
+  return expanded
+    .map(row => ({
+      ...row,
+      probability: row.expScore / total
+    }))
+    .sort((a, b) => b.probability - a.probability);
+}
+
+function predictReceiptCategoryNaiveBayes(features = [], opts = {}){
+  const model = buildReceiptNaiveBayesModel();
+
+  const allowTinyModel = !!opts.allowTinyModel;
+
+  if(
+    !allowTinyModel &&
+    (
+      model.recordCount < RECEIPT_NAIVE_BAYES_MIN_RECORDS ||
+      model.categoryCount < 2
+    )
+  ){
+    return {
+      ready: false,
+      reason: `Needs at least ${RECEIPT_NAIVE_BAYES_MIN_RECORDS} training records and 2 categories.`,
+      model
+    };
+  }
+
+  const inputFeatures = getReceiptNaiveBayesFeatureList(features)
+    .filter(feature => model.vocabulary.has(feature));
+
+  if(!inputFeatures.length){
+    return {
+      ready: false,
+      reason: "No known Naive Bayes features matched this receipt.",
+      model
+    };
+  }
+
+  const totalRecords = Math.max(1, model.recordCount);
+  const categoryIds = Object.keys(model.categories);
+  const categoryCount = Math.max(1, categoryIds.length);
+
+  const rows = [];
+
+  for(const categoryId of categoryIds){
+    const categoryModel = model.categories[categoryId];
+    const categoryRecordCount = Math.max(1, Number(categoryModel.recordCount || 0));
+
+    // Smoothed prior: P(category)
+    let logScore = Math.log(
+      (categoryRecordCount + 1) / (totalRecords + categoryCount)
+    );
+
+    const featureDetails = [];
+
+    for(const feature of inputFeatures){
+      const hitCount = Number(categoryModel.featureCounts?.[feature] || 0);
+
+      // Laplace smoothing. Prevents one missing word from destroying the score.
+      const probability = (hitCount + 1) / (categoryRecordCount + 2);
+      const weight = getReceiptNaiveBayesFeatureWeight(feature);
+      const contribution = Math.log(probability) * weight;
+
+      logScore += contribution;
+
+      featureDetails.push({
+        feature,
+        hitCount,
+        probability,
+        weight,
+        contribution
+      });
+    }
+
+    rows.push({
+      categoryId,
+      categoryName: getBudgetCategory(categoryId)?.name || "Category",
+      logScore,
+      featureDetails
+    });
+  }
+
+  const probabilities = normalizeNaiveBayesLogScores(rows);
+  const best = probabilities[0];
+
+  if(!best){
+    return {
+      ready: false,
+      reason: "Naive Bayes could not produce a winner.",
+      model
+    };
+  }
+
+  const scoreMap = new Map();
+
+  for(const row of probabilities){
+    scoreMap.set(
+      row.categoryId,
+      Math.round(row.probability * RECEIPT_NAIVE_BAYES_SCORE_SCALE * 100) / 100
+    );
+  }
+
+  return {
+    ready: true,
+    model,
+    features: inputFeatures,
+    categoryId: best.categoryId,
+    categoryName: best.categoryName,
+    confidence: Math.round(best.probability * 100),
+    probabilities,
+    scoreMap
+  };
+}
+
+function getReceiptNaiveBayesSummary(prediction = {}){
+  if(!prediction.ready || !Array.isArray(prediction.probabilities)) return "";
+
+  return prediction.probabilities
+    .slice(0, 3)
+    .map(row => `${row.categoryName} ${Math.round(row.probability * 100)}%`)
+    .join(", ");
+}
+
 function saveReceiptTrainingRecordFromDraft(finalTransaction = {}){
   if(!currentReceiptScanDraft) return;
 
@@ -3206,8 +3416,10 @@ function saveReceiptTrainingRecordFromDraft(finalTransaction = {}){
   if(!rawText || !finalCategoryId || finalCategoryId === "other") return;
 
   const predictedCategoryId =
-    Object.entries(currentReceiptScanDraft.categoryScores || {})
-      .sort((a, b) => Number(b[1]) - Number(a[1]))[0]?.[0] || "";
+  currentReceiptScanDraft.predictedCategoryId ||
+  Object.entries(currentReceiptScanDraft.categoryScores || {})
+    .sort((a, b) => Number(b[1]) - Number(a[1]))[0]?.[0] ||
+  "";
 
   const phrases = extractReceiptLearningPhrases(rawText)
   .filter(isUsefulReceiptTrainingPhrase)
@@ -3238,6 +3450,8 @@ trainingDebugCount: trainingDebug.length,
     phraseCount: phrases.length,
 
     predictedCategoryId,
+predictionSource: currentReceiptScanDraft.predictionSource || "",
+naiveBayesPrediction: currentReceiptScanDraft.naiveBayesPrediction || null,
     finalCategoryId,
     predictionWasCorrect: !!predictedCategoryId && predictedCategoryId === finalCategoryId,
 
@@ -4813,12 +5027,49 @@ currentReceiptScanDraft = {
 
   const categoryGuess = result.categoryId || getReceiptCategoryGuess(categoryText);
 
+const receiptPredictionPhrases = extractReceiptLearningPhrases(rawText)
+  .filter(isUsefulReceiptTrainingPhrase)
+  .slice(0, 20);
+
+const receiptPredictionFeatures = buildReceiptTrainingFeatures({
+  merchant: store,
+  amount,
+  phrases: receiptPredictionPhrases
+});
+
+currentReceiptScanDraft.predictionPhrases = receiptPredictionPhrases;
+currentReceiptScanDraft.predictionFeatures = receiptPredictionFeatures;
+
 const scoreMap = getReceiptMemoryCategoryScores(categoryText);
 
 mergeReceiptCategoryScoreMap(
   scoreMap,
   getReceiptMerchantCategoryScores(store)
 );
+
+const naiveBayesPrediction =
+  predictReceiptCategoryNaiveBayes(receiptPredictionFeatures);
+
+if(naiveBayesPrediction.ready){
+  mergeReceiptCategoryScoreMap(
+    scoreMap,
+    naiveBayesPrediction.scoreMap
+  );
+
+  currentReceiptScanDraft.naiveBayesPrediction = {
+    categoryId: naiveBayesPrediction.categoryId,
+    categoryName: naiveBayesPrediction.categoryName,
+    confidence: naiveBayesPrediction.confidence,
+    summary: getReceiptNaiveBayesSummary(naiveBayesPrediction),
+    features: naiveBayesPrediction.features
+  };
+}else{
+  currentReceiptScanDraft.naiveBayesPrediction = {
+    ready: false,
+    reason: naiveBayesPrediction.reason || ""
+  };
+}
+
 const scoreList = Array.from(scoreMap.entries())
   .sort((a, b) => b[1] - a[1]);
 
@@ -4832,8 +5083,21 @@ if(scoreList[0]?.[0]){
   currentReceiptScanDraft.categoryConfidence = confidence;
   currentReceiptScanDraft.categoryScores = Object.fromEntries(scoreList);
 }
-  const learnedGuess = scoreList[0]?.[0];
+const learnedGuess = scoreList[0]?.[0];
 const finalGuess = learnedGuess || categoryGuess;
+
+const naiveBayesHelped =
+  naiveBayesPrediction.ready &&
+  learnedGuess &&
+  learnedGuess === naiveBayesPrediction.categoryId;
+
+currentReceiptScanDraft.predictedCategoryId = finalGuess || "";
+
+currentReceiptScanDraft.predictionSource = learnedGuess
+  ? (naiveBayesHelped ? "naiveBayes+memory" : "memory")
+  : finalGuess
+    ? "rule"
+    : "";
 
 if(finalGuess && budgetTxCategory){
   budgetTxCategory.value = finalGuess;
