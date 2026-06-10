@@ -3208,7 +3208,9 @@ function saveReceiptTrainingRecordFromDraft(finalTransaction = {}){
     Object.entries(currentReceiptScanDraft.categoryScores || {})
       .sort((a, b) => Number(b[1]) - Number(a[1]))[0]?.[0] || "";
 
-  const phrases = extractReceiptLearningPhrases(rawText).slice(0, 20);
+  const phrases = extractReceiptLearningPhrases(rawText)
+  .filter(isUsefulReceiptTrainingPhrase)
+  .slice(0, 20);
 const merchant = finalTransaction.title || currentReceiptScanDraft.normalizedMerchant || "";
 const amount = Math.abs(Number(finalTransaction.price || currentReceiptScanDraft.amount || 0));
 const features = buildReceiptTrainingFeatures({ merchant, amount, phrases });
@@ -3291,6 +3293,25 @@ function getReceiptPhraseBaseWeight(phrase = ""){
   if(words.length >= 3) return 2.25;
   if(words.length === 2) return 1.65;
   return 1;
+}
+
+function isUsefulReceiptTrainingPhrase(phrase = ""){
+  const p = String(phrase || "").toLowerCase().trim();
+
+  if(!p || p.length < 3) return false;
+
+  const junk = [
+    "site", "trace", "merch", "sale", "entry method", "invoice",
+    "auth", "aid", "tvr", "iad", "tsi", "arc", "application name",
+    "mode issuer", "contactless", "verified by pin", "pin used",
+    "approved", "debit", "visa debit", "card amt"
+  ];
+
+  if(junk.some(x => p.includes(x))) return false;
+  if(/^[\d\s.$:-]+$/.test(p)) return false;
+  if(/[a-z]*\d{5,}/.test(p)) return false;
+
+  return true;
 }
 
 function extractReceiptLearningKeywords(phrase = ""){
