@@ -1171,6 +1171,7 @@ function getLocalPayload(){
       budgetCategories: parsed.budgetCategories || null,
       merchantAliases: parsed.merchantAliases || null,
       receiptItemCategoryMemory: parsed.receiptItemCategoryMemory || null,
+receiptTrainingRecords: parsed.receiptTrainingRecords || null,
       selectedBudgetPanes: parsed.selectedBudgetPanes || null,
       activeSection: parsed.activeSection || null,
       budgetViewMode: parsed.budgetViewMode || null
@@ -1190,6 +1191,7 @@ function buildFullSavePayload(base = {}){
     budgetCategories: base.budgetCategories || budgetCategories || loadBudgetCategories(),
     merchantAliases: base.merchantAliases || merchantAliases || loadMerchantAliases(),
     receiptItemCategoryMemory: base.receiptItemCategoryMemory || receiptItemCategoryMemory || loadReceiptItemCategoryMemory(),
+receiptTrainingRecords: base.receiptTrainingRecords || receiptTrainingRecords || loadReceiptTrainingRecords(),
     selectedBudgetPanes: base.selectedBudgetPanes || selectedBudgetPanes || loadBudgetPaneSelection(),
     activeSection: base.activeSection || activeSection || "calendar",
     budgetViewMode: base.budgetViewMode || budgetViewMode || "month"
@@ -1217,6 +1219,9 @@ function applyFullSavePayload(payload, opts = {}){
   receiptItemCategoryMemory = safe.receiptItemCategoryMemory && typeof safe.receiptItemCategoryMemory === "object"
     ? safe.receiptItemCategoryMemory
     : receiptItemCategoryMemory;
+receiptTrainingRecords = Array.isArray(safe.receiptTrainingRecords)
+  ? safe.receiptTrainingRecords
+  : receiptTrainingRecords;
   selectedBudgetPanes = safe.selectedBudgetPanes || selectedBudgetPanes;
   activeSection = safe.activeSection || activeSection;
   budgetViewMode = safe.budgetViewMode || budgetViewMode;
@@ -1226,6 +1231,7 @@ function applyFullSavePayload(payload, opts = {}){
   localStorage.setItem(BUDGET_CATEGORIES_KEY, JSON.stringify(budgetCategories));
   localStorage.setItem(MERCHANT_ALIASES_KEY, JSON.stringify(merchantAliases));
   localStorage.setItem(RECEIPT_ITEM_MEMORY_KEY, JSON.stringify(receiptItemCategoryMemory));
+localStorage.setItem(RECEIPT_TRAINING_RECORDS_KEY, JSON.stringify(receiptTrainingRecords));
   localStorage.setItem(BUDGET_PANES_KEY, JSON.stringify(selectedBudgetPanes));
   localStorage.setItem("myCalendar_activeSection", activeSection);
   localStorage.setItem("myCalendar_budgetViewMode", budgetViewMode);
