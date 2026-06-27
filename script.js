@@ -329,8 +329,8 @@ function saveSettings(){
   setAppState({ settings }, { render:false });
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   updateMobileCalendarStyleUI();
-  setLocalPayload({ updatedAt: Date.now(), events });
-  cloudWriteDebounced();
+  setLocalPayload({ updatedAt: Date.now(), settings });
+  cloudWriteDebounced(["settings"]);
 }
 
 function getSortedBudgetCategories(){
@@ -643,6 +643,7 @@ function undoLastChange(){
   syncStateFromLegacy();
   setLocalPayload({ updatedAt: Date.now(), events });
   syncWriteDebounced();
+  cloudWriteDebounced(["events"]);
 
   selectedEventId = null;
   editBaseDateISO = null;
@@ -673,6 +674,7 @@ function redoLastChange(){
   syncStateFromLegacy();
   setLocalPayload({ updatedAt: Date.now(), events });
   syncWriteDebounced();
+  cloudWriteDebounced(["events"]);
 
   selectedEventId = null;
   editBaseDateISO = null;
@@ -695,7 +697,203 @@ function snapshotBeforeChange(){
 // ============================================================================
 const DEFAULT_COLOR = "#7a5aff";
 const STORAGE_KEY = "myCalendarData_v4";
+const SPLIT_STORAGE_VERSION = 3;
+const EVENTS_STORAGE_KEY = "myCalendarEvents_v1";
+const APP_META_STORAGE_KEY = "myCalendarMeta_v1";
+const PEOPLE_STORAGE_KEY = "myCalendarPeople_v1";
+const HOUSEHOLDS_STORAGE_KEY = "myCalendarHouseholds_v1";
 const MAX_EVENT_DURATION_MINS = 24 * 60;
+
+// Split data slices keep the app from rewriting one giant JSON blob every time
+// a tiny piece changes. This is especially important as household/guest data
+// grows alongside calendar + budget history.
+const DATA_SLICE_NAMES = [
+  "events",
+  "settings",
+  "budgetPlans",
+  "budgetCategories",
+  "merchantAliases",
+  "receiptItemCategoryMemory",
+  "receiptTrainingRecords",
+  "selectedBudgetPanes",
+  "activeSection",
+  "budgetViewMode",
+  "people",
+  "households"
+];
+
+const DATA_SLICE_LABELS = {
+  events: "Events",
+  settings: "Settings",
+  budgetPlans: "Budget plans",
+  budgetCategories: "Budget categories",
+  merchantAliases: "Merchant aliases",
+  receiptItemCategoryMemory: "Receipt memory",
+  receiptTrainingRecords: "Receipt training",
+  selectedBudgetPanes: "Budget panes",
+  activeSection: "Active section",
+  budgetViewMode: "Budget view",
+  people: "People",
+  households: "Households"
+};
+
+function hasOwn(obj, key){
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+
+function parseStoredJson(key, fallbackValue = null){
+  try{
+    const raw = localStorage.getItem(key);
+    if(raw === null || raw === undefined || raw === "") return fallbackValue;
+    return JSON.parse(raw);
+  }catch{
+    return fallbackValue;
+  }
+}
+
+function normalizeSliceList(slices){
+  const input = Array.isArray(slices)
+    ? slices
+    : typeof slices === "string"
+      ? [slices]
+      : [];
+
+  return [...new Set(input.filter(slice => DATA_SLICE_NAMES.includes(slice)))];
+}
+
+function getSliceStorageKey(slice){
+  switch(slice){
+    case "events": return EVENTS_STORAGE_KEY;
+    case "settings": return SETTINGS_KEY;
+    case "budgetPlans": return BUDGET_PLANS_KEY;
+    case "budgetCategories": return BUDGET_CATEGORIES_KEY;
+    case "merchantAliases": return MERCHANT_ALIASES_KEY;
+    case "receiptItemCategoryMemory": return RECEIPT_ITEM_MEMORY_KEY;
+    case "receiptTrainingRecords": return RECEIPT_TRAINING_RECORDS_KEY;
+    case "selectedBudgetPanes": return BUDGET_PANES_KEY;
+    case "people": return PEOPLE_STORAGE_KEY;
+    case "households": return HOUSEHOLDS_STORAGE_KEY;
+    default: return "";
+  }
+}
+
+function getLocalMeta(){
+  const saved = parseStoredJson(APP_META_STORAGE_KEY, null);
+
+  if(saved && typeof saved === "object"){
+    return {
+      version: Number(saved.version || SPLIT_STORAGE_VERSION),
+      updatedAt: Number(saved.updatedAt || 0),
+      sliceUpdatedAt: saved.sliceUpdatedAt && typeof saved.sliceUpdatedAt === "object"
+        ? saved.sliceUpdatedAt
+        : {}
+    };
+  }
+
+  return {
+    version: SPLIT_STORAGE_VERSION,
+    updatedAt: 0,
+    sliceUpdatedAt: {}
+  };
+}
+
+function saveLocalMeta(updatedAt = Date.now(), slices = []){
+  const safeUpdatedAt = Number(updatedAt || Date.now());
+  const meta = getLocalMeta();
+
+  meta.version = SPLIT_STORAGE_VERSION;
+  meta.updatedAt = Math.max(Number(meta.updatedAt || 0), safeUpdatedAt);
+
+  for(const slice of normalizeSliceList(slices)){
+    meta.sliceUpdatedAt[slice] = safeUpdatedAt;
+  }
+
+  localStorage.setItem(APP_META_STORAGE_KEY, JSON.stringify(meta));
+
+  // Keep the old monolith key as a tiny migration pointer instead of rewriting
+  // megabytes on every save. Older backups/files can still be imported.
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    version: SPLIT_STORAGE_VERSION,
+    splitStorage: true,
+    updatedAt: meta.updatedAt,
+    sliceUpdatedAt: meta.sliceUpdatedAt
+  }));
+
+  return meta;
+}
+
+function getPayloadSliceNames(payload = {}){
+  return DATA_SLICE_NAMES.filter(slice => hasOwn(payload, slice));
+}
+
+function readLocalDataSlice(slice, legacyPayload = {}){
+  const key = getSliceStorageKey(slice);
+  const stored = key ? parseStoredJson(key, undefined) : undefined;
+
+  if(stored !== undefined) return stored;
+  if(hasOwn(legacyPayload, slice)) return legacyPayload[slice];
+
+  if(slice === "events") return {};
+  if(slice === "settings") return null;
+  if(slice === "budgetPlans") return null;
+  if(slice === "budgetCategories") return null;
+  if(slice === "merchantAliases") return null;
+  if(slice === "receiptItemCategoryMemory") return null;
+  if(slice === "receiptTrainingRecords") return null;
+  if(slice === "selectedBudgetPanes") return null;
+  if(slice === "activeSection") return localStorage.getItem("myCalendar_activeSection") || null;
+  if(slice === "budgetViewMode") return localStorage.getItem("myCalendar_budgetViewMode") || null;
+  if(slice === "people") return [];
+  if(slice === "households") return [];
+
+  return null;
+}
+
+function writeLocalDataSlice(slice, value){
+  if(value === undefined) return;
+
+  if(slice === "activeSection"){
+    localStorage.setItem("myCalendar_activeSection", value || "calendar");
+    return;
+  }
+
+  if(slice === "budgetViewMode"){
+    localStorage.setItem("myCalendar_budgetViewMode", value || "month");
+    return;
+  }
+
+  const key = getSliceStorageKey(slice);
+  if(!key) return;
+
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function getSliceUpdatedAt(payload = {}, slice){
+  const sliceTime = Number(payload?.sliceUpdatedAt?.[slice] || 0);
+  return sliceTime || Number(payload?.updatedAt || 0);
+}
+
+function loadPeopleData(){
+  const saved = parseStoredJson(PEOPLE_STORAGE_KEY, []);
+  return Array.isArray(saved) ? saved : [];
+}
+
+function loadHouseholdData(){
+  const saved = parseStoredJson(HOUSEHOLDS_STORAGE_KEY, []);
+  return Array.isArray(saved) ? saved : [];
+}
+
+function savePeopleData(people = []){
+  const safePeople = Array.isArray(people) ? people : [];
+  setLocalPayload({ updatedAt: Date.now(), people: safePeople });
+  cloudWriteDebounced(["people"]);
+}
+
+function saveHouseholdData(households = []){
+  const safeHouseholds = Array.isArray(households) ? households : [];
+  setLocalPayload({ updatedAt: Date.now(), households: safeHouseholds });
+  cloudWriteDebounced(["households"]);
+}
 
 // ============================================================================
 // 04b. UTILITY HELPERS
@@ -732,9 +930,53 @@ let cloudWriteTimer = null;
 let cloudBusy = false;
 let cloudFlushInProgress = false;
 
+function getCloudSliceRowId(slice){
+  const userPart = cloudUser?.id || "offline";
+  return `${userPart}:${slice}`;
+}
+
+function getCloudSliceFromRow(row){
+  const payloadSlice = row?.payload?.slice;
+  if(DATA_SLICE_NAMES.includes(payloadSlice)) return payloadSlice;
+
+  const id = String(row?.id || "");
+  const lastPart = id.includes(":") ? id.split(":").pop() : id;
+  return DATA_SLICE_NAMES.includes(lastPart) ? lastPart : "";
+}
+
+function buildCloudSlicePayload(fullPayload, slice){
+  return {
+    version: SPLIT_STORAGE_VERSION,
+    slice,
+    updatedAt: getSliceUpdatedAt(fullPayload, slice),
+    data: fullPayload?.[slice]
+  };
+}
+
+function extractCloudSliceData(row){
+  if(!row?.payload || typeof row.payload !== "object") return undefined;
+
+  if(hasOwn(row.payload, "data")) return row.payload.data;
+
+  const slice = getCloudSliceFromRow(row);
+  if(slice && hasOwn(row.payload, slice)) return row.payload[slice];
+
+  return undefined;
+}
+
+function getPendingSliceList(pending = getCloudPending()){
+  return normalizeSliceList(pending?.slices || pending?.slice || []);
+}
+
 function getCloudPending(){
   try{
-    return JSON.parse(localStorage.getItem(CLOUD_PENDING_KEY)) || null;
+    const pending = JSON.parse(localStorage.getItem(CLOUD_PENDING_KEY)) || null;
+    if(!pending) return null;
+
+    return {
+      ...pending,
+      slices: getPendingSliceList(pending)
+    };
   }catch{
     return null;
   }
@@ -744,13 +986,20 @@ function isCloudPending(){
   return !!getCloudPending();
 }
 
-function markCloudPending(reason = "local change"){
+function markCloudPending(reason = "local change", slices = []){
   const local = getLocalPayload?.() || {};
+  const existing = getCloudPending();
+  const requestedSlices = normalizeSliceList(slices);
+  const mergedSlices = normalizeSliceList([
+    ...(existing?.slices || []),
+    ...requestedSlices
+  ]);
 
   localStorage.setItem(CLOUD_PENDING_KEY, JSON.stringify({
     reason,
     updatedAt: Number(local.updatedAt || Date.now()),
-    markedAt: Date.now()
+    markedAt: Date.now(),
+    slices: mergedSlices
   }));
 }
 
@@ -983,60 +1232,127 @@ async function logoutCloud(){
 async function readCloudState(){
   if(!supabaseClient || !cloudUser) return null;
 
+  const sliceIds = DATA_SLICE_NAMES.map(slice => getCloudSliceRowId(slice));
+  const idsToRead = [CLOUD_ROW_ID, ...sliceIds];
+
   const { data, error } = await supabaseClient
     .from(CLOUD_TABLE)
-    .select("payload, updated_at")
-    .eq("id", CLOUD_ROW_ID)
-    .maybeSingle();
+    .select("id, payload, updated_at")
+    .in("id", idsToRead);
 
   if(error){
     setCloudStatus("Cloud read failed: " + error.message);
     return null;
   }
 
-  if(!data?.payload) return null;
+  if(!Array.isArray(data) || !data.length) return null;
 
-  return buildFullSavePayload(data.payload);
+  let legacyPayload = null;
+  const merged = {
+    version: SPLIT_STORAGE_VERSION,
+    updatedAt: 0,
+    sliceUpdatedAt: {}
+  };
+
+  for(const row of data){
+    const rowTime = row?.updated_at ? new Date(row.updated_at).getTime() : 0;
+
+    if(row?.id === CLOUD_ROW_ID && row?.payload && !row.payload.slice){
+      legacyPayload = buildFullSavePayload(row.payload);
+      merged.updatedAt = Math.max(merged.updatedAt, Number(legacyPayload.updatedAt || 0), rowTime);
+      continue;
+    }
+
+    const slice = getCloudSliceFromRow(row);
+    if(!slice) continue;
+
+    const sliceData = extractCloudSliceData(row);
+    if(sliceData === undefined) continue;
+
+    merged[slice] = sliceData;
+    merged.sliceUpdatedAt[slice] = Number(row?.payload?.updatedAt || rowTime || Date.now());
+    merged.updatedAt = Math.max(merged.updatedAt, merged.sliceUpdatedAt[slice]);
+  }
+
+  if(legacyPayload){
+    for(const slice of DATA_SLICE_NAMES){
+      if(!hasOwn(merged, slice) && hasOwn(legacyPayload, slice)){
+        merged[slice] = legacyPayload[slice];
+        merged.sliceUpdatedAt[slice] = getSliceUpdatedAt(legacyPayload, slice);
+      }
+    }
+  }
+
+  const hasSlices = DATA_SLICE_NAMES.some(slice => hasOwn(merged, slice));
+  if(!hasSlices && legacyPayload) return legacyPayload;
+  if(!hasSlices) return null;
+
+  return buildFullSavePayload(merged);
 }
 
-async function writeCloudStateNow(){
+async function writeCloudStateNow(slices = null){
+  const requestedSlices = normalizeSliceList(slices);
+  const pendingSlices = getPendingSliceList();
+  const dirtySlices = requestedSlices.length
+    ? requestedSlices
+    : pendingSlices.length
+      ? pendingSlices
+      : DATA_SLICE_NAMES;
+
   if(!supabaseClient || !cloudUser){
-    markCloudPending("not signed in");
+    markCloudPending("not signed in", dirtySlices);
     updateCloudUI();
     return false;
   }
 
   if(typeof navigator !== "undefined" && navigator.onLine === false){
-    markCloudPending("offline");
+    markCloudPending("offline", dirtySlices);
     setCloudStatus("Cloud: Offline, saved locally");
     return false;
   }
 
   const payload = buildFullSavePayload(getLocalPayload());
+  const rows = dirtySlices.map(slice => {
+    const sliceUpdatedAt = getSliceUpdatedAt(payload, slice) || payload.updatedAt || Date.now();
+
+    return {
+      id: getCloudSliceRowId(slice),
+      user_id: cloudUser.id,
+      payload: buildCloudSlicePayload(payload, slice),
+      updated_at: new Date(sliceUpdatedAt).toISOString()
+    };
+  });
+
+  if(!rows.length){
+    clearCloudPending();
+    updateCloudUI();
+    return true;
+  }
 
   const { error } = await supabaseClient
     .from(CLOUD_TABLE)
-    .upsert({
-      id: CLOUD_ROW_ID,
-      user_id: cloudUser.id,
-      payload,
-      updated_at: new Date(payload.updatedAt || Date.now()).toISOString()
-    }, { onConflict: "id" });
+    .upsert(rows, { onConflict: "id" });
 
   if(error){
-    markCloudPending("cloud save failed");
+    markCloudPending("cloud save failed", dirtySlices);
     setCloudStatus("Cloud save failed, will retry: " + error.message);
     return false;
   }
 
   clearCloudPending();
-  setCloudStatus(`Cloud: Synced ${new Date(payload.updatedAt || Date.now()).toLocaleString()}`);
+  setCloudStatus(
+    `Cloud: Synced ${dirtySlices.length} slice${dirtySlices.length === 1 ? "" : "s"} • ${new Date(payload.updatedAt || Date.now()).toLocaleString()}`
+  );
   updateCloudUI();
   return true;
 }
 
-function cloudWriteDebounced(){
-  markCloudPending("local change");
+function cloudWriteDebounced(slices = null){
+  const requestedSlices = normalizeSliceList(slices);
+  if(requestedSlices.length){
+    markCloudPending("local change", requestedSlices);
+  }
+
   updateCloudUI();
 
   if(!cloudUser) return;
@@ -1065,18 +1381,21 @@ async function tryFlushPendingCloudSync(reason = "sync"){
     const pending = getCloudPending();
 
     if(pending){
+      const dirtySlices = getPendingSliceList(pending);
       const cloud = await readCloudState();
       const local = getLocalPayload();
-      const cloudTime = Number(cloud?.updatedAt || 0);
-      const localTime = Number(local?.updatedAt || 0);
 
-      if(cloud && cloudTime > localTime){
-        setCloudStatus("Cloud: Sync paused, cloud has newer changes. Use Push or Pull.");
+      const cloudHasNewerDirtySlice = dirtySlices.some(slice =>
+        cloud && getSliceUpdatedAt(cloud, slice) > getSliceUpdatedAt(local, slice)
+      );
+
+      if(cloudHasNewerDirtySlice){
+        setCloudStatus("Cloud: Sync paused, cloud has newer changes in the same slice. Use Push or Pull.");
         return false;
       }
 
-      setCloudStatus("Cloud: Syncing pending changes...");
-      return await writeCloudStateNow();
+      setCloudStatus(`Cloud: Syncing ${dirtySlices.length || "changed"} slice${dirtySlices.length === 1 ? "" : "s"}...`);
+      return await writeCloudStateNow(dirtySlices);
     }
 
     await pullCloudIfNewer();
@@ -1092,24 +1411,46 @@ async function pullCloudIfNewer(){
   if(!cloud) return;
 
   const local = getLocalPayload();
+  const pendingSlices = getPendingSliceList();
+  const slicesToPull = DATA_SLICE_NAMES.filter(slice => {
+    if(pendingSlices.includes(slice)) return false;
+    return getSliceUpdatedAt(cloud, slice) > getSliceUpdatedAt(local, slice);
+  });
 
-  if(isCloudPending() && Number(local.updatedAt || 0) >= Number(cloud.updatedAt || 0)){
-    await writeCloudStateNow();
-    return;
+  if(isCloudPending() && pendingSlices.length){
+    const safeToWrite = pendingSlices.every(slice =>
+      getSliceUpdatedAt(local, slice) >= getSliceUpdatedAt(cloud, slice)
+    );
+
+    if(safeToWrite){
+      await writeCloudStateNow(pendingSlices);
+      return;
+    }
   }
 
-  if(Number(cloud.updatedAt || 0) > Number(local.updatedAt || 0)){
-    applyFullSavePayload(cloud);
-    clearCloudPending();
-    setCloudStatus(`Cloud: Pulled ${new Date(cloud.updatedAt).toLocaleString()}`);
+  if(slicesToPull.length){
+    const patch = {
+      version: SPLIT_STORAGE_VERSION,
+      updatedAt: Number(cloud.updatedAt || Date.now()),
+      sliceUpdatedAt: cloud.sliceUpdatedAt || {}
+    };
+
+    for(const slice of slicesToPull){
+      patch[slice] = cloud[slice];
+    }
+
+    applyFullSavePayload(patch);
+    setCloudStatus(
+      `Cloud: Pulled ${slicesToPull.length} slice${slicesToPull.length === 1 ? "" : "s"} • ${new Date(cloud.updatedAt).toLocaleString()}`
+    );
   }else{
     setCloudStatus(isCloudPending() ? "Cloud: Pending sync" : "Cloud: Local copy is current");
   }
 }
 
 async function pushLocalToCloud(){
-  markCloudPending("manual push");
-  await writeCloudStateNow();
+  markCloudPending("manual push", DATA_SLICE_NAMES);
+  await writeCloudStateNow(DATA_SLICE_NAMES);
 }
 
 window.addEventListener("online", () => {
@@ -1153,92 +1494,156 @@ let syncWriteTimer = null;
 function getLocalPayload(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw) return { version: 1, updatedAt: 0, events: {} };
+    const parsed = raw ? JSON.parse(raw) : null;
+    const meta = getLocalMeta();
 
-    const parsed = JSON.parse(raw);
+    let legacyPayload = {};
 
-    // Back-compat: old format was just the events map
-    if(parsed && typeof parsed === "object" && !("events" in parsed)){
-      return { version: 1, updatedAt: 0, events: parsed };
+    // Back-compat: very old format was just the events map.
+    if(parsed && typeof parsed === "object" && !("events" in parsed) && !parsed.splitStorage){
+      legacyPayload = { version: 1, updatedAt: 0, events: parsed };
+    }else if(parsed && typeof parsed === "object"){
+      legacyPayload = parsed;
     }
 
-    return {
-      version: Number(parsed.version || 1),
-      updatedAt: Number(parsed.updatedAt || 0),
-      events: parsed.events || {},
-      settings: parsed.settings || null,
-      budgetPlans: parsed.budgetPlans || null,
-      budgetCategories: parsed.budgetCategories || null,
-      merchantAliases: parsed.merchantAliases || null,
-      receiptItemCategoryMemory: parsed.receiptItemCategoryMemory || null,
-receiptTrainingRecords: parsed.receiptTrainingRecords || null,
-      selectedBudgetPanes: parsed.selectedBudgetPanes || null,
-      activeSection: parsed.activeSection || null,
-      budgetViewMode: parsed.budgetViewMode || null
+    const payload = {
+      version: SPLIT_STORAGE_VERSION,
+      updatedAt: Math.max(
+        Number(meta.updatedAt || 0),
+        Number(legacyPayload.updatedAt || 0)
+      ),
+      sliceUpdatedAt: {
+        ...(legacyPayload.sliceUpdatedAt || {}),
+        ...(meta.sliceUpdatedAt || {})
+      }
     };
+
+    for(const slice of DATA_SLICE_NAMES){
+      payload[slice] = readLocalDataSlice(slice, legacyPayload);
+    }
+
+    return payload;
   }catch{
-    return { version: 1, updatedAt: 0, events: {} };
+    return {
+      version: SPLIT_STORAGE_VERSION,
+      updatedAt: 0,
+      sliceUpdatedAt: {},
+      events: {},
+      people: [],
+      households: []
+    };
   }
 }
 
 function buildFullSavePayload(base = {}){
+  const local = getLocalPayload?.() || {};
+  const pick = (key, fallbackFn) => {
+    if(hasOwn(base, key) && base[key] !== null && base[key] !== undefined) return base[key];
+    if(hasOwn(local, key) && local[key] !== null && local[key] !== undefined) return local[key];
+    return fallbackFn();
+  };
+
+  const updatedAt = Number(
+    base.updatedAt ||
+    local.updatedAt ||
+    Date.now()
+  );
+
   return {
-    version: 2,
-    updatedAt: Number(base.updatedAt || Date.now()),
-    events: base.events || events || {},
-    settings: base.settings || settings || loadSettings(),
-    budgetPlans: base.budgetPlans || budgetPlans || loadBudgetPlans(),
-    budgetCategories: base.budgetCategories || budgetCategories || loadBudgetCategories(),
-    merchantAliases: base.merchantAliases || merchantAliases || loadMerchantAliases(),
-    receiptItemCategoryMemory: base.receiptItemCategoryMemory || receiptItemCategoryMemory || loadReceiptItemCategoryMemory(),
-receiptTrainingRecords: base.receiptTrainingRecords || receiptTrainingRecords || loadReceiptTrainingRecords(),
-    selectedBudgetPanes: base.selectedBudgetPanes || selectedBudgetPanes || loadBudgetPaneSelection(),
-    activeSection: base.activeSection || activeSection || "calendar",
-    budgetViewMode: base.budgetViewMode || budgetViewMode || "month"
+    version: SPLIT_STORAGE_VERSION,
+    updatedAt,
+    sliceUpdatedAt: {
+      ...(local.sliceUpdatedAt || {}),
+      ...(base.sliceUpdatedAt || {})
+    },
+    events: pick("events", () => events || {}),
+    settings: pick("settings", () => settings || loadSettings()),
+    budgetPlans: pick("budgetPlans", () => budgetPlans || loadBudgetPlans()),
+    budgetCategories: pick("budgetCategories", () => budgetCategories || loadBudgetCategories()),
+    merchantAliases: pick("merchantAliases", () => merchantAliases || loadMerchantAliases()),
+    receiptItemCategoryMemory: pick("receiptItemCategoryMemory", () => receiptItemCategoryMemory || loadReceiptItemCategoryMemory()),
+    receiptTrainingRecords: pick("receiptTrainingRecords", () => receiptTrainingRecords || loadReceiptTrainingRecords()),
+    selectedBudgetPanes: pick("selectedBudgetPanes", () => selectedBudgetPanes || loadBudgetPaneSelection()),
+    activeSection: pick("activeSection", () => activeSection || "calendar"),
+    budgetViewMode: pick("budgetViewMode", () => budgetViewMode || "month"),
+    people: pick("people", () => loadPeopleData()),
+    households: pick("households", () => loadHouseholdData())
   };
 }
 
 function applyFullSavePayload(payload, opts = {}){
   if(!payload) return;
 
+  const incomingSlices = getPayloadSliceNames(payload);
   const safe = buildFullSavePayload({
     ...payload,
     updatedAt: Number(payload.updatedAt || Date.now()),
-    events: normalizeEventsMap(payload.events || {})
+    events: hasOwn(payload, "events")
+      ? normalizeEventsMap(payload.events || {})
+      : undefined
   });
 
-  events = normalizeEventsMap(safe.events || {});
-  settings = safe.settings || settings;
-  budgetPlans = safe.budgetPlans || budgetPlans;
-  budgetCategories = Array.isArray(safe.budgetCategories) && safe.budgetCategories.length
-    ? safe.budgetCategories
-    : budgetCategories;
-  merchantAliases = safe.merchantAliases && typeof safe.merchantAliases === "object"
-    ? safe.merchantAliases
-    : merchantAliases;
-  receiptItemCategoryMemory = safe.receiptItemCategoryMemory && typeof safe.receiptItemCategoryMemory === "object"
-    ? safe.receiptItemCategoryMemory
-    : receiptItemCategoryMemory;
-receiptTrainingRecords = Array.isArray(safe.receiptTrainingRecords)
-  ? safe.receiptTrainingRecords
-  : receiptTrainingRecords;
-  selectedBudgetPanes = safe.selectedBudgetPanes || selectedBudgetPanes;
-  activeSection = safe.activeSection || activeSection;
-  budgetViewMode = safe.budgetViewMode || budgetViewMode;
+  const slicesToApply = incomingSlices.length ? incomingSlices : DATA_SLICE_NAMES;
 
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  localStorage.setItem(BUDGET_PLANS_KEY, JSON.stringify(budgetPlans));
-  localStorage.setItem(BUDGET_CATEGORIES_KEY, JSON.stringify(budgetCategories));
-  localStorage.setItem(MERCHANT_ALIASES_KEY, JSON.stringify(merchantAliases));
-  localStorage.setItem(RECEIPT_ITEM_MEMORY_KEY, JSON.stringify(receiptItemCategoryMemory));
-localStorage.setItem(RECEIPT_TRAINING_RECORDS_KEY, JSON.stringify(receiptTrainingRecords));
-  localStorage.setItem(BUDGET_PANES_KEY, JSON.stringify(selectedBudgetPanes));
-  localStorage.setItem("myCalendar_activeSection", activeSection);
-  localStorage.setItem("myCalendar_budgetViewMode", budgetViewMode);
+  if(slicesToApply.includes("events")){
+    events = normalizeEventsMap(safe.events || {});
+  }
+
+  if(slicesToApply.includes("settings")){
+    settings = safe.settings || settings;
+  }
+
+  if(slicesToApply.includes("budgetPlans")){
+    budgetPlans = safe.budgetPlans || budgetPlans;
+  }
+
+  if(slicesToApply.includes("budgetCategories")){
+    budgetCategories = Array.isArray(safe.budgetCategories) && safe.budgetCategories.length
+      ? safe.budgetCategories
+      : budgetCategories;
+  }
+
+  if(slicesToApply.includes("merchantAliases")){
+    merchantAliases = safe.merchantAliases && typeof safe.merchantAliases === "object"
+      ? safe.merchantAliases
+      : merchantAliases;
+  }
+
+  if(slicesToApply.includes("receiptItemCategoryMemory")){
+    receiptItemCategoryMemory = safe.receiptItemCategoryMemory && typeof safe.receiptItemCategoryMemory === "object"
+      ? safe.receiptItemCategoryMemory
+      : receiptItemCategoryMemory;
+  }
+
+  if(slicesToApply.includes("receiptTrainingRecords")){
+    receiptTrainingRecords = Array.isArray(safe.receiptTrainingRecords)
+      ? safe.receiptTrainingRecords
+      : receiptTrainingRecords;
+  }
+
+  if(slicesToApply.includes("selectedBudgetPanes")){
+    selectedBudgetPanes = safe.selectedBudgetPanes || selectedBudgetPanes;
+  }
+
+  if(slicesToApply.includes("activeSection")){
+    activeSection = safe.activeSection || activeSection;
+  }
+
+  if(slicesToApply.includes("budgetViewMode")){
+    budgetViewMode = safe.budgetViewMode || budgetViewMode;
+  }
+
+  for(const slice of slicesToApply){
+    writeLocalDataSlice(slice, safe[slice]);
+  }
+
+  saveLocalMeta(safe.updatedAt, slicesToApply);
 
   syncStateFromLegacy();
-  invalidateDerivedData("events");
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
+
+  if(slicesToApply.includes("events") || slicesToApply.includes("budgetCategories")){
+    invalidateDerivedData("events");
+  }
 
   if(!opts.skipRender){
     render();
@@ -1254,11 +1659,20 @@ localStorage.setItem(RECEIPT_TRAINING_RECORDS_KEY, JSON.stringify(receiptTrainin
 }
 
 function setLocalPayload(payload, opts = {}){
-  const safe = buildFullSavePayload(payload);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
+  if(!payload || typeof payload !== "object") return;
 
-  if(!opts.skipCloudPending){
-    markCloudPending("local save");
+  const safe = buildFullSavePayload(payload);
+  const changedSlices = normalizeSliceList(opts.slices || getPayloadSliceNames(payload));
+  const updatedAt = Number(payload.updatedAt || Date.now());
+
+  for(const slice of changedSlices){
+    writeLocalDataSlice(slice, safe[slice]);
+  }
+
+  saveLocalMeta(updatedAt, changedSlices);
+
+  if(!opts.skipCloudPending && changedSlices.length){
+    markCloudPending("local save", changedSlices);
   }
 }
 
@@ -2261,8 +2675,8 @@ function saveBudgetPaneSelection(){
     BUDGET_PANES_KEY,
     JSON.stringify(selectedBudgetPanes)
   );
-  setLocalPayload({ updatedAt: Date.now(), events });
-  cloudWriteDebounced();
+  setLocalPayload({ updatedAt: Date.now(), selectedBudgetPanes });
+  cloudWriteDebounced(["selectedBudgetPanes"]);
 }
 
 function getBudgetInsightTiles({ range, items, expenseItems, expenseTotal, plan }){
@@ -2683,8 +3097,8 @@ function loadBudgetPlans(){
 
 function saveBudgetPlans(){
   localStorage.setItem(BUDGET_PLANS_KEY, JSON.stringify(budgetPlans));
-  setLocalPayload({ updatedAt: Date.now(), events });
-  cloudWriteDebounced();
+  setLocalPayload({ updatedAt: Date.now(), budgetPlans });
+  cloudWriteDebounced(["budgetPlans"]);
 }
 
 function getBudgetPlanKey(range){
@@ -2920,8 +3334,8 @@ renderBudgetTransactionCategoryFilter();
 
 function saveBudgetCategories(){
   localStorage.setItem(BUDGET_CATEGORIES_KEY, JSON.stringify(budgetCategories));
-  setLocalPayload({ updatedAt: Date.now(), events });
-  cloudWriteDebounced();
+  setLocalPayload({ updatedAt: Date.now(), budgetCategories });
+  cloudWriteDebounced(["budgetCategories"]);
 }
 
 function getBudgetCategory(id){
@@ -3165,8 +3579,8 @@ function persistReceiptTrainingRecords(){
     JSON.stringify(receiptTrainingRecords)
   );
 
-  setLocalPayload({ updatedAt: Date.now(), events });
-  cloudWriteDebounced();
+  setLocalPayload({ updatedAt: Date.now(), receiptTrainingRecords });
+  cloudWriteDebounced(["receiptTrainingRecords"]);
 }
 
 function buildReceiptTrainingFeatures({ merchant = "", amount = 0, phrases = [] } = {}){
@@ -3475,8 +3889,8 @@ function persistReceiptItemCategoryMemory(){
     JSON.stringify(receiptItemCategoryMemory)
   );
 
-  setLocalPayload({ updatedAt: Date.now(), events });
-  cloudWriteDebounced();
+  setLocalPayload({ updatedAt: Date.now(), receiptItemCategoryMemory });
+  cloudWriteDebounced(["receiptItemCategoryMemory"]);
 }
 
 function normalizeReceiptTrainingText(text = ""){
@@ -4499,8 +4913,8 @@ function merchantSimilarity(a = "", b = ""){
 
 function saveMerchantAliases(){
   localStorage.setItem(MERCHANT_ALIASES_KEY, JSON.stringify(merchantAliases));
-  setLocalPayload({ updatedAt: Date.now(), events });
-  cloudWriteDebounced();
+  setLocalPayload({ updatedAt: Date.now(), merchantAliases });
+  cloudWriteDebounced(["merchantAliases"]);
 }
 
 function saveMerchantAlias(rawName, cleanName){
