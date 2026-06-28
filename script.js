@@ -1,4 +1,4 @@
-// =============================================================================
+// ============================================================================
 // My Digital Calendar
 // Offline calendar + budget dashboard + weather + file sync
 //
@@ -895,6 +895,67 @@ function saveHouseholdData(households = []){
   cloudWriteDebounced(["households"]);
 }
 
+
+function isMeaningfulSliceValue(slice, value){
+  if(value === undefined || value === null) return false;
+  if(slice === "events") return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0;
+  if(Array.isArray(value)) return value.length > 0;
+  if(typeof value === "object") return Object.keys(value).length > 0;
+  return String(value).trim() !== "";
+}
+
+function shouldCopyLegacySlice(slice, legacyValue){
+  if(!isMeaningfulSliceValue(slice, legacyValue)) return false;
+
+  if(slice === "activeSection"){
+    return !localStorage.getItem("myCalendar_activeSection");
+  }
+
+  if(slice === "budgetViewMode"){
+    return !localStorage.getItem("myCalendar_budgetViewMode");
+  }
+
+  const key = getSliceStorageKey(slice);
+  if(!key) return false;
+
+  const existing = parseStoredJson(key, undefined);
+  return !isMeaningfulSliceValue(slice, existing);
+}
+
+function migrateLegacyStorageToSlices(){
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if(!raw) return [];
+
+    const legacy = JSON.parse(raw);
+    if(!legacy || typeof legacy !== "object" || legacy.splitStorage) return [];
+
+    const migratedSlices = [];
+
+    for(const slice of DATA_SLICE_NAMES){
+      if(!hasOwn(legacy, slice)) continue;
+      if(!shouldCopyLegacySlice(slice, legacy[slice])) continue;
+
+      writeLocalDataSlice(slice, legacy[slice]);
+      migratedSlices.push(slice);
+    }
+
+    if(migratedSlices.length){
+      const updatedAt = Number(legacy.updatedAt || Date.now());
+      saveLocalMeta(updatedAt, migratedSlices);
+      console.info(
+        "Calendar storage migrated:",
+        migratedSlices.map(slice => DATA_SLICE_LABELS[slice] || slice).join(", ")
+      );
+    }
+
+    return migratedSlices;
+  }catch(err){
+    console.warn("Calendar legacy storage migration skipped:", err);
+    return [];
+  }
+}
+
 // ============================================================================
 // 04b. UTILITY HELPERS
 // ============================================================================
@@ -1519,7 +1580,21 @@ function getLocalPayload(){
     };
 
     for(const slice of DATA_SLICE_NAMES){
-      payload[slice] = readLocalDataSlice(slice, legacyPayload);
+      try{
+        payload[slice] = readLocalDataSlice(slice, legacyPayload);
+      }catch(err){
+        console.warn(`Could not read ${slice} slice; using safe fallback.`, err);
+
+        if(hasOwn(legacyPayload, slice)){
+          payload[slice] = legacyPayload[slice];
+        }else if(slice === "events"){
+          payload[slice] = {};
+        }else if(slice === "people" || slice === "households"){
+          payload[slice] = [];
+        }else{
+          payload[slice] = null;
+        }
+      }
     }
 
     return payload;
@@ -9146,6 +9221,10 @@ setTripShadingUI(!!spanToggle?.checked);
 // ============================================================================
 // 12. APP STATE
 // ============================================================================
+// Copy old monolithic saves into split storage before the first app-state read.
+// This prevents the calendar from appearing empty when myCalendarEvents_v1
+// has not been created yet but myCalendarData_v4 still contains the old events.
+migrateLegacyStorageToSlices();
 let { events: eventsMap } = loadEvents();
 let events = normalizeEventsMap(eventsMap);
 
