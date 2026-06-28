@@ -1838,6 +1838,90 @@ async function enqueueCloudRecordOpsForSlices(slices = [], reason = "local chang
   }
 }
 
+
+async function enqueueCloudRecordOps(ops = [], reason = "local change"){
+  const safeOps = (Array.isArray(ops) ? ops : [ops]).filter(Boolean);
+  if(!safeOps.length || !indexedDbSupported()) return [];
+
+  try{
+    const db = await openCalendarIndexedDb();
+    if(!db || !db.objectStoreNames.contains("syncQueue")) return [];
+
+    const tx = db.transaction("syncQueue", "readwrite");
+    const store = tx.objectStore("syncQueue");
+
+    for(const op of safeOps){
+      store.put({
+        id: op.id,
+        slice: op.slice,
+        store: op.store,
+        recordId: op.recordId,
+        op,
+        reason,
+        updatedAt: Number(op.updatedAt || Date.now()),
+        queuedAt: Date.now()
+      });
+    }
+
+    await idbTransactionDone(tx);
+    return safeOps;
+  }catch(err){
+    console.warn("Could not enqueue targeted row sync operations.", err);
+    return [];
+  }
+}
+
+function markCloudPendingOnly(reason = "local change", slices = []){
+  const local = getLocalPayload?.() || {};
+  const existing = getCloudPending();
+  const requestedSlices = normalizeSliceList(slices);
+  const mergedSlices = normalizeSliceList([
+    ...(existing?.slices || []),
+    ...requestedSlices
+  ]);
+
+  localStorage.setItem(CLOUD_PENDING_KEY, JSON.stringify({
+    reason,
+    updatedAt: Number(local.updatedAt || Date.now()),
+    markedAt: Date.now(),
+    slices: mergedSlices
+  }));
+}
+
+function markCloudRecordOpsPending(reason = "record change", slices = [], ops = []){
+  const safeOps = (Array.isArray(ops) ? ops : [ops]).filter(Boolean);
+  const safeSlices = normalizeSliceList(slices.length ? slices : safeOps.map(op => op.slice));
+
+  markCloudPendingOnly(reason, safeSlices);
+
+  if(safeOps.length){
+    enqueueCloudRecordOps(safeOps, reason).catch(err => {
+      console.warn("Could not add targeted records to sync queue.", err);
+    });
+  }
+}
+
+function makeEventCloudOp(event, dateISO, updatedAt = Date.now(), deleted = false){
+  const safeDateISO = dateISO || event?.dateISO || event?.startDate || selectedDateISO || "";
+  const safeId = normalizeIndexedDbRecordId(event?.id || selectedEventId, `${safeDateISO}:${Date.now()}`);
+
+  const record = deleted ? null : {
+    ...(event || {}),
+    id: safeId,
+    dateISO: safeDateISO,
+    updatedAt: Number(updatedAt || Date.now())
+  };
+
+  return makeCloudRecordOp(
+    "events",
+    "events",
+    safeId,
+    record,
+    Number(updatedAt || Date.now()),
+    deleted
+  );
+}
+
 async function getQueuedCloudRecordOps(slices = []){
   if(!indexedDbSupported()) return [];
 
@@ -9860,7 +9944,7 @@ function normalizeEventsMap(map){
   return out;
 }
 
-function saveEvents(previousEventsSnapshot = null){
+function saveEvents(previousEventsSnapshot = null, opts = {}){
   syncStateFromLegacy();
   invalidateDerivedData("events");
 
@@ -9878,7 +9962,20 @@ function saveEvents(previousEventsSnapshot = null){
     redoStack = [];
   }
 
-  setLocalPayload({ updatedAt: Date.now(), events });
+  const updatedAt = Number(opts.updatedAt || Date.now());
+  const targetedOps = Array.isArray(opts.cloudOps)
+    ? opts.cloudOps.filter(Boolean)
+    : [];
+
+  setLocalPayload(
+    { updatedAt, events },
+    { skipCloudPending: targetedOps.length > 0 || !!opts.skipCloudPending }
+  );
+
+  if(targetedOps.length){
+    markCloudRecordOpsPending(opts.reason || "event change", ["events"], targetedOps);
+  }
+
   syncWriteDebounced();
   cloudWriteDebounced();
   updateHistoryUI();
@@ -11523,6 +11620,9 @@ const before = snapshotBeforeChange();
     nextRecurrence.interval = 1;
   }
 
+  let changedEventForCloud = null;
+  const changedAt = Date.now();
+
   if(selectedEventId){
     const idx = list.findIndex(e => e.id === selectedEventId);
     if(idx >= 0){
@@ -11545,19 +11645,26 @@ categoryId,
           exceptions: Array.isArray(prev.exceptions) ? prev.exceptions : [],
         }
       };
+      changedEventForCloud = list[idx];
     } else {
-      const newEv = { id: cryptoId(), title, details, color, startTime: startStr, endTime: endStr, startDate: selectedDateISO, span, recurrence: nextRecurrence };
+      const newEv = { id: cryptoId(), title, details, price, categoryId, color, startTime: startStr, endTime: endStr, startDate: selectedDateISO, span, recurrence: nextRecurrence };
       list.push(newEv);
       selectedEventId = newEv.id;
+      changedEventForCloud = newEv;
     }
   } else {
     const newEv = { id: cryptoId(), title, details, price, categoryId, color, startTime: startStr, endTime: endStr, startDate: selectedDateISO, span, recurrence: nextRecurrence };
     list.push(newEv);
     selectedEventId = newEv.id;
+    changedEventForCloud = newEv;
   }
 
   events[baseKey] = list;
-  saveEvents(before);
+  saveEvents(before, {
+    updatedAt: changedAt,
+    reason: selectedEventId ? "event save" : "event create",
+    cloudOps: [makeEventCloudOp(changedEventForCloud, baseKey, changedAt)]
+  });
   syncStateFromLegacy();
 
   populateFormFromSelected();
@@ -11584,8 +11691,13 @@ deleteBtn?.addEventListener("click", () => {
   const wantSeriesDelete = !!deleteWholeSeries?.checked;
 
   if(wantSeriesDelete && isSeries){
+    const changedAt = Date.now();
     events[baseKey] = list.filter(e => e.id !== selectedEventId);
-    saveEvents(before);
+    saveEvents(before, {
+      updatedAt: changedAt,
+      reason: "event delete",
+      cloudOps: [makeEventCloudOp(ev, baseKey, changedAt, true)]
+    });
     syncStateFromLegacy();
     clearFormForNew();
     renderEventList();
@@ -11594,11 +11706,16 @@ deleteBtn?.addEventListener("click", () => {
   }
 
   if(isSeries && isOccurrenceContext()){
+    const changedAt = Date.now();
     const ex = Array.isArray(ev.recurrence.exceptions) ? ev.recurrence.exceptions : [];
     if(!ex.includes(selectedDateISO)) ex.push(selectedDateISO);
     list[idx] = { ...ev, recurrence: { ...ev.recurrence, exceptions: ex } };
     events[baseKey] = list;
-    saveEvents(before);
+    saveEvents(before, {
+      updatedAt: changedAt,
+      reason: "event occurrence delete",
+      cloudOps: [makeEventCloudOp(list[idx], baseKey, changedAt)]
+    });
     syncStateFromLegacy();
     clearFormForNew();
     renderEventList();
@@ -11606,8 +11723,13 @@ deleteBtn?.addEventListener("click", () => {
     return;
   }
 
+  const changedAt = Date.now();
   events[baseKey] = list.filter(e => e.id !== selectedEventId);
-  saveEvents(before);
+  saveEvents(before, {
+    updatedAt: changedAt,
+    reason: "event delete",
+    cloudOps: [makeEventCloudOp(ev, baseKey, changedAt, true)]
+  });
   syncStateFromLegacy();
   clearFormForNew();
   renderEventList();
