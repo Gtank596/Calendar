@@ -737,6 +737,551 @@ const DATA_SLICE_LABELS = {
   households: "Households"
 };
 
+
+// ============================================================================
+// 04a. INDEXEDDB OFFLINE STORAGE LAYER
+// ============================================================================
+// IndexedDB becomes the roomy offline landscape. localStorage stays as a tiny
+// boot/cache + legacy safety net for this sweep so old data is not endangered.
+const CALENDAR_IDB_NAME = "myCalendarOfflineDB";
+const CALENDAR_IDB_VERSION = 1;
+
+const CALENDAR_IDB_STORES = [
+  "slices",
+  "events",
+  "budgetTransactions",
+  "budgetCategories",
+  "budgetPlans",
+  "receiptMemory",
+  "receiptTraining",
+  "merchantAliases",
+  "people",
+  "households",
+  "meta",
+  "syncQueue"
+];
+
+let calendarIndexedDbPromise = null;
+let indexedDbSliceWriteTimer = null;
+let indexedDbMetaWriteTimer = null;
+const indexedDbSliceWriteQueue = new Map();
+let indexedDbMetaWriteQueue = null;
+
+function indexedDbSupported(){
+  return typeof indexedDB !== "undefined";
+}
+
+function idbRequestToPromise(request){
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
+  });
+}
+
+function idbTransactionDone(tx){
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error("IndexedDB transaction failed"));
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted"));
+  });
+}
+
+function openCalendarIndexedDb(){
+  if(!indexedDbSupported()) return Promise.resolve(null);
+
+  if(calendarIndexedDbPromise) return calendarIndexedDbPromise;
+
+  calendarIndexedDbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(CALENDAR_IDB_NAME, CALENDAR_IDB_VERSION);
+
+    req.onupgradeneeded = () => {
+      const db = req.result;
+
+      if(!db.objectStoreNames.contains("slices")){
+        db.createObjectStore("slices", { keyPath: "slice" });
+      }
+
+      if(!db.objectStoreNames.contains("events")){
+        const store = db.createObjectStore("events", { keyPath: "id" });
+        store.createIndex("dateISO", "dateISO", { unique:false });
+        store.createIndex("updatedAt", "updatedAt", { unique:false });
+      }
+
+      if(!db.objectStoreNames.contains("budgetTransactions")){
+        const store = db.createObjectStore("budgetTransactions", { keyPath: "id" });
+        store.createIndex("dateISO", "dateISO", { unique:false });
+        store.createIndex("categoryId", "categoryId", { unique:false });
+        store.createIndex("updatedAt", "updatedAt", { unique:false });
+      }
+
+      if(!db.objectStoreNames.contains("budgetCategories")){
+        db.createObjectStore("budgetCategories", { keyPath: "id" });
+      }
+
+      if(!db.objectStoreNames.contains("budgetPlans")){
+        db.createObjectStore("budgetPlans", { keyPath: "id" });
+      }
+
+      if(!db.objectStoreNames.contains("receiptMemory")){
+        db.createObjectStore("receiptMemory", { keyPath: "id" });
+      }
+
+      if(!db.objectStoreNames.contains("receiptTraining")){
+        const store = db.createObjectStore("receiptTraining", { keyPath: "id" });
+        store.createIndex("createdAt", "createdAt", { unique:false });
+      }
+
+      if(!db.objectStoreNames.contains("merchantAliases")){
+        db.createObjectStore("merchantAliases", { keyPath: "id" });
+      }
+
+      if(!db.objectStoreNames.contains("people")){
+        db.createObjectStore("people", { keyPath: "id" });
+      }
+
+      if(!db.objectStoreNames.contains("households")){
+        db.createObjectStore("households", { keyPath: "id" });
+      }
+
+      if(!db.objectStoreNames.contains("meta")){
+        db.createObjectStore("meta", { keyPath: "key" });
+      }
+
+      if(!db.objectStoreNames.contains("syncQueue")){
+        const store = db.createObjectStore("syncQueue", { keyPath: "id" });
+        store.createIndex("slice", "slice", { unique:false });
+        store.createIndex("updatedAt", "updatedAt", { unique:false });
+      }
+    };
+
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => db.close();
+      resolve(db);
+    };
+
+    req.onerror = () => reject(req.error || new Error("Could not open IndexedDB"));
+  }).catch(err => {
+    console.warn("IndexedDB unavailable; localStorage fallback remains active.", err);
+    calendarIndexedDbPromise = null;
+    return null;
+  });
+
+  return calendarIndexedDbPromise;
+}
+
+async function idbClearAndPutAll(db, storeName, records = []){
+  if(!db || !db.objectStoreNames.contains(storeName)) return;
+
+  const tx = db.transaction(storeName, "readwrite");
+  const store = tx.objectStore(storeName);
+  store.clear();
+
+  for(const record of records){
+    if(record && record.id !== undefined && record.id !== null){
+      store.put(record);
+    }
+  }
+
+  await idbTransactionDone(tx);
+}
+
+function normalizeIndexedDbRecordId(value, fallback){
+  const raw = String(value ?? "").trim();
+  return raw || fallback;
+}
+
+function eventsMapToIndexedDbRecords(eventsMap = {}, updatedAt = Date.now()){
+  const records = [];
+  const transactions = [];
+
+  for(const [dateISO, list] of Object.entries(eventsMap || {})){
+    if(!Array.isArray(list)) continue;
+
+    list.forEach((event, index) => {
+      if(!event || typeof event !== "object") return;
+      const id = normalizeIndexedDbRecordId(event.id, `${dateISO}:${index}`);
+      const record = {
+        ...event,
+        id,
+        dateISO,
+        updatedAt
+      };
+
+      records.push(record);
+
+      const price = Number(event.price);
+      if(Number.isFinite(price) && price !== 0){
+        transactions.push({
+          id: `event:${id}`,
+          eventId: id,
+          dateISO,
+          title: event.title || "Untitled",
+          amount: price,
+          type: price < 0 ? "income" : "expense",
+          categoryId: event.categoryId || "other",
+          source: event.source || "calendar",
+          updatedAt
+        });
+      }
+    });
+  }
+
+  return { events: records, budgetTransactions: transactions };
+}
+
+function budgetPlansToIndexedDbRecords(plans = {}, updatedAt = Date.now()){
+  const records = [];
+
+  for(const [period, periodPlans] of Object.entries(plans || {})){
+    if(!periodPlans || typeof periodPlans !== "object") continue;
+
+    for(const [rangeKey, plan] of Object.entries(periodPlans)){
+      records.push({
+        id: `${period}:${rangeKey}`,
+        period,
+        rangeKey,
+        plan,
+        updatedAt
+      });
+    }
+  }
+
+  return records;
+}
+
+function objectMapToIndexedDbRecords(map = {}, updatedAt = Date.now()){
+  return Object.entries(map || {}).map(([id, value]) => ({
+    id: normalizeIndexedDbRecordId(id, cryptoId?.() || String(Date.now())),
+    value,
+    updatedAt
+  }));
+}
+
+function arrayToIndexedDbRecords(list = [], updatedAt = Date.now(), prefix = "record"){
+  if(!Array.isArray(list)) return [];
+
+  return list.map((item, index) => {
+    const obj = item && typeof item === "object" ? item : { value: item };
+    return {
+      ...obj,
+      id: normalizeIndexedDbRecordId(obj.id, `${prefix}:${index}`),
+      updatedAt: Number(obj.updatedAt || obj.createdAt || updatedAt)
+    };
+  });
+}
+
+function selectedBudgetPanesToIndexedDbRecords(panes = {}, updatedAt = Date.now()){
+  return Object.entries(panes || {}).map(([id, selected]) => ({
+    id,
+    selected: Array.isArray(selected) ? selected : [],
+    updatedAt
+  }));
+}
+
+async function mirrorSliceToIndexedDbStores(slice, value, updatedAt = Date.now(), db = null){
+  const opened = db || await openCalendarIndexedDb();
+  if(!opened) return;
+
+  try{
+    if(slice === "events"){
+      const { events: eventRecords, budgetTransactions } = eventsMapToIndexedDbRecords(value, updatedAt);
+      await idbClearAndPutAll(opened, "events", eventRecords);
+      await idbClearAndPutAll(opened, "budgetTransactions", budgetTransactions);
+      return;
+    }
+
+    if(slice === "budgetCategories"){
+      await idbClearAndPutAll(opened, "budgetCategories", arrayToIndexedDbRecords(value, updatedAt, "category"));
+      return;
+    }
+
+    if(slice === "budgetPlans"){
+      await idbClearAndPutAll(opened, "budgetPlans", budgetPlansToIndexedDbRecords(value, updatedAt));
+      return;
+    }
+
+    if(slice === "receiptItemCategoryMemory"){
+      await idbClearAndPutAll(opened, "receiptMemory", objectMapToIndexedDbRecords(value, updatedAt));
+      return;
+    }
+
+    if(slice === "receiptTrainingRecords"){
+      await idbClearAndPutAll(opened, "receiptTraining", arrayToIndexedDbRecords(value, updatedAt, "training"));
+      return;
+    }
+
+    if(slice === "merchantAliases"){
+      await idbClearAndPutAll(opened, "merchantAliases", objectMapToIndexedDbRecords(value, updatedAt));
+      return;
+    }
+
+    if(slice === "people"){
+      await idbClearAndPutAll(opened, "people", arrayToIndexedDbRecords(value, updatedAt, "person"));
+      return;
+    }
+
+    if(slice === "households"){
+      await idbClearAndPutAll(opened, "households", arrayToIndexedDbRecords(value, updatedAt, "household"));
+      return;
+    }
+
+    if(slice === "selectedBudgetPanes"){
+      const tx = opened.transaction("meta", "readwrite");
+      tx.objectStore("meta").put({
+        key: "selectedBudgetPanes",
+        value,
+        updatedAt
+      });
+      await idbTransactionDone(tx);
+      return;
+    }
+
+    if(slice === "settings" || slice === "activeSection" || slice === "budgetViewMode"){
+      const tx = opened.transaction("meta", "readwrite");
+      tx.objectStore("meta").put({
+        key: slice,
+        value,
+        updatedAt
+      });
+      await idbTransactionDone(tx);
+    }
+  }catch(err){
+    console.warn(`Could not mirror ${slice} into IndexedDB record stores.`, err);
+  }
+}
+
+async function putIndexedDbSliceNow(slice, value, updatedAt = Date.now()){
+  const safeSlice = normalizeSliceList(slice)[0];
+  if(!safeSlice) return;
+
+  const db = await openCalendarIndexedDb();
+  if(!db) return;
+
+  const tx = db.transaction(["slices", "meta"], "readwrite");
+  tx.objectStore("slices").put({
+    slice: safeSlice,
+    value,
+    updatedAt
+  });
+  tx.objectStore("meta").put({
+    key: `sliceUpdatedAt:${safeSlice}`,
+    value: updatedAt,
+    updatedAt
+  });
+  await idbTransactionDone(tx);
+
+  await mirrorSliceToIndexedDbStores(safeSlice, value, updatedAt, db);
+}
+
+function writeIndexedDbSliceDebounced(slice, value, updatedAt = Date.now()){
+  const safeSlice = normalizeSliceList(slice)[0];
+  if(!safeSlice || !indexedDbSupported()) return;
+
+  indexedDbSliceWriteQueue.set(safeSlice, {
+    value,
+    updatedAt: Number(updatedAt || Date.now())
+  });
+
+  clearTimeout(indexedDbSliceWriteTimer);
+  indexedDbSliceWriteTimer = setTimeout(() => {
+    flushIndexedDbSliceWrites().catch(err => {
+      console.warn("IndexedDB slice flush failed; localStorage fallback still has data.", err);
+    });
+  }, 120);
+}
+
+async function flushIndexedDbSliceWrites(){
+  if(!indexedDbSliceWriteQueue.size) return;
+
+  const entries = Array.from(indexedDbSliceWriteQueue.entries());
+  indexedDbSliceWriteQueue.clear();
+
+  for(const [slice, item] of entries){
+    await putIndexedDbSliceNow(slice, item.value, item.updatedAt);
+  }
+}
+
+async function writeIndexedDbMetaNow(meta){
+  const db = await openCalendarIndexedDb();
+  if(!db || !meta) return;
+
+  const tx = db.transaction("meta", "readwrite");
+  tx.objectStore("meta").put({
+    key: "appMeta",
+    value: meta,
+    updatedAt: Number(meta.updatedAt || Date.now())
+  });
+  await idbTransactionDone(tx);
+}
+
+function writeIndexedDbMetaDebounced(meta){
+  if(!indexedDbSupported()) return;
+  indexedDbMetaWriteQueue = meta;
+
+  clearTimeout(indexedDbMetaWriteTimer);
+  indexedDbMetaWriteTimer = setTimeout(() => {
+    const queued = indexedDbMetaWriteQueue;
+    indexedDbMetaWriteQueue = null;
+    writeIndexedDbMetaNow(queued).catch(err => {
+      console.warn("IndexedDB meta write failed; localStorage fallback still has meta.", err);
+    });
+  }, 120);
+}
+
+async function getIndexedDbSliceRecord(slice){
+  const safeSlice = normalizeSliceList(slice)[0];
+  if(!safeSlice) return null;
+
+  const db = await openCalendarIndexedDb();
+  if(!db) return null;
+
+  const tx = db.transaction("slices", "readonly");
+  const record = await idbRequestToPromise(tx.objectStore("slices").get(safeSlice));
+  await idbTransactionDone(tx).catch(() => {});
+  return record || null;
+}
+
+async function getIndexedDbPayload(){
+  const db = await openCalendarIndexedDb();
+  if(!db) return null;
+
+  const tx = db.transaction("slices", "readonly");
+  const rows = await idbRequestToPromise(tx.objectStore("slices").getAll());
+  await idbTransactionDone(tx).catch(() => {});
+
+  if(!Array.isArray(rows) || !rows.length) return null;
+
+  const payload = {
+    version: SPLIT_STORAGE_VERSION,
+    updatedAt: 0,
+    sliceUpdatedAt: {}
+  };
+
+  for(const row of rows){
+    const slice = normalizeSliceList(row?.slice)[0];
+    if(!slice) continue;
+
+    payload[slice] = row.value;
+    payload.sliceUpdatedAt[slice] = Number(row.updatedAt || 0);
+    payload.updatedAt = Math.max(payload.updatedAt, payload.sliceUpdatedAt[slice]);
+  }
+
+  return payload;
+}
+
+async function restoreMissingOrNewerSlicesFromIndexedDb(){
+  const idbPayload = await getIndexedDbPayload();
+  if(!idbPayload) return [];
+
+  const local = getLocalPayload();
+  const patch = {
+    version: SPLIT_STORAGE_VERSION,
+    updatedAt: Number(idbPayload.updatedAt || Date.now()),
+    sliceUpdatedAt: idbPayload.sliceUpdatedAt || {}
+  };
+
+  const restoredSlices = [];
+
+  for(const slice of DATA_SLICE_NAMES){
+    if(!hasOwn(idbPayload, slice)) continue;
+
+    const idbValue = idbPayload[slice];
+    const localValue = local[slice];
+    const idbTime = getSliceUpdatedAt(idbPayload, slice);
+    const localTime = getSliceUpdatedAt(local, slice);
+
+    if(
+      isMeaningfulSliceValue(slice, idbValue) &&
+      (!isMeaningfulSliceValue(slice, localValue) || idbTime > localTime)
+    ){
+      patch[slice] = idbValue;
+      restoredSlices.push(slice);
+    }
+  }
+
+  if(restoredSlices.length){
+    applyFullSavePayload(patch);
+    console.info(
+      "Calendar restored from IndexedDB:",
+      restoredSlices.map(slice => DATA_SLICE_LABELS[slice] || slice).join(", ")
+    );
+  }
+
+  return restoredSlices;
+}
+
+async function migrateCurrentLocalStorageToIndexedDb(){
+  if(!indexedDbSupported()) return [];
+
+  const local = getLocalPayload();
+  const idbPayload = await getIndexedDbPayload();
+  const migratedSlices = [];
+
+  for(const slice of DATA_SLICE_NAMES){
+    if(!hasOwn(local, slice) || !isMeaningfulSliceValue(slice, local[slice])) continue;
+
+    const localTime = getSliceUpdatedAt(local, slice) || Number(local.updatedAt || Date.now());
+    const idbTime = idbPayload ? getSliceUpdatedAt(idbPayload, slice) : 0;
+
+    if(!idbPayload || localTime >= idbTime || !isMeaningfulSliceValue(slice, idbPayload[slice])){
+      await putIndexedDbSliceNow(slice, local[slice], localTime);
+      migratedSlices.push(slice);
+    }
+  }
+
+  if(migratedSlices.length){
+    await writeIndexedDbMetaNow(getLocalMeta());
+    console.info(
+      "Calendar moved into IndexedDB:",
+      migratedSlices.map(slice => DATA_SLICE_LABELS[slice] || slice).join(", ")
+    );
+  }
+
+  return migratedSlices;
+}
+
+async function bootstrapIndexedDbStorageAfterInitialLoad(){
+  if(!indexedDbSupported()){
+    console.info("IndexedDB is not available; localStorage fallback remains active.");
+    return { restored: [], migrated: [] };
+  }
+
+  const restored = await restoreMissingOrNewerSlicesFromIndexedDb();
+  const migrated = await migrateCurrentLocalStorageToIndexedDb();
+
+  return { restored, migrated };
+}
+
+async function getCalendarStorageDebugSummary(){
+  const localKeys = Object.fromEntries(
+    Object.keys(localStorage)
+      .filter(k => k.startsWith("myCalendar"))
+      .sort()
+      .map(k => [k, (localStorage.getItem(k) || "").length])
+  );
+
+  const idbPayload = await getIndexedDbPayload();
+
+  return {
+    mode: indexedDbSupported() ? "IndexedDB + localStorage safety cache" : "localStorage only",
+    localKeys,
+    indexedDbSlices: idbPayload
+      ? Object.fromEntries(DATA_SLICE_NAMES.map(slice => [
+          slice,
+          hasOwn(idbPayload, slice)
+            ? JSON.stringify(idbPayload[slice] ?? null).length
+            : 0
+        ]))
+      : {},
+    indexedDbUpdatedAt: idbPayload?.updatedAt || 0
+  };
+}
+
+if(typeof window !== "undefined"){
+  window.calendarStorageDebug = getCalendarStorageDebugSummary;
+}
+
 function hasOwn(obj, key){
   return Object.prototype.hasOwnProperty.call(obj || {}, key);
 }
@@ -819,6 +1364,8 @@ function saveLocalMeta(updatedAt = Date.now(), slices = []){
     sliceUpdatedAt: meta.sliceUpdatedAt
   }));
 
+  writeIndexedDbMetaDebounced(meta);
+
   return meta;
 }
 
@@ -852,13 +1399,19 @@ function readLocalDataSlice(slice, legacyPayload = {}){
 function writeLocalDataSlice(slice, value){
   if(value === undefined) return;
 
+  const updatedAt = Date.now();
+
   if(slice === "activeSection"){
-    localStorage.setItem("myCalendar_activeSection", value || "calendar");
+    const safeValue = value || "calendar";
+    localStorage.setItem("myCalendar_activeSection", safeValue);
+    writeIndexedDbSliceDebounced(slice, safeValue, updatedAt);
     return;
   }
 
   if(slice === "budgetViewMode"){
-    localStorage.setItem("myCalendar_budgetViewMode", value || "month");
+    const safeValue = value || "month";
+    localStorage.setItem("myCalendar_budgetViewMode", safeValue);
+    writeIndexedDbSliceDebounced(slice, safeValue, updatedAt);
     return;
   }
 
@@ -866,6 +1419,7 @@ function writeLocalDataSlice(slice, value){
   if(!key) return;
 
   localStorage.setItem(key, JSON.stringify(value));
+  writeIndexedDbSliceDebounced(slice, value, updatedAt);
 }
 
 function getSliceUpdatedAt(payload = {}, slice){
@@ -9338,10 +9892,12 @@ function setAppState(patch = {}, options = {}){
 
   if(options.persistActiveSection && typeof state.activeSection === "string"){
     localStorage.setItem("myCalendar_activeSection", state.activeSection);
+    writeIndexedDbSliceDebounced("activeSection", state.activeSection);
   }
 
   if(options.persistBudgetViewMode && typeof state.budgetViewMode === "string"){
     localStorage.setItem("myCalendar_budgetViewMode", state.budgetViewMode);
+    writeIndexedDbSliceDebounced("budgetViewMode", state.budgetViewMode);
   }
 
   if(options.render){
@@ -11578,6 +12134,9 @@ renderBudgetCategoryOptions();
 closeBudgetTxDrawer();
 setActiveSection(activeSection);
 updateSectionSlider();
+bootstrapIndexedDbStorageAfterInitialLoad().catch(err => {
+  console.warn("IndexedDB bootstrap skipped:", err);
+});
 }catch(err){
   console.error(err);
   alert("Calendar error: " + err.message);
