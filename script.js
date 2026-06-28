@@ -10587,7 +10587,9 @@ function isTypingTarget(el){
 }
 
 document.addEventListener("keydown", (e) => {
-  const key = e.key.toLowerCase();
+  const key = String(e?.key || "").toLowerCase();
+  if(!key) return;
+
   const mod = e.ctrlKey || e.metaKey;
 
   const isUndoCombo = mod && !e.shiftKey && key === "z";
