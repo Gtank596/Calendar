@@ -1274,7 +1274,8 @@ async function getCalendarStorageDebugSummary(){
             : 0
         ]))
       : {},
-    indexedDbUpdatedAt: idbPayload?.updatedAt || 0
+    indexedDbUpdatedAt: idbPayload?.updatedAt || 0,
+    queuedCloudRows: await countQueuedCloudRecordOps()
   };
 }
 
@@ -1545,6 +1546,505 @@ let cloudWriteTimer = null;
 let cloudBusy = false;
 let cloudFlushInProgress = false;
 
+
+// Row-based cloud sync rides on the existing Supabase table. Each app item gets
+// its own cloud row, while the old slice rows stay readable as a safety bridge.
+const CLOUD_RECORD_KIND = "calendar_record_v1";
+const CLOUD_KNOWN_RECORDS_KEY = "myCalendarCloudKnownRecords_v1";
+
+function cloudRecordKey(slice, store, recordId){
+  return `${slice}::${store}::${String(recordId ?? "singleton")}`;
+}
+
+function splitCloudRecordKey(key){
+  const parts = String(key || "").split("::");
+  return {
+    slice: parts[0] || "",
+    store: parts[1] || "",
+    recordId: parts.slice(2).join("::") || "singleton"
+  };
+}
+
+function getCloudRecordRowId(store, recordId){
+  const userPart = cloudUser?.id || "offline";
+  const safeStore = encodeURIComponent(String(store || "record"));
+  const safeRecord = encodeURIComponent(String(recordId || "singleton"));
+  return `${userPart}:record:${safeStore}:${safeRecord}`;
+}
+
+function getKnownCloudRecordKeys(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(CLOUD_KNOWN_RECORDS_KEY)) || {};
+    return saved && typeof saved === "object" ? saved : {};
+  }catch{
+    return {};
+  }
+}
+
+function saveKnownCloudRecordKeys(map){
+  try{
+    localStorage.setItem(CLOUD_KNOWN_RECORDS_KEY, JSON.stringify(map || {}));
+  }catch(err){
+    console.warn("Could not save cloud record index.", err);
+  }
+}
+
+function getKnownCloudKeysForSlice(slice){
+  const map = getKnownCloudRecordKeys();
+  return Array.isArray(map[slice]) ? map[slice] : [];
+}
+
+function setKnownCloudKeysForSlice(slice, keys){
+  const safeSlice = normalizeSliceList(slice)[0];
+  if(!safeSlice) return;
+
+  const map = getKnownCloudRecordKeys();
+  map[safeSlice] = [...new Set((keys || []).map(String))];
+  saveKnownCloudRecordKeys(map);
+}
+
+function updateKnownCloudKeysFromOps(ops = []){
+  const map = getKnownCloudRecordKeys();
+
+  for(const op of ops || []){
+    const slice = normalizeSliceList(op?.slice)[0];
+    if(!slice) continue;
+
+    const key = op.key || cloudRecordKey(slice, op.store, op.recordId);
+    const set = new Set(Array.isArray(map[slice]) ? map[slice] : []);
+
+    if(op.deleted) set.delete(key);
+    else set.add(key);
+
+    map[slice] = Array.from(set);
+  }
+
+  saveKnownCloudRecordKeys(map);
+}
+
+function rowUpdatedAt(row){
+  return row?.updated_at ? new Date(row.updated_at).getTime() : Number(row?.payload?.updatedAt || 0);
+}
+
+function getCloudStoreForSlice(slice){
+  switch(slice){
+    case "receiptItemCategoryMemory": return "receiptMemory";
+    case "receiptTrainingRecords": return "receiptTraining";
+    case "selectedBudgetPanes":
+    case "activeSection":
+    case "budgetViewMode": return "meta";
+    default: return slice;
+  }
+}
+
+function makeCloudRecordOp(slice, store, recordId, data, updatedAt, deleted = false){
+  const safeSlice = normalizeSliceList(slice)[0];
+  if(!safeSlice) return null;
+
+  const safeStore = String(store || getCloudStoreForSlice(safeSlice));
+  const safeRecordId = String(recordId || "singleton");
+  const safeUpdatedAt = Number(updatedAt || Date.now());
+
+  return {
+    id: cloudRecordKey(safeSlice, safeStore, safeRecordId),
+    key: cloudRecordKey(safeSlice, safeStore, safeRecordId),
+    slice: safeSlice,
+    store: safeStore,
+    recordId: safeRecordId,
+    data: deleted ? null : data,
+    deleted: !!deleted,
+    updatedAt: safeUpdatedAt
+  };
+}
+
+function cloudOpsFromSliceValue(slice, value, updatedAt = Date.now()){
+  const safeSlice = normalizeSliceList(slice)[0];
+  if(!safeSlice) return [];
+
+  const safeUpdatedAt = Number(updatedAt || Date.now());
+  const ops = [];
+
+  if(safeSlice === "events"){
+    const { events: eventRecords } = eventsMapToIndexedDbRecords(value || {}, safeUpdatedAt);
+    for(const record of eventRecords){
+      ops.push(makeCloudRecordOp(safeSlice, "events", record.id, record, record.updatedAt || safeUpdatedAt));
+    }
+    return ops.filter(Boolean);
+  }
+
+  if(safeSlice === "budgetCategories"){
+    for(const record of arrayToIndexedDbRecords(value || [], safeUpdatedAt, "category")){
+      ops.push(makeCloudRecordOp(safeSlice, "budgetCategories", record.id, record, record.updatedAt || safeUpdatedAt));
+    }
+    return ops.filter(Boolean);
+  }
+
+  if(safeSlice === "budgetPlans"){
+    for(const record of budgetPlansToIndexedDbRecords(value || {}, safeUpdatedAt)){
+      ops.push(makeCloudRecordOp(safeSlice, "budgetPlans", record.id, record, record.updatedAt || safeUpdatedAt));
+    }
+    return ops.filter(Boolean);
+  }
+
+  if(safeSlice === "receiptItemCategoryMemory"){
+    for(const record of objectMapToIndexedDbRecords(value || {}, safeUpdatedAt)){
+      ops.push(makeCloudRecordOp(safeSlice, "receiptMemory", record.id, record, record.updatedAt || safeUpdatedAt));
+    }
+    return ops.filter(Boolean);
+  }
+
+  if(safeSlice === "receiptTrainingRecords"){
+    for(const record of arrayToIndexedDbRecords(value || [], safeUpdatedAt, "training")){
+      ops.push(makeCloudRecordOp(safeSlice, "receiptTraining", record.id, record, record.updatedAt || safeUpdatedAt));
+    }
+    return ops.filter(Boolean);
+  }
+
+  if(safeSlice === "merchantAliases"){
+    for(const record of objectMapToIndexedDbRecords(value || {}, safeUpdatedAt)){
+      ops.push(makeCloudRecordOp(safeSlice, "merchantAliases", record.id, record, record.updatedAt || safeUpdatedAt));
+    }
+    return ops.filter(Boolean);
+  }
+
+  if(safeSlice === "people"){
+    for(const record of arrayToIndexedDbRecords(value || [], safeUpdatedAt, "person")){
+      ops.push(makeCloudRecordOp(safeSlice, "people", record.id, record, record.updatedAt || safeUpdatedAt));
+    }
+    return ops.filter(Boolean);
+  }
+
+  if(safeSlice === "households"){
+    for(const record of arrayToIndexedDbRecords(value || [], safeUpdatedAt, "household")){
+      ops.push(makeCloudRecordOp(safeSlice, "households", record.id, record, record.updatedAt || safeUpdatedAt));
+    }
+    return ops.filter(Boolean);
+  }
+
+  if(safeSlice === "settings"){
+    return [makeCloudRecordOp(safeSlice, "settings", "settings", value || {}, safeUpdatedAt)].filter(Boolean);
+  }
+
+  if(safeSlice === "selectedBudgetPanes"){
+    return [makeCloudRecordOp(safeSlice, "meta", "selectedBudgetPanes", value || {}, safeUpdatedAt)].filter(Boolean);
+  }
+
+  if(safeSlice === "activeSection"){
+    return [makeCloudRecordOp(safeSlice, "meta", "activeSection", value || "calendar", safeUpdatedAt)].filter(Boolean);
+  }
+
+  if(safeSlice === "budgetViewMode"){
+    return [makeCloudRecordOp(safeSlice, "meta", "budgetViewMode", value || "month", safeUpdatedAt)].filter(Boolean);
+  }
+
+  return [makeCloudRecordOp(safeSlice, getCloudStoreForSlice(safeSlice), "singleton", value, safeUpdatedAt)].filter(Boolean);
+}
+
+function buildCloudRecordOpsForSlices(fullPayload, slices = DATA_SLICE_NAMES, includeDeletes = true){
+  const safePayload = buildFullSavePayload(fullPayload || getLocalPayload());
+  const safeSlices = normalizeSliceList(slices);
+  const ops = [];
+
+  for(const slice of safeSlices){
+    const sliceUpdatedAt = getSliceUpdatedAt(safePayload, slice) || Number(safePayload.updatedAt || Date.now());
+    const currentOps = cloudOpsFromSliceValue(slice, safePayload[slice], sliceUpdatedAt);
+    const currentKeys = new Set(currentOps.map(op => op.key));
+
+    ops.push(...currentOps);
+
+    if(includeDeletes){
+      for(const oldKey of getKnownCloudKeysForSlice(slice)){
+        if(currentKeys.has(oldKey)) continue;
+        const old = splitCloudRecordKey(oldKey);
+        if(!old.slice || !old.store || !old.recordId) continue;
+        ops.push(makeCloudRecordOp(old.slice, old.store, old.recordId, null, sliceUpdatedAt, true));
+      }
+    }
+  }
+
+  return ops.filter(Boolean);
+}
+
+function cloudOpsToSupabaseRows(ops = []){
+  if(!cloudUser) return [];
+
+  return (ops || []).map(op => ({
+    id: getCloudRecordRowId(op.store, op.recordId),
+    user_id: cloudUser.id,
+    payload: {
+      kind: CLOUD_RECORD_KIND,
+      version: SPLIT_STORAGE_VERSION,
+      slice: op.slice,
+      store: op.store,
+      recordId: op.recordId,
+      updatedAt: Number(op.updatedAt || Date.now()),
+      deleted: !!op.deleted,
+      data: op.deleted ? null : op.data
+    },
+    updated_at: new Date(Number(op.updatedAt || Date.now())).toISOString()
+  }));
+}
+
+function getCloudRecordOpFromRow(row){
+  const payload = row?.payload;
+  if(!payload || payload.kind !== CLOUD_RECORD_KIND) return null;
+
+  const slice = normalizeSliceList(payload.slice)[0];
+  if(!slice) return null;
+
+  return makeCloudRecordOp(
+    slice,
+    payload.store || getCloudStoreForSlice(slice),
+    payload.recordId || "singleton",
+    payload.data,
+    Number(payload.updatedAt || rowUpdatedAt(row) || Date.now()),
+    !!payload.deleted
+  );
+}
+
+async function enqueueCloudRecordOpsForSlices(slices = [], reason = "local change"){
+  const safeSlices = normalizeSliceList(slices);
+  if(!safeSlices.length || !indexedDbSupported()) return [];
+
+  try{
+    const db = await openCalendarIndexedDb();
+    if(!db || !db.objectStoreNames.contains("syncQueue")) return [];
+
+    const local = getLocalPayload();
+    const ops = buildCloudRecordOpsForSlices(local, safeSlices, true);
+    if(!ops.length) return [];
+
+    const tx = db.transaction("syncQueue", "readwrite");
+    const store = tx.objectStore("syncQueue");
+
+    for(const op of ops){
+      store.put({
+        id: op.id,
+        slice: op.slice,
+        store: op.store,
+        recordId: op.recordId,
+        op,
+        reason,
+        updatedAt: Number(op.updatedAt || Date.now()),
+        queuedAt: Date.now()
+      });
+    }
+
+    await idbTransactionDone(tx);
+    return ops;
+  }catch(err){
+    console.warn("Could not enqueue row sync operations; slice pending flag remains.", err);
+    return [];
+  }
+}
+
+async function getQueuedCloudRecordOps(slices = []){
+  if(!indexedDbSupported()) return [];
+
+  try{
+    const db = await openCalendarIndexedDb();
+    if(!db || !db.objectStoreNames.contains("syncQueue")) return [];
+
+    const safeSlices = normalizeSliceList(slices);
+    const tx = db.transaction("syncQueue", "readonly");
+    const rows = await idbRequestToPromise(tx.objectStore("syncQueue").getAll());
+    await idbTransactionDone(tx).catch(() => {});
+
+    return (rows || [])
+      .filter(row => !safeSlices.length || safeSlices.includes(row.slice))
+      .map(row => row.op)
+      .filter(Boolean);
+  }catch(err){
+    console.warn("Could not read sync queue; falling back to current slices.", err);
+    return [];
+  }
+}
+
+async function clearQueuedCloudRecordOps(ops = []){
+  if(!indexedDbSupported() || !ops?.length) return;
+
+  try{
+    const db = await openCalendarIndexedDb();
+    if(!db || !db.objectStoreNames.contains("syncQueue")) return;
+
+    const tx = db.transaction("syncQueue", "readwrite");
+    const store = tx.objectStore("syncQueue");
+
+    for(const op of ops){
+      store.delete(op.id);
+    }
+
+    await idbTransactionDone(tx);
+  }catch(err){
+    console.warn("Could not clear sync queue entries.", err);
+  }
+}
+
+async function countQueuedCloudRecordOps(){
+  if(!indexedDbSupported()) return 0;
+
+  try{
+    const db = await openCalendarIndexedDb();
+    if(!db || !db.objectStoreNames.contains("syncQueue")) return 0;
+    const tx = db.transaction("syncQueue", "readonly");
+    const count = await idbRequestToPromise(tx.objectStore("syncQueue").count());
+    await idbTransactionDone(tx).catch(() => {});
+    return Number(count || 0);
+  }catch{
+    return 0;
+  }
+}
+
+function mergeCloudRecordOpsIntoPayload(ops = [], base = {}){
+  const latest = new Map();
+
+  for(const op of ops || []){
+    if(!op?.key) continue;
+    const existing = latest.get(op.key);
+    if(!existing || Number(op.updatedAt || 0) >= Number(existing.updatedAt || 0)){
+      latest.set(op.key, op);
+    }
+  }
+
+  const grouped = {};
+  for(const op of latest.values()){
+    const slice = normalizeSliceList(op.slice)[0];
+    if(!slice) continue;
+    if(op.deleted) continue;
+    (grouped[slice] ||= []).push(op);
+  }
+
+  const merged = {
+    version: SPLIT_STORAGE_VERSION,
+    updatedAt: Number(base.updatedAt || 0),
+    sliceUpdatedAt: { ...(base.sliceUpdatedAt || {}) }
+  };
+
+  for(const [slice, sliceOps] of Object.entries(grouped)){
+    const maxTime = Math.max(...sliceOps.map(op => Number(op.updatedAt || 0)), 0);
+    merged.sliceUpdatedAt[slice] = Math.max(Number(merged.sliceUpdatedAt[slice] || 0), maxTime);
+    merged.updatedAt = Math.max(Number(merged.updatedAt || 0), merged.sliceUpdatedAt[slice]);
+
+    if(slice === "events"){
+      const map = {};
+      for(const op of sliceOps){
+        const event = { ...(op.data || {}) };
+        const dateISO = event.dateISO || op.data?.date || "";
+        if(!dateISO) continue;
+        delete event.dateISO;
+        (map[dateISO] ||= []).push(event);
+      }
+      for(const day of Object.keys(map)){
+        map[day].sort((a, b) => String(a.startTime || "").localeCompare(String(b.startTime || "")));
+      }
+      merged.events = normalizeEventsMap(map);
+      continue;
+    }
+
+    if(slice === "budgetCategories"){
+      merged.budgetCategories = sliceOps.map(op => op.data).filter(Boolean);
+      continue;
+    }
+
+    if(slice === "budgetPlans"){
+      const plans = {};
+      for(const op of sliceOps){
+        const rec = op.data || {};
+        const period = rec.period || "month";
+        const rangeKey = rec.rangeKey || String(op.recordId || "default");
+        (plans[period] ||= {})[rangeKey] = rec.plan ?? {};
+      }
+      merged.budgetPlans = plans;
+      continue;
+    }
+
+    if(slice === "receiptItemCategoryMemory"){
+      merged.receiptItemCategoryMemory = Object.fromEntries(
+        sliceOps.map(op => [op.recordId, op.data?.value ?? op.data]).filter(([id]) => id)
+      );
+      continue;
+    }
+
+    if(slice === "receiptTrainingRecords"){
+      merged.receiptTrainingRecords = sliceOps
+        .map(op => op.data)
+        .filter(Boolean)
+        .sort((a, b) => Number(a.createdAt || a.updatedAt || 0) - Number(b.createdAt || b.updatedAt || 0));
+      continue;
+    }
+
+    if(slice === "merchantAliases"){
+      merged.merchantAliases = Object.fromEntries(
+        sliceOps.map(op => [op.recordId, op.data?.value ?? op.data]).filter(([id]) => id)
+      );
+      continue;
+    }
+
+    if(slice === "people"){
+      merged.people = sliceOps.map(op => op.data).filter(Boolean);
+      continue;
+    }
+
+    if(slice === "households"){
+      merged.households = sliceOps.map(op => op.data).filter(Boolean);
+      continue;
+    }
+
+    if(slice === "settings"){
+      const latestSetting = sliceOps.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0];
+      merged.settings = latestSetting?.data || null;
+      continue;
+    }
+
+    if(slice === "selectedBudgetPanes"){
+      const latestPane = sliceOps.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0];
+      merged.selectedBudgetPanes = latestPane?.data || {};
+      continue;
+    }
+
+    if(slice === "activeSection"){
+      const latestSection = sliceOps.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0];
+      merged.activeSection = latestSection?.data || "calendar";
+      continue;
+    }
+
+    if(slice === "budgetViewMode"){
+      const latestMode = sliceOps.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0];
+      merged.budgetViewMode = latestMode?.data || "month";
+    }
+  }
+
+  return merged;
+}
+
+async function readAllCloudRowsForUser(){
+  if(!supabaseClient || !cloudUser) return [];
+
+  const allRows = [];
+  const pageSize = 1000;
+  let from = 0;
+
+  while(true){
+    const to = from + pageSize - 1;
+    const { data, error } = await supabaseClient
+      .from(CLOUD_TABLE)
+      .select("id, payload, updated_at")
+      .eq("user_id", cloudUser.id)
+      .range(from, to);
+
+    if(error) throw error;
+
+    if(Array.isArray(data) && data.length){
+      allRows.push(...data);
+    }
+
+    if(!Array.isArray(data) || data.length < pageSize) break;
+    from += pageSize;
+  }
+
+  return allRows;
+}
+
 function getCloudSliceRowId(slice){
   const userPart = cloudUser?.id || "offline";
   return `${userPart}:${slice}`;
@@ -1616,6 +2116,12 @@ function markCloudPending(reason = "local change", slices = []){
     markedAt: Date.now(),
     slices: mergedSlices
   }));
+
+  if(requestedSlices.length){
+    enqueueCloudRecordOpsForSlices(requestedSlices, reason).catch(err => {
+      console.warn("Could not add changed records to sync queue.", err);
+    });
+  }
 }
 
 function clearCloudPending(){
@@ -1847,15 +2353,11 @@ async function logoutCloud(){
 async function readCloudState(){
   if(!supabaseClient || !cloudUser) return null;
 
-  const sliceIds = DATA_SLICE_NAMES.map(slice => getCloudSliceRowId(slice));
-  const idsToRead = [CLOUD_ROW_ID, ...sliceIds];
+  let data = [];
 
-  const { data, error } = await supabaseClient
-    .from(CLOUD_TABLE)
-    .select("id, payload, updated_at")
-    .in("id", idsToRead);
-
-  if(error){
+  try{
+    data = await readAllCloudRowsForUser();
+  }catch(error){
     setCloudStatus("Cloud read failed: " + error.message);
     return null;
   }
@@ -1869,8 +2371,17 @@ async function readCloudState(){
     sliceUpdatedAt: {}
   };
 
+  const recordOps = [];
+  const sliceRows = [];
+
   for(const row of data){
-    const rowTime = row?.updated_at ? new Date(row.updated_at).getTime() : 0;
+    const op = getCloudRecordOpFromRow(row);
+    if(op){
+      recordOps.push(op);
+      continue;
+    }
+
+    const rowTime = rowUpdatedAt(row);
 
     if(row?.id === CLOUD_ROW_ID && row?.payload && !row.payload.slice){
       legacyPayload = buildFullSavePayload(row.payload);
@@ -1879,11 +2390,46 @@ async function readCloudState(){
     }
 
     const slice = getCloudSliceFromRow(row);
-    if(!slice) continue;
+    if(slice){
+      sliceRows.push(row);
+    }
+  }
+
+  const rowControlledSlices = new Set(recordOps.map(op => op.slice).filter(Boolean));
+
+  if(recordOps.length){
+    const rowPayload = mergeCloudRecordOpsIntoPayload(recordOps, merged);
+
+    Object.assign(merged, rowPayload, {
+      sliceUpdatedAt: {
+        ...(merged.sliceUpdatedAt || {}),
+        ...(rowPayload.sliceUpdatedAt || {})
+      },
+      updatedAt: Math.max(Number(merged.updatedAt || 0), Number(rowPayload.updatedAt || 0))
+    });
+
+    const known = {};
+    for(const op of recordOps){
+      if(op.deleted) continue;
+      (known[op.slice] ||= new Set()).add(op.key);
+    }
+    const knownMap = getKnownCloudRecordKeys();
+    for(const [slice, set] of Object.entries(known)){
+      knownMap[slice] = Array.from(set);
+    }
+    saveKnownCloudRecordKeys(knownMap);
+  }
+
+  // Backward bridge: old slice rows and old monolith can still hydrate anything
+  // not yet present as row records.
+  for(const row of sliceRows){
+    const slice = getCloudSliceFromRow(row);
+    if(!slice || hasOwn(merged, slice) || rowControlledSlices.has(slice)) continue;
 
     const sliceData = extractCloudSliceData(row);
     if(sliceData === undefined) continue;
 
+    const rowTime = rowUpdatedAt(row);
     merged[slice] = sliceData;
     merged.sliceUpdatedAt[slice] = Number(row?.payload?.updatedAt || rowTime || Date.now());
     merged.updatedAt = Math.max(merged.updatedAt, merged.sliceUpdatedAt[slice]);
@@ -1891,7 +2437,7 @@ async function readCloudState(){
 
   if(legacyPayload){
     for(const slice of DATA_SLICE_NAMES){
-      if(!hasOwn(merged, slice) && hasOwn(legacyPayload, slice)){
+      if(!rowControlledSlices.has(slice) && !hasOwn(merged, slice) && hasOwn(legacyPayload, slice)){
         merged[slice] = legacyPayload[slice];
         merged.sliceUpdatedAt[slice] = getSliceUpdatedAt(legacyPayload, slice);
       }
@@ -1927,16 +2473,13 @@ async function writeCloudStateNow(slices = null){
   }
 
   const payload = buildFullSavePayload(getLocalPayload());
-  const rows = dirtySlices.map(slice => {
-    const sliceUpdatedAt = getSliceUpdatedAt(payload, slice) || payload.updatedAt || Date.now();
+  let ops = await getQueuedCloudRecordOps(dirtySlices);
 
-    return {
-      id: getCloudSliceRowId(slice),
-      user_id: cloudUser.id,
-      payload: buildCloudSlicePayload(payload, slice),
-      updated_at: new Date(sliceUpdatedAt).toISOString()
-    };
-  });
+  if(!ops.length){
+    ops = buildCloudRecordOpsForSlices(payload, dirtySlices, true);
+  }
+
+  const rows = cloudOpsToSupabaseRows(ops);
 
   if(!rows.length){
     clearCloudPending();
@@ -1949,14 +2492,16 @@ async function writeCloudStateNow(slices = null){
     .upsert(rows, { onConflict: "id" });
 
   if(error){
-    markCloudPending("cloud save failed", dirtySlices);
-    setCloudStatus("Cloud save failed, will retry: " + error.message);
+    markCloudPending("cloud row save failed", dirtySlices);
+    setCloudStatus("Cloud row save failed, will retry: " + error.message);
     return false;
   }
 
+  await clearQueuedCloudRecordOps(ops);
+  updateKnownCloudKeysFromOps(ops);
   clearCloudPending();
   setCloudStatus(
-    `Cloud: Synced ${dirtySlices.length} slice${dirtySlices.length === 1 ? "" : "s"} • ${new Date(payload.updatedAt || Date.now()).toLocaleString()}`
+    `Cloud: Synced ${rows.length} row${rows.length === 1 ? "" : "s"} across ${dirtySlices.length} slice${dirtySlices.length === 1 ? "" : "s"} • ${new Date(payload.updatedAt || Date.now()).toLocaleString()}`
   );
   updateCloudUI();
   return true;
