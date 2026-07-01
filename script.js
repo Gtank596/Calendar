@@ -12493,7 +12493,12 @@ function doesHorizontalCrossVertical(h, v){
   const hMaxX = Math.max(h.x1, h.x2);
   const vMinY = Math.min(v.y1, v.y2);
   const vMaxY = Math.max(v.y1, v.y2);
-  const buffer = 8;
+
+  // The gutter lanes are intentionally tight. The old 8px endpoint buffer made
+  // nearby crossings look like stacked/overlapped lines instead of drawing a
+  // small bridge. Keep only a tiny safety buffer so parallel bus lanes can
+  // visibly hop over each other in the narrow week-view gutter.
+  const buffer = isMobileViewport() ? 1.5 : 2;
 
   return (
     v.x1 > hMinX + buffer &&
@@ -12504,7 +12509,7 @@ function doesHorizontalCrossVertical(h, v){
 }
 
 function buildHorizontalPathWithBridges(segment, verticalSegments){
-  const bridgeRadius = isMobileViewport() ? 6 : 7;
+  const bridgeRadius = isMobileViewport() ? 4 : 5;
   const y = segment.y1;
   const dir = segment.x2 >= segment.x1 ? 1 : -1;
 
@@ -12528,7 +12533,7 @@ function buildHorizontalPathWithBridges(segment, verticalSegments){
 }
 
 function appendHorizontalPathWithBridges(d, segment, verticalSegments, isFirst = false){
-  const bridgeRadius = isMobileViewport() ? 6 : 7;
+  const bridgeRadius = isMobileViewport() ? 4 : 5;
   const anchorY = Number(segment.y1 || segment.y2 || 0);
   const visualY = Number.isFinite(Number(segment.visualY))
     ? Number(segment.visualY)
