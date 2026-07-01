@@ -1139,6 +1139,208 @@ async function getIndexedDbEventsForRange(startISO, endISO){
   return normalizeEventsMap(map);
 }
 
+
+function getIndexedDbEventRangeCacheSummary(){
+  return {
+    enabled: !!indexedDbEventRangeCache.eventsMap,
+    startISO: indexedDbEventRangeCache.startISO,
+    endISO: indexedDbEventRangeCache.endISO,
+    version: indexedDbEventRangeCache.version,
+    days: indexedDbEventRangeCache.eventsMap
+      ? Object.keys(indexedDbEventRangeCache.eventsMap).length
+      : 0,
+    records: indexedDbEventRangeCache.recordsCount || 0,
+    source: indexedDbEventRangeCache.source || ""
+  };
+}
+
+const indexedDbEventRangeCache = {
+  startISO: "",
+  endISO: "",
+  signature: "",
+  source: "",
+  version: 0,
+  recordsCount: 0,
+  eventsMap: null
+};
+
+const indexedDbEventHydrationRequests = new Map();
+let indexedDbEventHydrationSerial = 0;
+
+function isoIsBetween(dayISO = "", startISO = "", endISO = ""){
+  return !!dayISO && !!startISO && !!endISO && dayISO >= startISO && dayISO <= endISO;
+}
+
+function indexedDbRangeCacheCoversDay(dayISO){
+  return !!(
+    indexedDbEventRangeCache.eventsMap &&
+    isoIsBetween(dayISO, indexedDbEventRangeCache.startISO, indexedDbEventRangeCache.endISO)
+  );
+}
+
+function indexedDbRangeCacheCoversRange(startISO, endISO){
+  return !!(
+    indexedDbEventRangeCache.eventsMap &&
+    startISO >= indexedDbEventRangeCache.startISO &&
+    endISO <= indexedDbEventRangeCache.endISO
+  );
+}
+
+function clearIndexedDbEventRangeCache(reason = "events changed"){
+  indexedDbEventHydrationRequests.clear();
+  indexedDbEventHydrationSerial += 1;
+
+  if(!indexedDbEventRangeCache.eventsMap && !indexedDbEventRangeCache.signature) return;
+
+  indexedDbEventRangeCache.startISO = "";
+  indexedDbEventRangeCache.endISO = "";
+  indexedDbEventRangeCache.signature = "";
+  indexedDbEventRangeCache.source = reason;
+  indexedDbEventRangeCache.recordsCount = 0;
+  indexedDbEventRangeCache.eventsMap = null;
+  indexedDbEventRangeCache.version += 1;
+}
+
+function getIndexedDbCachedDirectEventsForDay(dayISO){
+  if(!indexedDbRangeCacheCoversDay(dayISO)) return null;
+  return indexedDbEventRangeCache.eventsMap?.[dayISO] || [];
+}
+
+function getDirectEventsForComputedDay(dayISO){
+  const cached = getIndexedDbCachedDirectEventsForDay(dayISO);
+  if(cached) return cached;
+  return Array.isArray(events[dayISO]) ? events[dayISO] : [];
+}
+
+function collectLegacyAndCachedDirectEvents(){
+  const byId = new Map();
+
+  const addEvent = (event, dayISO = "") => {
+    if(!event || typeof event !== "object") return;
+    const id = String(event.id || `${dayISO}:${byId.size}`);
+    if(!byId.has(id)) byId.set(id, event);
+  };
+
+  for(const [dayISO, list] of Object.entries(events || {})){
+    if(!Array.isArray(list)) continue;
+    for(const event of list) addEvent(event, dayISO);
+  }
+
+  if(indexedDbEventRangeCache.eventsMap){
+    for(const [dayISO, list] of Object.entries(indexedDbEventRangeCache.eventsMap)){
+      if(!Array.isArray(list)) continue;
+      for(const event of list) addEvent(event, dayISO);
+    }
+  }
+
+  return Array.from(byId.values());
+}
+
+function indexedDbEventRecordSignature(records = []){
+  return (records || [])
+    .map(record => [
+      record.id || "",
+      record.dateISO || record.startDate || "",
+      record.updatedAt || 0,
+      record.title || "",
+      record.startTime || "",
+      record.endTime || "",
+      record.price ?? "",
+      record.categoryId || "",
+      record.source || "",
+      record.span?.end || "",
+      record.recurrence?.freq || "none",
+      record.recurrence?.until || ""
+    ].join("|"))
+    .sort()
+    .join("\n");
+}
+
+async function getIndexedDbEventRecordsForRange(startISO, endISO){
+  const start = String(startISO || "").trim();
+  const end = String(endISO || start || "").trim();
+  if(!start || !end || typeof IDBKeyRange === "undefined") return [];
+
+  const db = await openCalendarIndexedDb();
+  if(!db) return [];
+
+  const tx = db.transaction("events", "readonly");
+  const rows = await idbRequestToPromise(
+    tx.objectStore("events").index("dateISO").getAll(IDBKeyRange.bound(start, end))
+  );
+  await idbTransactionDone(tx).catch(() => {});
+
+  return Array.isArray(rows) ? rows : [];
+}
+
+function eventRecordsToLegacyMap(records = []){
+  const map = {};
+
+  for(const row of records || []){
+    const dayISO = row?.dateISO || row?.startDate;
+    if(!dayISO) continue;
+    (map[dayISO] ||= []).push(eventRecordToLegacyEvent(row));
+  }
+
+  for(const dayISO of Object.keys(map)){
+    map[dayISO].sort((a, b) => String(a.startTime || "").localeCompare(String(b.startTime || "")));
+  }
+
+  return normalizeEventsMap(map);
+}
+
+function requestIndexedDbEventRangeHydration(startISO, endISO, opts = {}){
+  const start = String(startISO || "").trim();
+  const end = String(endISO || start || "").trim();
+
+  if(!indexedDbSupported() || !start || !end) return;
+  if(indexedDbRangeCacheCoversRange(start, end) && !opts.force) return;
+
+  const requestKey = `${start}__${end}`;
+  if(indexedDbEventHydrationRequests.has(requestKey)) return;
+
+  const serial = ++indexedDbEventHydrationSerial;
+  indexedDbEventHydrationRequests.set(requestKey, serial);
+
+  getIndexedDbEventRecordsForRange(start, end)
+    .then(records => {
+      if(indexedDbEventHydrationRequests.get(requestKey) !== serial) return;
+      indexedDbEventHydrationRequests.delete(requestKey);
+
+      const signature = indexedDbEventRecordSignature(records);
+      const sameRange =
+        indexedDbEventRangeCache.startISO === start &&
+        indexedDbEventRangeCache.endISO === end;
+
+      if(sameRange && indexedDbEventRangeCache.signature === signature) return;
+
+      indexedDbEventRangeCache.startISO = start;
+      indexedDbEventRangeCache.endISO = end;
+      indexedDbEventRangeCache.signature = signature;
+      indexedDbEventRangeCache.source = opts.source || "IndexedDB range hydration";
+      indexedDbEventRangeCache.recordsCount = records.length;
+      indexedDbEventRangeCache.eventsMap = eventRecordsToLegacyMap(records);
+      indexedDbEventRangeCache.version += 1;
+
+      if(derivedCache?.budgetItems){
+        derivedCache.budgetItems.clear();
+        derivedCache.budgetItemsRangeVersion = indexedDbEventRangeCache.version;
+      }
+
+      if(opts.renderBudget){
+        queueRender({ budget:true, sliders:true });
+      }
+
+      if(opts.renderCalendar){
+        queueRender({ calendar:true, eventList: opts.renderEventList !== false, sliders:true });
+      }
+    })
+    .catch(err => {
+      indexedDbEventHydrationRequests.delete(requestKey);
+      console.warn("Could not hydrate visible event range from IndexedDB; using in-memory events map.", err);
+    });
+}
+
 async function countIndexedDbStoreRecords(){
   const db = await openCalendarIndexedDb();
   if(!db) return {};
@@ -1505,6 +1707,7 @@ async function getCalendarStorageDebugSummary(){
         ]))
       : {},
     indexedDbRecordCounts: indexedDbSupported() ? await countIndexedDbStoreRecords() : {},
+    indexedDbEventRangeCache: getIndexedDbEventRangeCacheSummary(),
     indexedDbUpdatedAt: idbPayload?.updatedAt || 0,
     queuedCloudRows: await countQueuedCloudRecordOps()
   };
@@ -1514,6 +1717,7 @@ if(typeof window !== "undefined"){
   window.calendarStorageDebug = getCalendarStorageDebugSummary;
   window.calendarIndexedDbEventsForDay = getIndexedDbEventsForDay;
   window.calendarIndexedDbEventsForRange = getIndexedDbEventsForRange;
+  window.calendarIndexedDbRenderCache = getIndexedDbEventRangeCacheSummary;
 }
 
 function hasOwn(obj, key){
@@ -3081,6 +3285,7 @@ function applyFullSavePayload(payload, opts = {}){
 
   if(slicesToApply.includes("events")){
     events = normalizeEventsMap(safe.events || {});
+    clearIndexedDbEventRangeCache("full payload applied");
   }
 
   if(slicesToApply.includes("settings")){
@@ -7503,9 +7708,13 @@ function computeBudgetItemsUncached(startISO, endISO){
 function getBudgetItems(startISO, endISO){
   syncStateFromLegacy();
 
-  if(derivedCache.budgetItemsVersion !== state.meta.eventsVersion){
+  if(
+    derivedCache.budgetItemsVersion !== state.meta.eventsVersion ||
+    derivedCache.budgetItemsRangeVersion !== indexedDbEventRangeCache.version
+  ){
     derivedCache.budgetItems.clear();
     derivedCache.budgetItemsVersion = state.meta.eventsVersion;
+    derivedCache.budgetItemsRangeVersion = indexedDbEventRangeCache.version;
   }
 
   const cacheKey = `${startISO}__${endISO}`;
@@ -7944,6 +8153,11 @@ function renderBudgetPage(){
   if(budgetTxDate && !budgetTxDate.value){
     budgetTxDate.value = selectedDateISO || range.startISO;
   }
+
+  requestIndexedDbEventRangeHydration(range.startISO, range.endISO, {
+    source: "budget range",
+    renderBudget: true
+  });
 
   const items = getBudgetItems(range.startISO, range.endISO);
 
@@ -10274,19 +10488,12 @@ if(freq === "weeklyDays"){
 }
 
 function getAllRecurringMasters(){
-  const masters = [];
-  for(const dayKey of Object.keys(events)){
-    const list = events[dayKey];
-    if(!Array.isArray(list)) continue;
-    for(const ev of list){
-      if((ev?.recurrence?.freq || "none") !== "none") masters.push(ev);
-    }
-  }
-  return masters;
+  return collectLegacyAndCachedDirectEvents()
+    .filter(ev => (ev?.recurrence?.freq || "none") !== "none");
 }
 
 function getComputedEventsForDay(iso){
-  const direct = Array.isArray(events[iso]) ? events[iso] : [];
+  const direct = getDirectEventsForComputedDay(iso);
   const out = [...direct];
 
   const masters = getAllRecurringMasters();
@@ -10338,15 +10545,8 @@ function getCalendarEventsForDay(iso){
 // 11C. BACKGROUND SPANS / TRIP SHADING
 // ============================================================================
 function getAllSpanMasters(){
-  const masters = [];
-  for(const dayKey of Object.keys(events)){
-    const list = events[dayKey];
-    if(!Array.isArray(list)) continue;
-    for(const ev of list){
-      if(ev?.span?.mode === "bg" && ev?.startDate && ev?.span?.end) masters.push(ev);
-    }
-  }
-  return masters;
+  return collectLegacyAndCachedDirectEvents()
+    .filter(ev => ev?.span?.mode === "bg" && ev?.startDate && ev?.span?.end);
 }
 
 function getSpansForDay(iso){
@@ -10722,6 +10922,7 @@ const renderQueue = {
 
 const derivedCache = {
   budgetItemsVersion: -1,
+  budgetItemsRangeVersion: -1,
   budgetItems: new Map()
 };
 
@@ -10761,9 +10962,14 @@ function syncLegacyFromState(){
 
 function invalidateDerivedData(scope = "events"){
   if(scope === "events" || scope === "budget"){
+    if(scope === "events"){
+      clearIndexedDbEventRangeCache("local event mutation");
+    }
+
     state.meta.eventsVersion += 1;
     derivedCache.budgetItems.clear();
     derivedCache.budgetItemsVersion = state.meta.eventsVersion;
+    derivedCache.budgetItemsRangeVersion = indexedDbEventRangeCache.version;
   }
 }
 
@@ -10965,6 +11171,12 @@ function renderMonthView(){
   const startDate = new Date(year, month, 1 - startDow);
 
 const monthSuggestions = getSuggestionsForRange(startDate, 42);
+const monthEndDate = new Date(startDate);
+monthEndDate.setDate(startDate.getDate() + 41);
+requestIndexedDbEventRangeHydration(dateToYmd(startDate), dateToYmd(monthEndDate), {
+  source: "month view",
+  renderCalendar: true
+});
 
   const today = new Date();
   const todayISO = isoDate(today.getFullYear(), today.getMonth()+1, today.getDate());
@@ -11241,6 +11453,13 @@ function renderWeekView(){
   grid.style.gridTemplateColumns = "repeat(7, 1fr)";
 
   const start = startOfWeek(view);
+  const weekEndDate = new Date(start);
+  weekEndDate.setDate(start.getDate() + 6);
+  requestIndexedDbEventRangeHydration(dateToYmd(start), dateToYmd(weekEndDate), {
+    source: "week view",
+    renderCalendar: true
+  });
+
   const today = new Date();
   const todayISO = isoDate(today.getFullYear(), today.getMonth()+1, today.getDate());
 
@@ -11388,6 +11607,11 @@ function renderDayView(){
 
   const base = new Date(view);
   const dayISO = dateToYmd(base);
+
+  requestIndexedDbEventRangeHydration(dayISO, dayISO, {
+    source: "day view",
+    renderCalendar: true
+  });
 
   selectedDateISO = dayISO;
   if(panelSub) panelSub.textContent = fmtPrettyISO(dayISO);
