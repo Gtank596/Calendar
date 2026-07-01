@@ -12349,11 +12349,16 @@ function renderWeekConnectionHighlights(){
   if(!grid) return;
 
   const selected = selectedConnectionGroupId;
-  const cards = Array.from(grid.querySelectorAll(".weekEventPill[data-connection-group-id]"));
+
+  // Build the banner/count from connected cards only, but apply the dimming
+  // state to every week pill. Otherwise unrelated events with no connection
+  // group stay bright while the selected chain is trying to take focus.
+  const allCards = Array.from(grid.querySelectorAll(".weekEventPill"));
+  const connectedCards = allCards.filter(card => card.dataset.connectionGroupId);
   const paths = Array.from(grid.querySelectorAll(".weekConnector[data-connection-group-id]"));
   const groupMeta = new Map();
 
-  for(const card of cards){
+  for(const card of connectedCards){
     const groupId = card.dataset.connectionGroupId || "";
     if(!groupId) continue;
 
@@ -12368,8 +12373,10 @@ function renderWeekConnectionHighlights(){
     groupMeta.get(groupId).count += 1;
   }
 
-  cards.forEach(card => {
-    const isMatch = selected && card.dataset.connectionGroupId === selected;
+  allCards.forEach(card => {
+    const groupId = card.dataset.connectionGroupId || "";
+    const isMatch = selected && groupId === selected;
+
     card.classList.toggle("chain-selected", !!isMatch);
     card.classList.toggle("chain-dimmed", !!selected && !isMatch);
   });
