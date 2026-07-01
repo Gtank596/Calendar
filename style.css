@@ -6366,20 +6366,7 @@ body{
 }
 
 .weekViewGrid .connectedEventPill{
-  padding-left:12px;
-}
-
-.weekViewGrid .connectedEventPill::before{
-  content:"";
-  position:absolute;
-  left:5px;
-  top:7px;
-  bottom:7px;
-  width:3px;
-  border-radius:999px;
-  background:var(--connection-color, #7a5aff);
-  box-shadow:0 0 10px var(--connection-color, #7a5aff);
-  opacity:.82;
+  /* Connected events keep the exact same card shape as normal events. */
 }
 
 .weekViewGrid .weekEventPill.chain-selected{
@@ -6396,6 +6383,14 @@ body{
   filter:saturate(.72);
 }
 
+body[data-calendar-view="week"] #calendarPage .day.weekViewDay{
+  border-right-color:transparent;
+}
+
+body[data-calendar-view="week"] #calendarPage .dow > div{
+  border-right-color:transparent;
+}
+
 .weekConnectorLayer{
   position:absolute;
   inset:0;
@@ -6409,7 +6404,7 @@ body{
 .weekConnector{
   fill:none;
   stroke-width:3;
-  opacity:.52;
+  opacity:.48;
   stroke-linecap:round;
   stroke-linejoin:round;
   filter:drop-shadow(0 0 5px currentColor);

@@ -12359,18 +12359,40 @@ function getWeekConnectorLocalRect(el, parentRect){
 
 function buildWeekRouteSegments(fromRect, toRect, groupId){
   const fromBeforeTo = fromRect.centerX <= toRect.centerX;
+  const anchorGap = isMobileViewport() ? 10 : 12;
+  const sameLaneThreshold = isMobileViewport() ? 10 : 12;
+
+  // Anchor just outside the cards. The wire should kiss the edge like a little
+  // subway pin, not pass under translucent event text.
   const start = fromBeforeTo
-    ? { x: fromRect.right + 4, y: fromRect.centerY }
-    : { x: fromRect.x - 4, y: fromRect.centerY };
+    ? { x: fromRect.right + anchorGap, y: fromRect.centerY }
+    : { x: fromRect.x - anchorGap, y: fromRect.centerY };
   const end = fromBeforeTo
-    ? { x: toRect.x - 4, y: toRect.centerY }
-    : { x: toRect.right + 4, y: toRect.centerY };
+    ? { x: toRect.x - anchorGap, y: toRect.centerY }
+    : { x: toRect.right + anchorGap, y: toRect.centerY };
+
+  const sameLane = Math.abs(start.y - end.y) <= sameLaneThreshold;
+  const hasClearHorizontalGap = fromBeforeTo
+    ? start.x < end.x
+    : start.x > end.x;
+
+  // If the events line up visually, use one clean rail between them. This avoids
+  // the “both cards fired a laser at each other” look from split half-segments.
+  if(sameLane && hasClearHorizontalGap){
+    return [
+      { type:"horizontal", x1:start.x, y1:start.y, x2:end.x, y2:end.y, groupId }
+    ];
+  }
 
   let midX = (start.x + end.x) / 2;
 
-  // Same-day chains need a tiny gutter so the wire does not run through the card body.
-  if(Math.abs(start.x - end.x) < 32){
-    midX = Math.max(fromRect.right, toRect.right) + 14;
+  // Same-column / overlapping-card chains need a side gutter. Keep it outside
+  // the widest card so the vertical run stays in the negative space.
+  if(Math.abs(start.x - end.x) < 48 || !hasClearHorizontalGap){
+    const gutter = anchorGap + 8;
+    midX = fromBeforeTo
+      ? Math.max(fromRect.right, toRect.right) + gutter
+      : Math.min(fromRect.x, toRect.x) - gutter;
   }
 
   return [
@@ -12421,17 +12443,53 @@ function buildHorizontalPathWithBridges(segment, verticalSegments){
   return d;
 }
 
-function buildPathForWeekSegment(segment, verticalSegments){
-  if(segment.type === "horizontal"){
-    return buildHorizontalPathWithBridges(segment, verticalSegments);
+function appendHorizontalPathWithBridges(d, segment, verticalSegments, isFirst = false){
+  const bridgeRadius = isMobileViewport() ? 6 : 7;
+  const y = segment.y1;
+  const dir = segment.x2 >= segment.x1 ? 1 : -1;
+
+  const crossings = verticalSegments
+    .filter(v => doesHorizontalCrossVertical(segment, v))
+    .map(v => v.x1)
+    .sort((a, b) => dir > 0 ? a - b : b - a);
+
+  d += isFirst
+    ? `M ${segment.x1.toFixed(1)} ${y.toFixed(1)}`
+    : ` L ${segment.x1.toFixed(1)} ${y.toFixed(1)}`;
+
+  for(const crossX of crossings){
+    const beforeX = crossX - (bridgeRadius * dir);
+    const afterX = crossX + (bridgeRadius * dir);
+
+    d += ` L ${beforeX.toFixed(1)} ${y.toFixed(1)}`;
+    d += ` Q ${crossX.toFixed(1)} ${(y - bridgeRadius).toFixed(1)} ${afterX.toFixed(1)} ${y.toFixed(1)}`;
   }
 
-  return `M ${segment.x1.toFixed(1)} ${segment.y1.toFixed(1)} L ${segment.x2.toFixed(1)} ${segment.y2.toFixed(1)}`;
+  d += ` L ${segment.x2.toFixed(1)} ${y.toFixed(1)}`;
+  return d;
 }
 
-function createWeekConnectorPath(svg, segment, group, verticalSegments, extraClass = ""){
+function buildPathForWeekRoute(segments, verticalSegments){
+  const list = Array.isArray(segments) ? segments.filter(Boolean) : [];
+  if(!list.length) return "";
+
+  return list.reduce((d, segment, index) => {
+    if(segment.type === "horizontal"){
+      return appendHorizontalPathWithBridges(d, segment, verticalSegments, index === 0);
+    }
+
+    d += index === 0
+      ? `M ${segment.x1.toFixed(1)} ${segment.y1.toFixed(1)}`
+      : ` L ${segment.x1.toFixed(1)} ${segment.y1.toFixed(1)}`;
+
+    d += ` L ${segment.x2.toFixed(1)} ${segment.y2.toFixed(1)}`;
+    return d;
+  }, "");
+}
+
+function createWeekConnectorPath(svg, segments, group, verticalSegments, extraClass = ""){
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", buildPathForWeekSegment(segment, verticalSegments));
+  path.setAttribute("d", buildPathForWeekRoute(segments, verticalSegments));
   path.setAttribute("class", `weekConnector style-${group.lineStyle || "solid"} ${extraClass}`.trim());
   path.dataset.connectionGroupId = group.id;
   path.dataset.connectionGroupName = group.name;
@@ -12495,13 +12553,11 @@ function renderWeekConnections(){
   }
 
   for(const route of allRoutes){
-    for(const segment of route.segments){
-      if(route.group.lineStyle === "double"){
-        createWeekConnectorPath(svg, segment, route.group, allVerticalSegments, "style-double-base");
-        createWeekConnectorPath(svg, segment, route.group, allVerticalSegments, "style-double-top");
-      }else{
-        createWeekConnectorPath(svg, segment, route.group, allVerticalSegments);
-      }
+    if(route.group.lineStyle === "double"){
+      createWeekConnectorPath(svg, route.segments, route.group, allVerticalSegments, "style-double-base");
+      createWeekConnectorPath(svg, route.segments, route.group, allVerticalSegments, "style-double-top");
+    }else{
+      createWeekConnectorPath(svg, route.segments, route.group, allVerticalSegments);
     }
   }
 
