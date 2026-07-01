@@ -11863,6 +11863,46 @@ function alignDowToGrid(){
   }
 }
 
+const WEEK_DOW_LABELS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+
+function resetDowHeader(){
+  if(!dow) return;
+
+  Array.from(dow.children).slice(0, 7).forEach((cell, index) => {
+    cell.classList.remove("weekDowDay", "todayDow", "selectedDow");
+    delete cell.dataset.iso;
+    cell.title = "";
+    cell.onclick = null;
+    cell.innerHTML = WEEK_DOW_LABELS[index] || "";
+  });
+}
+
+function updateWeekDowHeader(weekStartDate, todayISO){
+  if(!dow) return;
+
+  Array.from(dow.children).slice(0, 7).forEach((cell, index) => {
+    const cellDate = new Date(weekStartDate);
+    cellDate.setDate(weekStartDate.getDate() + index);
+    const cellISO = dateToYmd(cellDate);
+    const label = WEEK_DOW_LABELS[index] || cellDate.toLocaleDateString(undefined, { weekday:"short" }).toUpperCase();
+
+    cell.classList.add("weekDowDay");
+    cell.classList.toggle("todayDow", cellISO === todayISO);
+    cell.classList.toggle("selectedDow", cellISO === selectedDateISO);
+    cell.dataset.iso = cellISO;
+    cell.title = cellDate.toLocaleDateString(undefined, {
+      weekday:"long",
+      month:"long",
+      day:"numeric"
+    });
+    cell.innerHTML = `<span class="dowLabel">${escapeHtml(label)}</span>`;
+    cell.onclick = () => {
+      clearConnectionSelection();
+      selectDate(cellISO);
+    };
+  });
+}
+
 function startOfWeek(dt){
   const d = new Date(dt);
   d.setHours(0,0,0,0);
@@ -11924,6 +11964,7 @@ function renderMonthView(){
   clearConnectionSelection();
   grid.style.gridTemplateColumns = "repeat(7, 1fr)";
   if(dow) dow.style.display = "";
+  resetDowHeader();
   if(monthLabel) monthLabel.textContent = fmtMonthYear(view);
 
   const year = view.getFullYear();
@@ -12703,6 +12744,7 @@ function renderWeekView(){
 
   const today = new Date();
   const todayISO = isoDate(today.getFullYear(), today.getMonth()+1, today.getDate());
+  updateWeekDowHeader(start, todayISO);
 
   for(let i = 0; i < 7; i++){
     const cellDate = new Date(start);
@@ -12725,10 +12767,7 @@ function renderWeekView(){
 
     const num = document.createElement("div");
     num.className = "num";
-    num.textContent = cellDate.toLocaleDateString(undefined, {
-      weekday: "short",
-      day: "numeric"
-    });
+    num.textContent = String(cellDate.getDate());
 
     const badge = document.createElement("div");
     badge.className = "badge";
@@ -12883,6 +12922,7 @@ function renderDayView(){
   clearConnectionSelection();
   grid.style.gridTemplateColumns = "1fr";
   if(dow) dow.style.display = "none";
+  resetDowHeader();
 
   const base = new Date(view);
   const dayISO = dateToYmd(base);
