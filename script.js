@@ -12543,11 +12543,79 @@ function horizontalSegmentCoversBridgeX(segment = {}, x = 0, padding = 0){
   return Number.isFinite(xMin) && Number.isFinite(xMax) && x >= xMin && x <= xMax;
 }
 
+function horizontalSegmentOverlapsBridgeSpan(segment = {}, spanMinX = 0, spanMaxX = 0, padding = 0){
+  const xMin = Math.min(Number(segment.x1 || 0), Number(segment.x2 || 0)) - padding;
+  const xMax = Math.max(Number(segment.x1 || 0), Number(segment.x2 || 0)) + padding;
+
+  if(!Number.isFinite(xMin) || !Number.isFinite(xMax)) return false;
+
+  return Math.max(xMin, spanMinX) <= Math.min(xMax, spanMaxX);
+}
+
+function scoreHorizontalBridgeDirection(segment, crossX, direction, horizontalSegments = []){
+  const bridgeRadius = isMobileViewport() ? 6 : 7;
+  const y = getHorizontalBridgeY(segment);
+  const bridgeY = y + (bridgeRadius * direction);
+
+  // The visible bridge is wider than the math curve because of stroke width,
+  // glow, and anti-aliasing. Look around the whole overpass, not just the
+  // center crossing point, so a nearby rail ending beside the crossing still
+  // counts as blocked.
+  const xPad = isMobileViewport() ? 15 : 18;
+  const yPad = isMobileViewport() ? 5 : 6;
+  const spanMinX = crossX - bridgeRadius - xPad;
+  const spanMaxX = crossX + bridgeRadius + xPad;
+  const bridgeMinY = Math.min(y, bridgeY) - yPad;
+  const bridgeMaxY = Math.max(y, bridgeY) + yPad;
+
+  let score = 0;
+
+  for(const other of horizontalSegments || []){
+    if(!other || other === segment || other.type !== "horizontal") continue;
+    if(!horizontalSegmentOverlapsBridgeSpan(other, spanMinX, spanMaxX, 0)) continue;
+
+    const otherY = getHorizontalBridgeY(other);
+    if(!Number.isFinite(otherY) || Math.abs(otherY - y) < 0.75) continue;
+
+    // Hard collision: another horizontal rail lives inside the vertical space
+    // the bridge would occupy.
+    if(otherY >= bridgeMinY && otherY <= bridgeMaxY){
+      score += 100 + Math.max(0, (bridgeRadius + yPad) - Math.abs(otherY - bridgeY));
+      continue;
+    }
+
+    // Soft collision: another rail is just outside the bridge, where the glow
+    // would still visually merge. This is the part your screenshot was showing.
+    const glowClearance = isMobileViewport() ? 5 : 6;
+    const edgeDistance = Math.min(
+      Math.abs(otherY - bridgeMinY),
+      Math.abs(otherY - bridgeMaxY)
+    );
+
+    if(edgeDistance <= glowClearance){
+      score += 25 + (glowClearance - edgeDistance);
+    }
+  }
+
+  return score;
+}
+
 function chooseHorizontalBridgeDirection(segment, crossX, horizontalSegments = []){
   const bridgeRadius = isMobileViewport() ? 6 : 7;
   const y = getHorizontalBridgeY(segment);
-  const xPadding = bridgeRadius + 5;
-  const yClearance = bridgeRadius + 5;
+
+  const upScore = scoreHorizontalBridgeDirection(segment, crossX, -1, horizontalSegments);
+  const downScore = scoreHorizontalBridgeDirection(segment, crossX, 1, horizontalSegments);
+
+  if(upScore !== downScore){
+    return upScore < downScore ? -1 : 1;
+  }
+
+  // Fallback for cases where the actual curve space is clear but a nearby rail
+  // sits close enough to make the overpass read as a blob. Use a wider scout
+  // range than the old center-point check.
+  const xPadding = bridgeRadius * 3 + (isMobileViewport() ? 10 : 14);
+  const yClearance = bridgeRadius * 2 + (isMobileViewport() ? 8 : 10);
 
   let nearestAbove = Infinity;
   let nearestBelow = Infinity;
@@ -12569,9 +12637,6 @@ function chooseHorizontalBridgeDirection(segment, crossX, horizontalSegments = [
   const blockedAbove = Number.isFinite(nearestAbove);
   const blockedBelow = Number.isFinite(nearestBelow);
 
-  // Bridges used to always arc upward. When a nearby rail already lives above
-  // this one, flip the bridge downward so the little overpass does not crash
-  // into the horizontal line above it. Tiny miniature railroad switch.
   if(blockedAbove && !blockedBelow) return 1;
   if(blockedBelow && !blockedAbove) return -1;
   if(blockedAbove && blockedBelow) return nearestAbove <= nearestBelow ? 1 : -1;
