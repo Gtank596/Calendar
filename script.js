@@ -228,6 +228,10 @@ const eventCatDDButton = document.getElementById("eventCatDDButton");
 const eventCatDDLabel = document.getElementById("eventCatDDLabel");
 const eventCatDDMenu = document.getElementById("eventCatDDMenu");
 
+// Week-view connection/thread controls
+const eventConnectionGroup = document.getElementById("eventConnectionGroup");
+const eventConnectionColor = document.getElementById("eventConnectionColor");
+const eventConnectionLineStyle = document.getElementById("eventConnectionLineStyle");
 
 const startTimeInput = document.getElementById("startTimeInput");
 const endTimeInput = document.getElementById("endTimeInput");
@@ -11084,6 +11088,18 @@ const days = Array.isArray(obj?.recurrence?.days)
   const spanEnd = (obj?.span?.end ?? "").toString().trim();
   const span = (spanMode === "bg" && spanEnd) ? { mode: "bg", end: spanEnd } : null;
 
+  const rawConnectionGroup = (obj?.connectionGroupName ?? obj?.connectionGroup ?? "").toString().trim();
+  const rawConnectionId = (obj?.connectionGroupId ?? "").toString().trim();
+  const connectionGroupIds = Array.isArray(obj?.connectionGroupIds)
+    ? obj.connectionGroupIds.map(x => String(x || "").trim()).filter(Boolean)
+    : [];
+
+  const connectionGroupId = rawConnectionId || connectionGroupIds[0] || normalizeConnectionGroupId(rawConnectionGroup);
+  const connectionColor = (obj?.connectionColor ?? obj?.color ?? DEFAULT_COLOR).toString().trim();
+  const connectionLineStyle = ["solid", "dashed", "dotted", "double"].includes(obj?.connectionLineStyle)
+    ? obj.connectionLineStyle
+    : "solid";
+
   return {
   id: obj?.id || cryptoId(),
   title: (obj?.title ?? "").toString(),
@@ -11092,6 +11108,11 @@ const days = Array.isArray(obj?.recurrence?.days)
   source: (obj?.source ?? "calendar").toString(),
 categoryId: (obj?.categoryId ?? "other").toString(),
   color: color.startsWith("#") ? color : DEFAULT_COLOR,
+  connectionGroupId,
+  connectionGroupName: rawConnectionGroup || obj?.connectionGroupName || obj?.connectionGroup || "",
+  connectionGroupIds,
+  connectionColor: connectionColor.startsWith("#") ? connectionColor : (color.startsWith("#") ? color : DEFAULT_COLOR),
+  connectionLineStyle,
   startTime,
   endTime,
   startDate: (obj?.startDate ?? "").toString(),
@@ -11582,6 +11603,12 @@ spanToggle?.addEventListener("change", () => {
 });
 setTripShadingUI(!!spanToggle?.checked);
 
+eventColor?.addEventListener("input", () => {
+  if(eventConnectionColor && !eventConnectionColor.value){
+    eventConnectionColor.value = eventColor.value || DEFAULT_COLOR;
+  }
+});
+
 // ============================================================================
 // 12. APP STATE
 // ============================================================================
@@ -11601,6 +11628,9 @@ let viewMode = "month";
 let selectedDateISO = null;
 let selectedEventId = null;
 let editBaseDateISO = null;
+let selectedConnectionGroupId = null;
+let lastWeekAutoScrollKey = "";
+let weekConnectionResizeTimer = null;
 
 // ============================================================================
 // 12B. APP STATE STORE + RENDER SCHEDULER
@@ -11615,6 +11645,7 @@ const state = {
   selectedDateISO,
   selectedEventId,
   editBaseDateISO,
+  selectedConnectionGroupId,
   settings,
   activeSection,
   budgetViewMode,
@@ -11659,6 +11690,7 @@ function syncStateFromLegacy(){
   state.selectedDateISO = selectedDateISO;
   state.selectedEventId = selectedEventId;
   state.editBaseDateISO = editBaseDateISO;
+  state.selectedConnectionGroupId = selectedConnectionGroupId;
   state.settings = settings;
   state.activeSection = activeSection;
   state.budgetViewMode = budgetViewMode;
@@ -11676,6 +11708,7 @@ function syncLegacyFromState(){
   selectedDateISO = state.selectedDateISO;
   selectedEventId = state.selectedEventId;
   editBaseDateISO = state.editBaseDateISO;
+  selectedConnectionGroupId = state.selectedConnectionGroupId;
   settings = state.settings;
   activeSection = state.activeSection;
   budgetViewMode = state.budgetViewMode;
@@ -11887,6 +11920,8 @@ function render(){
 function renderMonthView(){
   if(!grid) return;
   grid.innerHTML = "";
+  grid.classList.remove("weekViewGrid");
+  clearConnectionSelection();
   grid.style.gridTemplateColumns = "repeat(7, 1fr)";
   if(dow) dow.style.display = "";
   if(monthLabel) monthLabel.textContent = fmtMonthYear(view);
@@ -12173,17 +12208,373 @@ requestAnimationFrame(() => alignDowToGrid());
 
 } // ← closes render()
 
+
+function normalizeConnectionGroupId(value = ""){
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function getEventConnectionGroupIds(ev = {}){
+  const ids = [];
+
+  if(Array.isArray(ev.connectionGroupIds)){
+    ids.push(...ev.connectionGroupIds.map(x => String(x || "").trim()).filter(Boolean));
+  }
+
+  if(ev.connectionGroupId) ids.push(String(ev.connectionGroupId).trim());
+
+  const nameId = normalizeConnectionGroupId(ev.connectionGroupName || ev.connectionGroup || "");
+  if(nameId) ids.push(nameId);
+
+  return [...new Set(ids.filter(Boolean))];
+}
+
+function getEventPrimaryConnectionGroupId(ev = {}){
+  return getEventConnectionGroupIds(ev)[0] || "";
+}
+
+function getEventConnectionGroupName(ev = {}, groupId = ""){
+  const name = String(ev.connectionGroupName || ev.connectionGroup || "").trim();
+  if(name) return name;
+
+  return String(groupId || "")
+    .split("-")
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function getEventConnectionLineStyle(ev = {}){
+  return ["solid", "dashed", "dotted", "double"].includes(ev.connectionLineStyle)
+    ? ev.connectionLineStyle
+    : "solid";
+}
+
+function getEventConnectionColor(ev = {}){
+  const color = String(ev.connectionColor || ev.color || DEFAULT_COLOR).trim();
+  return color.startsWith("#") ? color : DEFAULT_COLOR;
+}
+
+function getWeekEventSortKey(ev = {}, iso = ""){
+  const time = String(ev.startTime || "99:99").padStart(5, "0");
+  return `${iso}T${time}::${ev._masterId || ev.id || ""}`;
+}
+
+function selectConnectionGroup(groupId){
+  const safeGroupId = String(groupId || "").trim();
+  if(!safeGroupId) return;
+
+  selectedConnectionGroupId = safeGroupId;
+  state.selectedConnectionGroupId = safeGroupId;
+
+  if(viewMode === "week"){
+    renderWeekConnectionHighlights();
+  }
+}
+
+function clearConnectionSelection(){
+  if(!selectedConnectionGroupId) return;
+
+  selectedConnectionGroupId = null;
+  state.selectedConnectionGroupId = null;
+
+  if(viewMode === "week"){
+    renderWeekConnectionHighlights();
+  }
+}
+
+function setWeekConnectionBanner(groupMeta = null){
+  const existing = grid?.querySelector(".weekConnectionBanner");
+  if(existing) existing.remove();
+
+  if(!grid || !groupMeta || !selectedConnectionGroupId) return;
+
+  const banner = document.createElement("div");
+  banner.className = "weekConnectionBanner";
+  banner.style.setProperty("--connection-color", groupMeta.color || DEFAULT_COLOR);
+  banner.innerHTML = `
+    <span class="weekConnectionBannerDot"></span>
+    <span>Connected chain: <b>${escapeHtml(groupMeta.name || "Untitled chain")}</b></span>
+    <span class="weekConnectionBannerCount">${groupMeta.count || 0} events</span>
+  `;
+
+  grid.appendChild(banner);
+}
+
+function renderWeekConnectionHighlights(){
+  if(!grid) return;
+
+  const selected = selectedConnectionGroupId;
+  const cards = Array.from(grid.querySelectorAll(".weekEventPill[data-connection-group-id]"));
+  const paths = Array.from(grid.querySelectorAll(".weekConnector[data-connection-group-id]"));
+  const groupMeta = new Map();
+
+  for(const card of cards){
+    const groupId = card.dataset.connectionGroupId || "";
+    if(!groupId) continue;
+
+    if(!groupMeta.has(groupId)){
+      groupMeta.set(groupId, {
+        name: card.dataset.connectionGroupName || groupId,
+        color: card.dataset.connectionColor || DEFAULT_COLOR,
+        count: 0
+      });
+    }
+
+    groupMeta.get(groupId).count += 1;
+  }
+
+  cards.forEach(card => {
+    const isMatch = selected && card.dataset.connectionGroupId === selected;
+    card.classList.toggle("chain-selected", !!isMatch);
+    card.classList.toggle("chain-dimmed", !!selected && !isMatch);
+  });
+
+  paths.forEach(path => {
+    const isMatch = selected && path.dataset.connectionGroupId === selected;
+    path.classList.toggle("selected", !!isMatch);
+    path.classList.toggle("dimmed", !!selected && !isMatch);
+  });
+
+  setWeekConnectionBanner(selected ? groupMeta.get(selected) : null);
+}
+
+function getWeekConnectorLocalRect(el, parentRect){
+  const rect = el.getBoundingClientRect();
+
+  return {
+    x: rect.left - parentRect.left,
+    y: rect.top - parentRect.top,
+    width: rect.width,
+    height: rect.height,
+    right: rect.left - parentRect.left + rect.width,
+    bottom: rect.top - parentRect.top + rect.height,
+    centerX: rect.left - parentRect.left + rect.width / 2,
+    centerY: rect.top - parentRect.top + rect.height / 2
+  };
+}
+
+function buildWeekRouteSegments(fromRect, toRect, groupId){
+  const fromBeforeTo = fromRect.centerX <= toRect.centerX;
+  const start = fromBeforeTo
+    ? { x: fromRect.right + 4, y: fromRect.centerY }
+    : { x: fromRect.x - 4, y: fromRect.centerY };
+  const end = fromBeforeTo
+    ? { x: toRect.x - 4, y: toRect.centerY }
+    : { x: toRect.right + 4, y: toRect.centerY };
+
+  let midX = (start.x + end.x) / 2;
+
+  // Same-day chains need a tiny gutter so the wire does not run through the card body.
+  if(Math.abs(start.x - end.x) < 32){
+    midX = Math.max(fromRect.right, toRect.right) + 14;
+  }
+
+  return [
+    { type:"horizontal", x1:start.x, y1:start.y, x2:midX, y2:start.y, groupId },
+    { type:"vertical", x1:midX, y1:start.y, x2:midX, y2:end.y, groupId },
+    { type:"horizontal", x1:midX, y1:end.y, x2:end.x, y2:end.y, groupId }
+  ].filter(seg => Math.abs(seg.x1 - seg.x2) > 1 || Math.abs(seg.y1 - seg.y2) > 1);
+}
+
+function doesHorizontalCrossVertical(h, v){
+  if(!h || !v || h.groupId === v.groupId) return false;
+
+  const hMinX = Math.min(h.x1, h.x2);
+  const hMaxX = Math.max(h.x1, h.x2);
+  const vMinY = Math.min(v.y1, v.y2);
+  const vMaxY = Math.max(v.y1, v.y2);
+  const buffer = 8;
+
+  return (
+    v.x1 > hMinX + buffer &&
+    v.x1 < hMaxX - buffer &&
+    h.y1 > vMinY + buffer &&
+    h.y1 < vMaxY - buffer
+  );
+}
+
+function buildHorizontalPathWithBridges(segment, verticalSegments){
+  const bridgeRadius = isMobileViewport() ? 6 : 7;
+  const y = segment.y1;
+  const dir = segment.x2 >= segment.x1 ? 1 : -1;
+
+  const crossings = verticalSegments
+    .filter(v => doesHorizontalCrossVertical(segment, v))
+    .map(v => v.x1)
+    .sort((a, b) => dir > 0 ? a - b : b - a);
+
+  let d = `M ${segment.x1.toFixed(1)} ${y.toFixed(1)}`;
+
+  for(const crossX of crossings){
+    const beforeX = crossX - (bridgeRadius * dir);
+    const afterX = crossX + (bridgeRadius * dir);
+
+    d += ` L ${beforeX.toFixed(1)} ${y.toFixed(1)}`;
+    d += ` Q ${crossX.toFixed(1)} ${(y - bridgeRadius).toFixed(1)} ${afterX.toFixed(1)} ${y.toFixed(1)}`;
+  }
+
+  d += ` L ${segment.x2.toFixed(1)} ${y.toFixed(1)}`;
+  return d;
+}
+
+function buildPathForWeekSegment(segment, verticalSegments){
+  if(segment.type === "horizontal"){
+    return buildHorizontalPathWithBridges(segment, verticalSegments);
+  }
+
+  return `M ${segment.x1.toFixed(1)} ${segment.y1.toFixed(1)} L ${segment.x2.toFixed(1)} ${segment.y2.toFixed(1)}`;
+}
+
+function createWeekConnectorPath(svg, segment, group, verticalSegments, extraClass = ""){
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", buildPathForWeekSegment(segment, verticalSegments));
+  path.setAttribute("class", `weekConnector style-${group.lineStyle || "solid"} ${extraClass}`.trim());
+  path.dataset.connectionGroupId = group.id;
+  path.dataset.connectionGroupName = group.name;
+  path.style.stroke = group.color || DEFAULT_COLOR;
+  path.style.color = group.color || DEFAULT_COLOR;
+
+  path.addEventListener("click", (e) => {
+    e.stopPropagation();
+    selectConnectionGroup(group.id);
+  });
+
+  svg.appendChild(path);
+  return path;
+}
+
+function renderWeekConnections(){
+  if(!grid || viewMode !== "week") return;
+
+  const svg = grid.querySelector(".weekConnectorLayer");
+  if(!svg) return;
+
+  svg.innerHTML = "";
+
+  const parentRect = grid.getBoundingClientRect();
+  const pills = Array.from(grid.querySelectorAll(".weekEventPill[data-connection-group-id]"));
+  const groups = new Map();
+
+  for(const pill of pills){
+    const groupId = pill.dataset.connectionGroupId;
+    if(!groupId) continue;
+
+    if(!groups.has(groupId)){
+      groups.set(groupId, {
+        id: groupId,
+        name: pill.dataset.connectionGroupName || getEventConnectionGroupName({}, groupId),
+        color: pill.dataset.connectionColor || DEFAULT_COLOR,
+        lineStyle: pill.dataset.connectionLineStyle || "solid",
+        items: []
+      });
+    }
+
+    groups.get(groupId).items.push({
+      pill,
+      sortKey: pill.dataset.weekSortKey || "",
+      rect: getWeekConnectorLocalRect(pill, parentRect)
+    });
+  }
+
+  const allRoutes = [];
+  const allVerticalSegments = [];
+
+  for(const group of groups.values()){
+    group.items.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    if(group.items.length < 2) continue;
+
+    for(let i = 0; i < group.items.length - 1; i++){
+      const segments = buildWeekRouteSegments(group.items[i].rect, group.items[i + 1].rect, group.id);
+      allRoutes.push({ group, segments });
+      allVerticalSegments.push(...segments.filter(seg => seg.type === "vertical"));
+    }
+  }
+
+  for(const route of allRoutes){
+    for(const segment of route.segments){
+      if(route.group.lineStyle === "double"){
+        createWeekConnectorPath(svg, segment, route.group, allVerticalSegments, "style-double-base");
+        createWeekConnectorPath(svg, segment, route.group, allVerticalSegments, "style-double-top");
+      }else{
+        createWeekConnectorPath(svg, segment, route.group, allVerticalSegments);
+      }
+    }
+  }
+
+  renderWeekConnectionHighlights();
+}
+
+function queueWeekConnectionsRender(){
+  requestAnimationFrame(() => {
+    renderWeekConnections();
+  });
+}
+
+function getWeekVisibleAnchorISO(weekStartISO, weekEndISO, todayISO){
+  if(selectedDateISO && selectedDateISO >= weekStartISO && selectedDateISO <= weekEndISO){
+    return selectedDateISO;
+  }
+
+  if(todayISO >= weekStartISO && todayISO <= weekEndISO){
+    return todayISO;
+  }
+
+  return weekStartISO;
+}
+
+function queueMobileWeekScroll(weekStartISO, weekEndISO, todayISO){
+  requestAnimationFrame(() => {
+    if(!isMobileViewport() || viewMode !== "week" || !grid) return;
+
+    const calendarEl = grid.closest(".calendar");
+    if(!calendarEl) return;
+
+    const anchorISO = getWeekVisibleAnchorISO(weekStartISO, weekEndISO, todayISO);
+    const dayEl = grid.querySelector(`.weekViewDay[data-iso="${anchorISO}"]`);
+    if(!dayEl) return;
+
+    const widthKey = Math.round(calendarEl.clientWidth);
+    const scrollKey = `${weekStartISO}::${anchorISO}::${widthKey}`;
+    if(lastWeekAutoScrollKey === scrollKey) return;
+    lastWeekAutoScrollKey = scrollKey;
+
+    const dayWidth = dayEl.getBoundingClientRect().width || dayEl.offsetWidth || 0;
+    const maxScroll = Math.max(0, calendarEl.scrollWidth - calendarEl.clientWidth);
+    const desiredLeft = Math.min(maxScroll, Math.max(0, dayEl.offsetLeft - dayWidth));
+
+    calendarEl.scrollTo({ left: desiredLeft, behavior: "auto" });
+  });
+}
+
+window.addEventListener("resize", () => {
+  if(viewMode !== "week") return;
+
+  clearTimeout(weekConnectionResizeTimer);
+  weekConnectionResizeTimer = setTimeout(() => {
+    lastWeekAutoScrollKey = "";
+    alignDowToGrid();
+    queueWeekConnectionsRender();
+  }, 120);
+});
+
 function renderWeekView(){
   grid.innerHTML = "";
+  grid.classList.add("weekViewGrid");
   if(dow) dow.style.display = "";
   if(monthLabel) monthLabel.textContent = fmtWeekRange(view);
 
-  grid.style.gridTemplateColumns = "repeat(7, 1fr)";
+  grid.style.gridTemplateColumns = "repeat(7, minmax(0, 1fr))";
 
   const start = startOfWeek(view);
+  const weekStartISO = dateToYmd(start);
   const weekEndDate = new Date(start);
   weekEndDate.setDate(start.getDate() + 6);
-  requestIndexedDbEventRangeHydration(dateToYmd(start), dateToYmd(weekEndDate), {
+  const weekEndISO = dateToYmd(weekEndDate);
+  requestIndexedDbEventRangeHydration(weekStartISO, weekEndISO, {
     source: "week view",
     renderCalendar: true
   });
@@ -12199,6 +12590,7 @@ function renderWeekView(){
     const dayEl = document.createElement("div");
     dayEl.className = "day weekViewDay";
     dayEl.dataset.iso = cellISO;
+    dayEl.dataset.weekDayIndex = String(i);
 
     if(cellISO === todayISO) dayEl.classList.add("today");
     if(selectedDateISO === cellISO) dayEl.classList.add("selectedDay");
@@ -12288,7 +12680,22 @@ function renderWeekView(){
 
     for(const ev of list){
       const pill = document.createElement("span");
-      pill.className = "eventPill";
+      pill.className = "eventPill weekEventPill";
+
+      const groupId = getEventPrimaryConnectionGroupId(ev);
+      if(groupId){
+        const groupName = getEventConnectionGroupName(ev, groupId);
+        const groupColor = getEventConnectionColor(ev);
+        const lineStyle = getEventConnectionLineStyle(ev);
+
+        pill.classList.add("connectedEventPill");
+        pill.dataset.connectionGroupId = groupId;
+        pill.dataset.connectionGroupName = groupName;
+        pill.dataset.connectionColor = groupColor;
+        pill.dataset.connectionLineStyle = lineStyle;
+        pill.dataset.weekSortKey = getWeekEventSortKey(ev, cellISO);
+        pill.style.setProperty("--connection-color", groupColor);
+      }
 
       const t = formatTimeRange(ev.startTime, ev.endTime);
       const title = ev.title || "(Untitled)";
@@ -12303,17 +12710,36 @@ function renderWeekView(){
 
       pill.addEventListener("click", (e) => {
   e.stopPropagation();
+
+  const groupId = getEventPrimaryConnectionGroupId(ev);
+  if(groupId && selectedConnectionGroupId !== groupId){
+    selectConnectionGroup(groupId);
+    return;
+  }
+
   openEventInEditor(ev, cellISO);
 });
 
       dayEl.appendChild(pill);
     }
 
-    dayEl.addEventListener("click", () => selectDate(cellISO));
+    dayEl.addEventListener("click", () => {
+      clearConnectionSelection();
+      selectDate(cellISO);
+    });
     grid.appendChild(dayEl);
   }
 
-  requestAnimationFrame(() => alignDowToGrid());
+  const connectorLayer = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  connectorLayer.classList.add("weekConnectorLayer");
+  connectorLayer.setAttribute("aria-hidden", "true");
+  grid.appendChild(connectorLayer);
+
+  requestAnimationFrame(() => {
+    alignDowToGrid();
+    renderWeekConnections();
+    queueMobileWeekScroll(weekStartISO, weekEndISO, todayISO);
+  });
 }
 
 function isMobileLayout(){
@@ -12330,6 +12756,8 @@ function renderDayView(){
   const now = new Date();
 
   grid.innerHTML = "";
+  grid.classList.remove("weekViewGrid");
+  clearConnectionSelection();
   grid.style.gridTemplateColumns = "1fr";
   if(dow) dow.style.display = "none";
 
@@ -12687,6 +13115,9 @@ if(eventPrice) eventPrice.value = "";
   if(editLabel) editLabel.textContent = "New event";
   if(deleteBtn) deleteBtn.disabled = true;
 if(eventCategory) eventCategory.value = "other";
+if(eventConnectionGroup) eventConnectionGroup.value = "";
+if(eventConnectionColor) eventConnectionColor.value = eventColor?.value || DEFAULT_COLOR;
+if(eventConnectionLineStyle) eventConnectionLineStyle.value = "solid";
 renderEventCategoryOptions();
 }
 
@@ -12706,6 +13137,9 @@ function populateFormFromSelected(){
   eventDetails.value = ev.details || "";
 if(eventPrice) eventPrice.value = ev.price ?? "";
 if(eventCategory) eventCategory.value = ev.categoryId || "other";
+if(eventConnectionGroup) eventConnectionGroup.value = ev.connectionGroupName || ev.connectionGroup || "";
+if(eventConnectionColor) eventConnectionColor.value = getEventConnectionColor(ev);
+if(eventConnectionLineStyle) eventConnectionLineStyle.value = getEventConnectionLineStyle(ev);
 renderEventCategoryOptions();
 
   startTimeInput.value = (ev.startTime || "").replace(/\s*(AM|PM)$/i, "").trim();
@@ -12777,6 +13211,12 @@ if(priceRaw !== ""){
 
   const color = (eventColor?.value || DEFAULT_COLOR).toString();
 const categoryId = eventCategory?.value || "other";
+const connectionGroupName = (eventConnectionGroup?.value || "").toString().trim();
+const connectionGroupId = normalizeConnectionGroupId(connectionGroupName);
+const connectionColor = (eventConnectionColor?.value || color || DEFAULT_COLOR).toString();
+const connectionLineStyle = ["solid", "dashed", "dotted", "double"].includes(eventConnectionLineStyle?.value)
+  ? eventConnectionLineStyle.value
+  : "solid";
 
   const freq = (eventRepeat?.value || "none").toString();
   const until = (repeatUntil?.value || "").toString().trim();
@@ -12830,6 +13270,11 @@ const before = snapshotBeforeChange();
 price,
 categoryId,
         color,
+        connectionGroupId,
+        connectionGroupName,
+        connectionGroupIds: connectionGroupId ? [connectionGroupId] : [],
+        connectionColor,
+        connectionLineStyle,
         startTime: startStr,
         endTime: endStr,
         startDate: existing.startDate || selectedDateISO,
@@ -12842,7 +13287,24 @@ categoryId,
       };
       changedEventForCloud = list[idx];
     } else {
-      const newEv = { id: cryptoId(), title, details, price, categoryId, color, startTime: startStr, endTime: endStr, startDate: selectedDateISO, span, recurrence: nextRecurrence };
+      const newEv = {
+        id: cryptoId(),
+        title,
+        details,
+        price,
+        categoryId,
+        color,
+        connectionGroupId,
+        connectionGroupName,
+        connectionGroupIds: connectionGroupId ? [connectionGroupId] : [],
+        connectionColor,
+        connectionLineStyle,
+        startTime: startStr,
+        endTime: endStr,
+        startDate: selectedDateISO,
+        span,
+        recurrence: nextRecurrence
+      };
       list.push(newEv);
       selectedEventId = newEv.id;
       changedEventForCloud = newEv;
