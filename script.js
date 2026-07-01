@@ -12568,6 +12568,120 @@ function createWeekConnectorPath(svg, segments, group, verticalSegments, extraCl
   return path;
 }
 
+
+function rangesOverlap(aMin, aMax, bMin, bMax, buffer = 0){
+  return Math.max(aMin, bMin) <= Math.min(aMax, bMax) + buffer;
+}
+
+function setWeekRouteVerticalX(route, verticalSegment, nextX){
+  if(!route || !verticalSegment || !Array.isArray(route.segments)) return;
+
+  const oldX = Number(verticalSegment.x1 || verticalSegment.x2 || 0);
+  const safeX = Number(nextX || oldX);
+
+  if(!Number.isFinite(safeX)) return;
+
+  verticalSegment.x1 = safeX;
+  verticalSegment.x2 = safeX;
+
+  const index = route.segments.indexOf(verticalSegment);
+  if(index < 0) return;
+
+  const prev = route.segments[index - 1];
+  const next = route.segments[index + 1];
+  const snap = 2;
+
+  if(prev && prev.type === "horizontal"){
+    if(Math.abs(Number(prev.x2 || 0) - oldX) <= snap) prev.x2 = safeX;
+    else if(Math.abs(Number(prev.x1 || 0) - oldX) <= snap) prev.x1 = safeX;
+  }
+
+  if(next && next.type === "horizontal"){
+    if(Math.abs(Number(next.x1 || 0) - oldX) <= snap) next.x1 = safeX;
+    else if(Math.abs(Number(next.x2 || 0) - oldX) <= snap) next.x2 = safeX;
+  }
+}
+
+function assignWeekVerticalConnectorLanes(routes = []){
+  const verticals = [];
+
+  for(const route of routes || []){
+    for(const segment of route?.segments || []){
+      if(segment?.type !== "vertical") continue;
+
+      const yMin = Math.min(Number(segment.y1 || 0), Number(segment.y2 || 0));
+      const yMax = Math.max(Number(segment.y1 || 0), Number(segment.y2 || 0));
+      const x = Number(segment.x1 || segment.x2 || 0);
+
+      if(!Number.isFinite(x) || !Number.isFinite(yMin) || !Number.isFinite(yMax)) continue;
+
+      verticals.push({
+        route,
+        segment,
+        x,
+        yMin,
+        yMax,
+        lane:0
+      });
+    }
+  }
+
+  if(verticals.length < 2) return;
+
+  const clusterDistance = isMobileViewport() ? 14 : 18;
+  const overlapBuffer = isMobileViewport() ? 3 : 4;
+  const laneSpacing = isMobileViewport() ? 7 : 9;
+
+  const clusters = [];
+  const sortedByX = [...verticals].sort((a, b) => a.x - b.x);
+
+  for(const item of sortedByX){
+    const last = clusters[clusters.length - 1];
+
+    if(!last || Math.abs(item.x - last.centerX) > clusterDistance){
+      clusters.push({ centerX:item.x, items:[item] });
+      continue;
+    }
+
+    last.items.push(item);
+    last.centerX = last.items.reduce((sum, x) => sum + x.x, 0) / last.items.length;
+  }
+
+  for(const cluster of clusters){
+    if(cluster.items.length < 2) continue;
+
+    const active = [];
+    let maxLane = 0;
+
+    cluster.items.sort((a, b) => a.yMin - b.yMin || a.yMax - b.yMax || a.x - b.x);
+
+    for(const item of cluster.items){
+      for(let i = active.length - 1; i >= 0; i--){
+        if(!rangesOverlap(active[i].yMin, active[i].yMax, item.yMin, item.yMax, overlapBuffer)){
+          active.splice(i, 1);
+        }
+      }
+
+      let lane = 0;
+      const used = new Set(active.map(x => x.lane));
+      while(used.has(lane)) lane += 1;
+
+      item.lane = lane;
+      maxLane = Math.max(maxLane, lane);
+      active.push(item);
+    }
+
+    if(maxLane <= 0) continue;
+
+    const centerLane = maxLane / 2;
+
+    for(const item of cluster.items){
+      const offset = (item.lane - centerLane) * laneSpacing;
+      setWeekRouteVerticalX(item.route, item.segment, item.x + offset);
+    }
+  }
+}
+
 function getWeekRouteItemsForGroup(items = []){
   const sorted = [...(items || [])].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
 
@@ -12680,12 +12794,18 @@ function renderWeekConnections(){
     }
   }
 
+  assignWeekVerticalConnectorLanes(allRoutes);
+
+  const visibleVerticalSegments = allRoutes.flatMap(route =>
+    (route.segments || []).filter(seg => seg.type === "vertical")
+  );
+
   for(const route of allRoutes){
     if(route.group.lineStyle === "double"){
-      createWeekConnectorPath(svg, route.segments, route.group, allVerticalSegments, "style-double-base");
-      createWeekConnectorPath(svg, route.segments, route.group, allVerticalSegments, "style-double-top");
+      createWeekConnectorPath(svg, route.segments, route.group, visibleVerticalSegments, "style-double-base");
+      createWeekConnectorPath(svg, route.segments, route.group, visibleVerticalSegments, "style-double-top");
     }else{
-      createWeekConnectorPath(svg, route.segments, route.group, allVerticalSegments);
+      createWeekConnectorPath(svg, route.segments, route.group, visibleVerticalSegments);
     }
   }
 
