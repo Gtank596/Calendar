@@ -6369,6 +6369,46 @@ body{
   /* Connected events keep the exact same card shape as normal events. */
 }
 
+/* Week connection ports: small side nubs that make wires feel attached */
+.weekViewGrid .weekEventPill.connectedEventPill{
+  overflow:visible;
+}
+
+.weekViewGrid .weekEventPill.connectedEventPill .pillTitle,
+.weekViewGrid .weekEventPill.connectedEventPill .pillTime{
+  position:relative;
+  z-index:1;
+}
+
+.weekViewGrid .weekEventPill.connectedEventPill.connector-left::before,
+.weekViewGrid .weekEventPill.connectedEventPill.connector-right::after{
+  content:"";
+  position:absolute;
+  top:50%;
+  width:8px;
+  height:14px;
+  transform:translateY(-50%);
+  background:var(--connection-color, #7a5aff);
+  border:1px solid rgba(255,255,255,.24);
+  opacity:.92;
+  pointer-events:none;
+  box-shadow:
+    0 0 10px var(--connection-color, #7a5aff),
+    0 0 18px color-mix(in srgb, var(--connection-color, #7a5aff) 42%, transparent);
+}
+
+.weekViewGrid .weekEventPill.connectedEventPill.connector-left::before{
+  left:-6px;
+  border-right:0;
+  border-radius:999px 0 0 999px;
+}
+
+.weekViewGrid .weekEventPill.connectedEventPill.connector-right::after{
+  right:-6px;
+  border-left:0;
+  border-radius:0 999px 999px 0;
+}
+
 .weekViewGrid .weekEventPill.chain-selected{
   transform:translateY(-1px);
   border-color:rgba(185,165,255,.82) !important;

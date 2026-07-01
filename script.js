@@ -12645,6 +12645,10 @@ function renderWeekConnections(){
     });
   }
 
+  pills.forEach(pill => {
+    pill.classList.remove("connector-left", "connector-right");
+  });
+
   const allRoutes = [];
   const allVerticalSegments = [];
 
@@ -12653,7 +12657,17 @@ function renderWeekConnections(){
     if(routeItems.length < 2) continue;
 
     for(let i = 0; i < routeItems.length - 1; i++){
-      const segments = buildWeekRouteSegments(routeItems[i].rect, routeItems[i + 1].rect, group.id);
+      const fromItem = routeItems[i];
+      const toItem = routeItems[i + 1];
+      const fromBeforeTo = fromItem.rect.centerX <= toItem.rect.centerX;
+
+      // The SVG line stops at a tiny side port, while the pill keeps its
+      // normal shape/style. This makes the connection feel attached without
+      // drawing through the event card itself.
+      fromItem.pill.classList.add(fromBeforeTo ? "connector-right" : "connector-left");
+      toItem.pill.classList.add(fromBeforeTo ? "connector-left" : "connector-right");
+
+      const segments = buildWeekRouteSegments(fromItem.rect, toItem.rect, group.id);
       allRoutes.push({ group, segments });
       allVerticalSegments.push(...segments.filter(seg => seg.type === "vertical"));
     }
