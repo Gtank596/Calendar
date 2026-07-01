@@ -6385,28 +6385,44 @@ body{
   content:"";
   position:absolute;
   top:50%;
-  width:8px;
-  height:14px;
+  width:7px;
+  height:12px;
   transform:translateY(-50%);
   background:var(--connection-color, #7a5aff);
-  border:1px solid rgba(255,255,255,.24);
-  opacity:.92;
+  border:1px solid rgba(255,255,255,.18);
+  opacity:.48;
   pointer-events:none;
-  box-shadow:
-    0 0 10px var(--connection-color, #7a5aff),
-    0 0 18px color-mix(in srgb, var(--connection-color, #7a5aff) 42%, transparent);
+  box-shadow:0 0 5px var(--connection-color, #7a5aff);
+  transition:
+    opacity .18s ease,
+    box-shadow .18s ease,
+    filter .18s ease;
 }
 
 .weekViewGrid .weekEventPill.connectedEventPill.connector-left::before{
-  left:-6px;
+  left:-5px;
   border-right:0;
   border-radius:999px 0 0 999px;
 }
 
 .weekViewGrid .weekEventPill.connectedEventPill.connector-right::after{
-  right:-6px;
+  right:-5px;
   border-left:0;
   border-radius:0 999px 999px 0;
+}
+
+.weekViewGrid .weekEventPill.connectedEventPill.chain-selected.connector-left::before,
+.weekViewGrid .weekEventPill.connectedEventPill.chain-selected.connector-right::after{
+  opacity:1;
+  border-color:rgba(255,255,255,.24);
+  box-shadow:0 0 11px var(--connection-color, #7a5aff);
+}
+
+.weekViewGrid .weekEventPill.connectedEventPill.chain-dimmed.connector-left::before,
+.weekViewGrid .weekEventPill.connectedEventPill.chain-dimmed.connector-right::after{
+  opacity:.10;
+  filter:none;
+  box-shadow:none;
 }
 
 .weekViewGrid .weekEventPill.chain-selected{
