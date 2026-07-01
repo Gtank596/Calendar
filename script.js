@@ -2018,7 +2018,8 @@ async function getCalendarStorageDebugSummary(){
     indexedDbEventRangeCache: getIndexedDbEventRangeCacheSummary(),
     indexedDbBudgetTransactionRangeCache: getIndexedDbBudgetTransactionRangeCacheSummary(),
     indexedDbUpdatedAt: idbPayload?.updatedAt || 0,
-    queuedCloudRows: await countQueuedCloudRecordOps()
+    queuedCloudRows: await countQueuedCloudRecordOps(),
+    cloudSync: getCloudSyncDebugSummary()
   };
 }
 
@@ -2029,6 +2030,7 @@ if(typeof window !== "undefined"){
   window.calendarIndexedDbRenderCache = getIndexedDbEventRangeCacheSummary;
   window.calendarIndexedDbBudgetTransactionsForRange = getIndexedDbBudgetTransactionsForRange;
   window.calendarIndexedDbBudgetCache = getIndexedDbBudgetTransactionRangeCacheSummary;
+  window.calendarCloudSyncDebug = getCloudSyncDebugSummary;
 }
 
 function hasOwn(obj, key){
@@ -2290,12 +2292,20 @@ const CLOUD_ROW_ID = "main";
 const CLOUD_TABLE = "calendar_cloud_state";
 const CLOUD_PENDING_KEY = "myCalendarCloudPending_v1";
 const CLOUD_LAST_SYNC_KEY = "myCalendarCloudLastSync_v1";
+const CLOUD_DELTA_PULL_BUFFER_MS = 2 * 60 * 1000;
 
 let supabaseClient = null;
 let cloudUser = null;
 let cloudWriteTimer = null;
 let cloudBusy = false;
 let cloudFlushInProgress = false;
+let cloudSyncLastReadSummary = {
+  mode: "none",
+  rowsRead: 0,
+  sinceAt: 0,
+  readAt: 0,
+  appliedSlices: []
+};
 
 
 // Row-based cloud sync rides on the existing Supabase table. Each app item gets
@@ -2375,6 +2385,43 @@ function updateKnownCloudKeysFromOps(ops = []){
 
 function rowUpdatedAt(row){
   return row?.updated_at ? new Date(row.updated_at).getTime() : Number(row?.payload?.updatedAt || 0);
+}
+
+function getCloudLastSyncAt(){
+  return Math.max(0, Number(localStorage.getItem(CLOUD_LAST_SYNC_KEY) || 0) || 0);
+}
+
+function setCloudLastSyncAt(time = Date.now()){
+  localStorage.setItem(CLOUD_LAST_SYNC_KEY, String(Math.max(0, Number(time || Date.now()))));
+}
+
+function setCloudReadDebugSummary(summary = {}){
+  cloudSyncLastReadSummary = {
+    mode: summary.mode || "none",
+    rowsRead: Number(summary.rowsRead || 0),
+    sinceAt: Number(summary.sinceAt || 0),
+    readAt: Number(summary.readAt || Date.now()),
+    appliedSlices: Array.isArray(summary.appliedSlices) ? summary.appliedSlices : []
+  };
+}
+
+function getCloudSyncDebugSummary(){
+  const lastSyncAt = getCloudLastSyncAt();
+
+  return {
+    lastSyncAt,
+    lastSyncISO: lastSyncAt ? new Date(lastSyncAt).toISOString() : "",
+    deltaBufferMs: CLOUD_DELTA_PULL_BUFFER_MS,
+    lastRead: {
+      ...cloudSyncLastReadSummary,
+      sinceISO: cloudSyncLastReadSummary.sinceAt
+        ? new Date(cloudSyncLastReadSummary.sinceAt).toISOString()
+        : "",
+      readISO: cloudSyncLastReadSummary.readAt
+        ? new Date(cloudSyncLastReadSummary.readAt).toISOString()
+        : ""
+    }
+  };
 }
 
 function getCloudStoreForSlice(slice){
@@ -2852,6 +2899,377 @@ function mergeCloudRecordOpsIntoPayload(ops = [], base = {}){
   return merged;
 }
 
+
+function cloneCloudMergeBase(base = {}){
+  try{
+    return JSON.parse(JSON.stringify(buildFullSavePayload(base || getLocalPayload())));
+  }catch{
+    return buildFullSavePayload(base || getLocalPayload());
+  }
+}
+
+function markCloudMergedSlice(payload, slice, updatedAt = Date.now()){
+  const safeSlice = normalizeSliceList(slice)[0];
+  if(!safeSlice) return;
+
+  const safeUpdatedAt = Number(updatedAt || Date.now());
+  payload.sliceUpdatedAt = payload.sliceUpdatedAt || {};
+  payload.sliceUpdatedAt[safeSlice] = Math.max(
+    Number(payload.sliceUpdatedAt[safeSlice] || 0),
+    safeUpdatedAt
+  );
+  payload.updatedAt = Math.max(Number(payload.updatedAt || 0), payload.sliceUpdatedAt[safeSlice]);
+}
+
+function getEmptyCloudSliceValue(slice){
+  if([
+    "events",
+    "budgetPlans",
+    "receiptItemCategoryMemory",
+    "merchantAliases",
+    "selectedBudgetPanes",
+    "settings"
+  ].includes(slice)){
+    return {};
+  }
+
+  if([
+    "budgetCategories",
+    "receiptTrainingRecords",
+    "people",
+    "households"
+  ].includes(slice)){
+    return [];
+  }
+
+  if(slice === "activeSection") return "calendar";
+  if(slice === "budgetViewMode") return "month";
+
+  return null;
+}
+
+function removeEventByIdFromMap(eventsMap = {}, eventId = ""){
+  const safeId = String(eventId || "").trim();
+  if(!safeId) return normalizeEventsMap(eventsMap || {});
+
+  const next = normalizeEventsMap(eventsMap || {});
+
+  for(const dayISO of Object.keys(next)){
+    const list = Array.isArray(next[dayISO]) ? next[dayISO] : [];
+    const filtered = list.filter(ev => String(ev?.id || "") !== safeId);
+
+    if(filtered.length){
+      next[dayISO] = filtered;
+    }else{
+      delete next[dayISO];
+    }
+  }
+
+  return next;
+}
+
+function upsertArrayRecordById(list = [], record = {}){
+  const safeRecord = record && typeof record === "object" ? record : null;
+  const safeId = String(safeRecord?.id || "").trim();
+  if(!safeRecord || !safeId) return Array.isArray(list) ? list : [];
+
+  const next = Array.isArray(list) ? [...list] : [];
+  const index = next.findIndex(item => String(item?.id || "") === safeId);
+
+  if(index >= 0){
+    next[index] = safeRecord;
+  }else{
+    next.push(safeRecord);
+  }
+
+  return next;
+}
+
+function deleteArrayRecordById(list = [], recordId = ""){
+  const safeId = String(recordId || "").trim();
+  if(!safeId) return Array.isArray(list) ? list : [];
+  return (Array.isArray(list) ? list : []).filter(item => String(item?.id || "") !== safeId);
+}
+
+function applyCloudRecordOpsToPayload(ops = [], basePayload = {}){
+  const merged = cloneCloudMergeBase(basePayload);
+  const latest = new Map();
+
+  for(const op of ops || []){
+    if(!op?.key) continue;
+    const existing = latest.get(op.key);
+
+    if(!existing || Number(op.updatedAt || 0) >= Number(existing.updatedAt || 0)){
+      latest.set(op.key, op);
+    }
+  }
+
+  const sortedOps = Array.from(latest.values())
+    .sort((a, b) => Number(a.updatedAt || 0) - Number(b.updatedAt || 0));
+
+  for(const op of sortedOps){
+    const slice = normalizeSliceList(op.slice)[0];
+    if(!slice) continue;
+
+    const updatedAt = Number(op.updatedAt || Date.now());
+    markCloudMergedSlice(merged, slice, updatedAt);
+
+    if(slice === "events"){
+      const recordId = String(op.recordId || op.data?.id || "").trim();
+      let map = removeEventByIdFromMap(merged.events || {}, recordId);
+
+      if(!op.deleted && op.data){
+        const row = { ...(op.data || {}) };
+        const dateISO = String(row.dateISO || row.startDate || row.date || "").trim();
+
+        if(dateISO){
+          const legacyEvent = eventRecordToLegacyEvent({ ...row, dateISO });
+          (map[dateISO] ||= []).push(legacyEvent);
+          map[dateISO].sort((a, b) => String(a.startTime || "").localeCompare(String(b.startTime || "")));
+        }
+      }
+
+      merged.events = normalizeEventsMap(map);
+      continue;
+    }
+
+    if(slice === "budgetCategories"){
+      merged.budgetCategories = op.deleted
+        ? deleteArrayRecordById(merged.budgetCategories || [], op.recordId)
+        : upsertArrayRecordById(merged.budgetCategories || [], op.data);
+      continue;
+    }
+
+    if(slice === "budgetPlans"){
+      const recordId = String(op.recordId || "");
+      const rec = op.data || {};
+      const [idPeriod = "month", ...idRangeParts] = recordId.split(":");
+      const period = rec.period || idPeriod || "month";
+      const rangeKey = rec.rangeKey || idRangeParts.join(":") || "default";
+
+      merged.budgetPlans = merged.budgetPlans || { week:{}, month:{}, year:{} };
+      merged.budgetPlans[period] = merged.budgetPlans[period] || {};
+
+      if(op.deleted){
+        delete merged.budgetPlans[period][rangeKey];
+      }else{
+        merged.budgetPlans[period][rangeKey] = rec.plan ?? {};
+      }
+      continue;
+    }
+
+    if(slice === "receiptItemCategoryMemory"){
+      merged.receiptItemCategoryMemory = merged.receiptItemCategoryMemory || {};
+      if(op.deleted) delete merged.receiptItemCategoryMemory[op.recordId];
+      else merged.receiptItemCategoryMemory[op.recordId] = op.data?.value ?? op.data;
+      continue;
+    }
+
+    if(slice === "receiptTrainingRecords"){
+      merged.receiptTrainingRecords = op.deleted
+        ? deleteArrayRecordById(merged.receiptTrainingRecords || [], op.recordId)
+        : upsertArrayRecordById(merged.receiptTrainingRecords || [], op.data);
+
+      merged.receiptTrainingRecords.sort((a, b) =>
+        Number(a.createdAt || a.updatedAt || 0) - Number(b.createdAt || b.updatedAt || 0)
+      );
+      continue;
+    }
+
+    if(slice === "merchantAliases"){
+      merged.merchantAliases = merged.merchantAliases || {};
+      if(op.deleted) delete merged.merchantAliases[op.recordId];
+      else merged.merchantAliases[op.recordId] = op.data?.value ?? op.data;
+      continue;
+    }
+
+    if(slice === "people"){
+      merged.people = op.deleted
+        ? deleteArrayRecordById(merged.people || [], op.recordId)
+        : upsertArrayRecordById(merged.people || [], op.data);
+      continue;
+    }
+
+    if(slice === "households"){
+      merged.households = op.deleted
+        ? deleteArrayRecordById(merged.households || [], op.recordId)
+        : upsertArrayRecordById(merged.households || [], op.data);
+      continue;
+    }
+
+    if(slice === "settings" && !op.deleted){
+      merged.settings = op.data || {};
+      continue;
+    }
+
+    if(slice === "selectedBudgetPanes"){
+      merged.selectedBudgetPanes = op.deleted ? {} : (op.data || {});
+      continue;
+    }
+
+    if(slice === "activeSection" && !op.deleted){
+      merged.activeSection = op.data || "calendar";
+      continue;
+    }
+
+    if(slice === "budgetViewMode" && !op.deleted){
+      merged.budgetViewMode = op.data || "month";
+    }
+  }
+
+  updateKnownCloudKeysFromOps(sortedOps);
+
+  return buildFullSavePayload(merged);
+}
+
+function buildCloudStateFromRows(data = [], opts = {}){
+  const rows = Array.isArray(data) ? data : [];
+  if(!rows.length) return null;
+
+  if(opts.delta){
+    const merged = cloneCloudMergeBase(opts.base || getLocalPayload());
+    let legacyPayload = null;
+    const recordOps = [];
+    const sliceRows = [];
+
+    for(const row of rows){
+      const op = getCloudRecordOpFromRow(row);
+      if(op){
+        recordOps.push(op);
+        continue;
+      }
+
+      if(row?.id === CLOUD_ROW_ID && row?.payload && !row.payload.slice){
+        legacyPayload = buildFullSavePayload(row.payload);
+        continue;
+      }
+
+      const slice = getCloudSliceFromRow(row);
+      if(slice){
+        sliceRows.push(row);
+      }
+    }
+
+    let patched = recordOps.length
+      ? applyCloudRecordOpsToPayload(recordOps, merged)
+      : merged;
+
+    for(const row of sliceRows){
+      const slice = getCloudSliceFromRow(row);
+      if(!slice) continue;
+
+      const sliceData = extractCloudSliceData(row);
+      if(sliceData === undefined) continue;
+
+      const rowTime = Number(row?.payload?.updatedAt || rowUpdatedAt(row) || Date.now());
+      if(rowTime <= getSliceUpdatedAt(patched, slice)) continue;
+
+      patched[slice] = sliceData;
+      markCloudMergedSlice(patched, slice, rowTime);
+    }
+
+    if(legacyPayload){
+      for(const slice of DATA_SLICE_NAMES){
+        const cloudSliceTime = getSliceUpdatedAt(legacyPayload, slice);
+        if(hasOwn(legacyPayload, slice) && cloudSliceTime > getSliceUpdatedAt(patched, slice)){
+          patched[slice] = legacyPayload[slice];
+          markCloudMergedSlice(patched, slice, cloudSliceTime);
+        }
+      }
+    }
+
+    return buildFullSavePayload(patched);
+  }
+
+  let legacyPayload = null;
+  const merged = {
+    version: SPLIT_STORAGE_VERSION,
+    updatedAt: 0,
+    sliceUpdatedAt: {}
+  };
+
+  const recordOps = [];
+  const sliceRows = [];
+
+  for(const row of rows){
+    const op = getCloudRecordOpFromRow(row);
+    if(op){
+      recordOps.push(op);
+      continue;
+    }
+
+    const rowTime = rowUpdatedAt(row);
+
+    if(row?.id === CLOUD_ROW_ID && row?.payload && !row.payload.slice){
+      legacyPayload = buildFullSavePayload(row.payload);
+      merged.updatedAt = Math.max(merged.updatedAt, Number(legacyPayload.updatedAt || 0), rowTime);
+      continue;
+    }
+
+    const slice = getCloudSliceFromRow(row);
+    if(slice){
+      sliceRows.push(row);
+    }
+  }
+
+  const rowControlledSlices = new Set(recordOps.map(op => op.slice).filter(Boolean));
+
+  if(recordOps.length){
+    const rowPayload = mergeCloudRecordOpsIntoPayload(recordOps, merged);
+
+    Object.assign(merged, rowPayload, {
+      sliceUpdatedAt: {
+        ...(merged.sliceUpdatedAt || {}),
+        ...(rowPayload.sliceUpdatedAt || {})
+      },
+      updatedAt: Math.max(Number(merged.updatedAt || 0), Number(rowPayload.updatedAt || 0))
+    });
+
+    updateKnownCloudKeysFromOps(recordOps);
+
+    // If the cloud has only tombstones for a row-controlled slice, the slice is
+    // still meaningful: it means local should empty that slice instead of
+    // falling back to stale legacy rows.
+    for(const slice of rowControlledSlices){
+      if(hasOwn(merged, slice)) continue;
+
+      const sliceOps = recordOps.filter(op => op.slice === slice);
+      const maxTime = Math.max(...sliceOps.map(op => Number(op.updatedAt || 0)), 0);
+      merged[slice] = getEmptyCloudSliceValue(slice);
+      markCloudMergedSlice(merged, slice, maxTime || Date.now());
+    }
+  }
+
+  // Backward bridge: old slice rows and old monolith can still hydrate anything
+  // not yet present as row records.
+  for(const row of sliceRows){
+    const slice = getCloudSliceFromRow(row);
+    if(!slice || hasOwn(merged, slice) || rowControlledSlices.has(slice)) continue;
+
+    const sliceData = extractCloudSliceData(row);
+    if(sliceData === undefined) continue;
+
+    const rowTime = rowUpdatedAt(row);
+    merged[slice] = sliceData;
+    merged.sliceUpdatedAt[slice] = Number(row?.payload?.updatedAt || rowTime || Date.now());
+    merged.updatedAt = Math.max(merged.updatedAt, merged.sliceUpdatedAt[slice]);
+  }
+
+  if(legacyPayload){
+    for(const slice of DATA_SLICE_NAMES){
+      if(!rowControlledSlices.has(slice) && !hasOwn(merged, slice) && hasOwn(legacyPayload, slice)){
+        merged[slice] = legacyPayload[slice];
+        merged.sliceUpdatedAt[slice] = getSliceUpdatedAt(legacyPayload, slice);
+      }
+    }
+  }
+
+  const hasSlices = DATA_SLICE_NAMES.some(slice => hasOwn(merged, slice));
+  if(!hasSlices && legacyPayload) return legacyPayload;
+  if(!hasSlices) return null;
+
+  return buildFullSavePayload(merged);
+}
 async function readAllCloudRowsForUser(){
   if(!supabaseClient || !cloudUser) return [];
 
@@ -2865,6 +3283,38 @@ async function readAllCloudRowsForUser(){
       .from(CLOUD_TABLE)
       .select("id, payload, updated_at")
       .eq("user_id", cloudUser.id)
+      .range(from, to);
+
+    if(error) throw error;
+
+    if(Array.isArray(data) && data.length){
+      allRows.push(...data);
+    }
+
+    if(!Array.isArray(data) || data.length < pageSize) break;
+    from += pageSize;
+  }
+
+  return allRows;
+}
+
+async function readCloudRowsForUserSince(sinceAt = 0){
+  if(!supabaseClient || !cloudUser) return [];
+
+  const allRows = [];
+  const pageSize = 1000;
+  const safeSinceAt = Math.max(0, Number(sinceAt || 0));
+  const sinceISO = new Date(safeSinceAt).toISOString();
+  let from = 0;
+
+  while(true){
+    const to = from + pageSize - 1;
+    const { data, error } = await supabaseClient
+      .from(CLOUD_TABLE)
+      .select("id, payload, updated_at")
+      .eq("user_id", cloudUser.id)
+      .gt("updated_at", sinceISO)
+      .order("updated_at", { ascending:true })
       .range(from, to);
 
     if(error) throw error;
@@ -2961,7 +3411,7 @@ function markCloudPending(reason = "local change", slices = []){
 
 function clearCloudPending(){
   localStorage.removeItem(CLOUD_PENDING_KEY);
-  localStorage.setItem(CLOUD_LAST_SYNC_KEY, String(Date.now()));
+  setCloudLastSyncAt(Date.now());
 }
 
 function getCloudSyncLabel(){
@@ -3163,7 +3613,7 @@ async function loginCloud(){
     cloudUser = data?.user || null;
 
     if(cloudUser){
-      await pullCloudIfNewer();
+      await pullCloudIfNewer({ preferDelta:true });
     }
   }finally{
     setCloudBusy(false);
@@ -3185,105 +3635,40 @@ async function logoutCloud(){
   }
 }
 
-async function readCloudState(){
+async function readCloudState(opts = {}){
   if(!supabaseClient || !cloudUser) return null;
+
+  const forceFull = !!opts.forceFull;
+  const preferDelta = !!opts.preferDelta && !forceFull;
+  const basePayload = opts.base || getLocalPayload();
+  const lastSyncAt = getCloudLastSyncAt();
+  const deltaSinceAt = Math.max(0, lastSyncAt - CLOUD_DELTA_PULL_BUFFER_MS);
+  const useDelta = preferDelta && lastSyncAt > 0;
 
   let data = [];
 
   try{
-    data = await readAllCloudRowsForUser();
+    data = useDelta
+      ? await readCloudRowsForUserSince(deltaSinceAt)
+      : await readAllCloudRowsForUser();
   }catch(error){
     setCloudStatus("Cloud read failed: " + error.message);
     return null;
   }
 
+  setCloudReadDebugSummary({
+    mode: useDelta ? "delta" : "full",
+    rowsRead: Array.isArray(data) ? data.length : 0,
+    sinceAt: useDelta ? deltaSinceAt : 0,
+    readAt: Date.now()
+  });
+
   if(!Array.isArray(data) || !data.length) return null;
 
-  let legacyPayload = null;
-  const merged = {
-    version: SPLIT_STORAGE_VERSION,
-    updatedAt: 0,
-    sliceUpdatedAt: {}
-  };
-
-  const recordOps = [];
-  const sliceRows = [];
-
-  for(const row of data){
-    const op = getCloudRecordOpFromRow(row);
-    if(op){
-      recordOps.push(op);
-      continue;
-    }
-
-    const rowTime = rowUpdatedAt(row);
-
-    if(row?.id === CLOUD_ROW_ID && row?.payload && !row.payload.slice){
-      legacyPayload = buildFullSavePayload(row.payload);
-      merged.updatedAt = Math.max(merged.updatedAt, Number(legacyPayload.updatedAt || 0), rowTime);
-      continue;
-    }
-
-    const slice = getCloudSliceFromRow(row);
-    if(slice){
-      sliceRows.push(row);
-    }
-  }
-
-  const rowControlledSlices = new Set(recordOps.map(op => op.slice).filter(Boolean));
-
-  if(recordOps.length){
-    const rowPayload = mergeCloudRecordOpsIntoPayload(recordOps, merged);
-
-    Object.assign(merged, rowPayload, {
-      sliceUpdatedAt: {
-        ...(merged.sliceUpdatedAt || {}),
-        ...(rowPayload.sliceUpdatedAt || {})
-      },
-      updatedAt: Math.max(Number(merged.updatedAt || 0), Number(rowPayload.updatedAt || 0))
-    });
-
-    const known = {};
-    for(const op of recordOps){
-      if(op.deleted) continue;
-      (known[op.slice] ||= new Set()).add(op.key);
-    }
-    const knownMap = getKnownCloudRecordKeys();
-    for(const [slice, set] of Object.entries(known)){
-      knownMap[slice] = Array.from(set);
-    }
-    saveKnownCloudRecordKeys(knownMap);
-  }
-
-  // Backward bridge: old slice rows and old monolith can still hydrate anything
-  // not yet present as row records.
-  for(const row of sliceRows){
-    const slice = getCloudSliceFromRow(row);
-    if(!slice || hasOwn(merged, slice) || rowControlledSlices.has(slice)) continue;
-
-    const sliceData = extractCloudSliceData(row);
-    if(sliceData === undefined) continue;
-
-    const rowTime = rowUpdatedAt(row);
-    merged[slice] = sliceData;
-    merged.sliceUpdatedAt[slice] = Number(row?.payload?.updatedAt || rowTime || Date.now());
-    merged.updatedAt = Math.max(merged.updatedAt, merged.sliceUpdatedAt[slice]);
-  }
-
-  if(legacyPayload){
-    for(const slice of DATA_SLICE_NAMES){
-      if(!rowControlledSlices.has(slice) && !hasOwn(merged, slice) && hasOwn(legacyPayload, slice)){
-        merged[slice] = legacyPayload[slice];
-        merged.sliceUpdatedAt[slice] = getSliceUpdatedAt(legacyPayload, slice);
-      }
-    }
-  }
-
-  const hasSlices = DATA_SLICE_NAMES.some(slice => hasOwn(merged, slice));
-  if(!hasSlices && legacyPayload) return legacyPayload;
-  if(!hasSlices) return null;
-
-  return buildFullSavePayload(merged);
+  return buildCloudStateFromRows(data, {
+    delta: useDelta,
+    base: basePayload
+  });
 }
 
 async function writeCloudStateNow(slices = null){
@@ -3377,8 +3762,8 @@ async function tryFlushPendingCloudSync(reason = "sync"){
 
     if(pending){
       const dirtySlices = getPendingSliceList(pending);
-      const cloud = await readCloudState();
       const local = getLocalPayload();
+      const cloud = await readCloudState({ preferDelta:true, base: local });
 
       const cloudHasNewerDirtySlice = dirtySlices.some(slice =>
         cloud && getSliceUpdatedAt(cloud, slice) > getSliceUpdatedAt(local, slice)
@@ -3393,7 +3778,7 @@ async function tryFlushPendingCloudSync(reason = "sync"){
       return await writeCloudStateNow(dirtySlices);
     }
 
-    await pullCloudIfNewer();
+    await pullCloudIfNewer({ preferDelta:true });
     return true;
   }finally{
     cloudFlushInProgress = false;
@@ -3401,11 +3786,22 @@ async function tryFlushPendingCloudSync(reason = "sync"){
   }
 }
 
-async function pullCloudIfNewer(){
-  const cloud = await readCloudState();
-  if(!cloud) return;
-
+async function pullCloudIfNewer(opts = {}){
+  const forceFull = !!opts.forceFull;
+  const preferDelta = opts.preferDelta !== false && !forceFull;
   const local = getLocalPayload();
+  const cloud = await readCloudState({
+    preferDelta,
+    forceFull,
+    base: local
+  });
+
+  if(!cloud){
+    setCloudLastSyncAt(Date.now());
+    setCloudStatus(isCloudPending() ? "Cloud: Pending sync" : "Cloud: Local copy is current");
+    return;
+  }
+
   const pendingSlices = getPendingSliceList();
   const slicesToPull = DATA_SLICE_NAMES.filter(slice => {
     if(pendingSlices.includes(slice)) return false;
@@ -3435,11 +3831,17 @@ async function pullCloudIfNewer(){
     }
 
     applyFullSavePayload(patch);
+    setCloudReadDebugSummary({
+      ...cloudSyncLastReadSummary,
+      appliedSlices: slicesToPull
+    });
+    setCloudLastSyncAt(Date.now());
     setCloudStatus(
-      `Cloud: Pulled ${slicesToPull.length} slice${slicesToPull.length === 1 ? "" : "s"} • ${new Date(cloud.updatedAt).toLocaleString()}`
+      `Cloud: Pulled ${slicesToPull.length} slice${slicesToPull.length === 1 ? "" : "s"} via ${preferDelta ? "delta" : "full"} sync • ${new Date(cloud.updatedAt).toLocaleString()}`
     );
   }else{
-    setCloudStatus(isCloudPending() ? "Cloud: Pending sync" : "Cloud: Local copy is current");
+    setCloudLastSyncAt(Date.now());
+    setCloudStatus(isCloudPending() ? "Cloud: Pending sync" : `Cloud: Local copy is current${preferDelta ? " • delta checked" : ""}`);
   }
 }
 
@@ -3471,7 +3873,7 @@ cloudSignupBtn?.addEventListener("click", () => signupCloud().catch(console.erro
 cloudLoginBtn?.addEventListener("click", () => loginCloud().catch(console.error));
 cloudLogoutBtn?.addEventListener("click", () => logoutCloud().catch(console.error));
 cloudPushBtn?.addEventListener("click", () => pushLocalToCloud().catch(console.error));
-cloudPullBtn?.addEventListener("click", () => pullCloudIfNewer().catch(console.error));
+cloudPullBtn?.addEventListener("click", () => pullCloudIfNewer({ forceFull:true }).catch(console.error));
 
 cloudPasswordInput?.addEventListener("keydown", (e) => {
   if(e.key === "Enter"){
