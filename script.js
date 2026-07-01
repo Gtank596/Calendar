@@ -12357,27 +12357,40 @@ function getWeekConnectorLocalRect(el, parentRect){
   };
 }
 
+function getWeekCardAnchor(rect, side = "right", gap = 6){
+  // Each pill has a left and right anchor. A route entering from the previous
+  // day lands on the left anchor; a route leaving toward the next day exits
+  // from the right anchor. That keeps wires from cutting across a pill when
+  // connected events sit on different vertical lanes.
+  return side === "left"
+    ? { x: rect.x - gap, y: rect.centerY }
+    : { x: rect.right + gap, y: rect.centerY };
+}
+
 function buildWeekRouteSegments(fromRect, toRect, groupId){
   const fromBeforeTo = fromRect.centerX <= toRect.centerX;
   const anchorGap = isMobileViewport() ? 5 : 6;
   const sameLaneThreshold = isMobileViewport() ? 10 : 12;
 
-  // Anchor just outside the cards. The wire should feel attached to the card
-  // edge without running under the translucent event text.
-  const start = fromBeforeTo
-    ? { x: fromRect.right + anchorGap, y: fromRect.centerY }
-    : { x: fromRect.x - anchorGap, y: fromRect.centerY };
-  const end = fromBeforeTo
-    ? { x: toRect.x - anchorGap, y: toRect.centerY }
-    : { x: toRect.right + anchorGap, y: toRect.centerY };
+  const start = getWeekCardAnchor(
+    fromRect,
+    fromBeforeTo ? "right" : "left",
+    anchorGap
+  );
+
+  const end = getWeekCardAnchor(
+    toRect,
+    fromBeforeTo ? "left" : "right",
+    anchorGap
+  );
 
   const sameLane = Math.abs(start.y - end.y) <= sameLaneThreshold;
   const hasClearHorizontalGap = fromBeforeTo
     ? start.x < end.x
     : start.x > end.x;
 
-  // If the events line up visually, use one clean rail between them. This avoids
-  // the “both cards fired a laser at each other” look from split half-segments.
+  // If the events line up visually, use one clean rail between the two proper
+  // anchors. No duplicate half-lines, no card-crossing laser.
   if(sameLane && hasClearHorizontalGap){
     return [
       { type:"horizontal", x1:start.x, y1:start.y, x2:end.x, y2:end.y, groupId }
@@ -12386,8 +12399,8 @@ function buildWeekRouteSegments(fromRect, toRect, groupId){
 
   let midX = (start.x + end.x) / 2;
 
-  // Same-column / overlapping-card chains need a side gutter. Keep it outside
-  // the widest card so the vertical run stays in the negative space.
+  // When the two anchors are very close or overlapping, move the vertical run
+  // into the open gutter instead of making the route fold through a pill.
   if(Math.abs(start.x - end.x) < 48 || !hasClearHorizontalGap){
     const gutter = anchorGap + 8;
     midX = fromBeforeTo
@@ -12541,6 +12554,29 @@ function renderWeekConnections(){
   svg.innerHTML = "";
 
   const parentRect = grid.getBoundingClientRect();
+  const layerWidth = Math.max(
+    1,
+    Math.ceil(grid.scrollWidth || 0),
+    Math.ceil(grid.offsetWidth || 0),
+    Math.ceil(parentRect.width || 0)
+  );
+  const layerHeight = Math.max(
+    1,
+    Math.ceil(grid.scrollHeight || 0),
+    Math.ceil(grid.offsetHeight || 0),
+    Math.ceil(parentRect.height || 0)
+  );
+
+  // SVG defaults to a 300x150 internal coordinate system unless we pin it.
+  // Without this, perfectly good pixel coordinates get stretched and can look
+  // like duplicate rails shooting through unrelated cards.
+  svg.setAttribute("viewBox", `0 0 ${layerWidth} ${layerHeight}`);
+  svg.setAttribute("width", String(layerWidth));
+  svg.setAttribute("height", String(layerHeight));
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.style.width = `${layerWidth}px`;
+  svg.style.height = `${layerHeight}px`;
+
   const pills = Array.from(grid.querySelectorAll(".weekEventPill[data-connection-group-id]"));
   const groups = new Map();
 
