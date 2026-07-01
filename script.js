@@ -1294,7 +1294,18 @@ function requestIndexedDbEventRangeHydration(startISO, endISO, opts = {}){
   const end = String(endISO || start || "").trim();
 
   if(!indexedDbSupported() || !start || !end) return;
-  if(indexedDbRangeCacheCoversRange(start, end) && !opts.force) return;
+
+  const sameVisibleRange = !!(
+    indexedDbEventRangeCache.eventsMap &&
+    indexedDbEventRangeCache.startISO === start &&
+    indexedDbEventRangeCache.endISO === end &&
+    (!opts.source || indexedDbEventRangeCache.source === opts.source)
+  );
+
+  // Do not let a broader month cache impersonate the active week/day view.
+  // A covered-but-different range is useful as an immediate fallback during
+  // render, but the active view should still hydrate its exact visible range.
+  if(sameVisibleRange && !opts.force) return;
 
   const requestKey = `${start}__${end}`;
   if(indexedDbEventHydrationRequests.has(requestKey)) return;
@@ -11782,13 +11793,13 @@ for(const item of railLabels){
 
   if(isMobileDayPill){
     selectedEventId = ev._masterId || ev.id;
-    editBaseDateISO = cellISO;
+    editBaseDateISO = dayISO;
     populateFormFromSelected();
     renderEventList();
     return;
   }
 
-  openEventInEditor(ev, cellISO);
+  openEventInEditor(ev, dayISO);
 });
 
 pill.addEventListener("dblclick", (e) => {
@@ -11799,7 +11810,7 @@ pill.addEventListener("dblclick", (e) => {
     viewMode === "day" &&
     pill.closest(".dayViewDay")
   ){
-    openEventInEditor(ev, cellISO);
+    openEventInEditor(ev, dayISO);
   }
 });
 
