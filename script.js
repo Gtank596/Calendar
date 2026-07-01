@@ -12678,11 +12678,16 @@ function chooseHorizontalBridgeDirection(segment, crossX, horizontalSegments = [
   return 1;
 }
 
-function appendHorizontalPathWithBridges(d, segment, verticalSegments, horizontalSegments = [], isFirst = false){
+function appendHorizontalPathWithBridges(d, segment, verticalSegments, horizontalSegments = [], opts = {}){
   const bridgeRadius = isMobileViewport() ? 6 : 7;
   const anchorY = Number(segment.y1 || segment.y2 || 0);
   const visualY = getHorizontalBridgeY(segment);
   const dir = segment.x2 >= segment.x1 ? 1 : -1;
+  const isFirst = !!opts.isFirst;
+  const joinStartAtVisualY = !!opts.joinStartAtVisualY;
+  const joinEndAtVisualY = !!opts.joinEndAtVisualY;
+  const startY = joinStartAtVisualY ? visualY : anchorY;
+  const endY = joinEndAtVisualY ? visualY : anchorY;
 
   const bridgeSegment = {
     ...segment,
@@ -12697,10 +12702,10 @@ function appendHorizontalPathWithBridges(d, segment, verticalSegments, horizonta
   );
 
   d += isFirst
-    ? `M ${segment.x1.toFixed(1)} ${anchorY.toFixed(1)}`
-    : ` L ${segment.x1.toFixed(1)} ${anchorY.toFixed(1)}`;
+    ? `M ${segment.x1.toFixed(1)} ${startY.toFixed(1)}`
+    : ` L ${segment.x1.toFixed(1)} ${startY.toFixed(1)}`;
 
-  if(Math.abs(visualY - anchorY) > 0.5){
+  if(!joinStartAtVisualY && Math.abs(visualY - anchorY) > 0.5){
     d += ` L ${segment.x1.toFixed(1)} ${visualY.toFixed(1)}`;
   }
 
@@ -12716,8 +12721,8 @@ function appendHorizontalPathWithBridges(d, segment, verticalSegments, horizonta
 
   d += ` L ${segment.x2.toFixed(1)} ${visualY.toFixed(1)}`;
 
-  if(Math.abs(visualY - anchorY) > 0.5){
-    d += ` L ${segment.x2.toFixed(1)} ${anchorY.toFixed(1)}`;
+  if(!joinEndAtVisualY && Math.abs(visualY - endY) > 0.5){
+    d += ` L ${segment.x2.toFixed(1)} ${endY.toFixed(1)}`;
   }
 
   return d;
@@ -12728,15 +12733,34 @@ function buildPathForWeekRoute(segments, verticalSegments, horizontalSegments = 
   if(!list.length) return "";
 
   return list.reduce((d, segment, index) => {
+    const prev = list[index - 1];
+    const next = list[index + 1];
+
     if(segment.type === "horizontal"){
-      return appendHorizontalPathWithBridges(d, segment, verticalSegments, horizontalSegments, index === 0);
+      return appendHorizontalPathWithBridges(d, segment, verticalSegments, horizontalSegments, {
+        isFirst: index === 0,
+        // When a y-laned horizontal rail joins a vertical turn, keep that
+        // internal joint on the rail's visual lane. Otherwise two different
+        // colors that merely touch endpoint-to-endpoint both return to the
+        // original y first, creating the little red/purple knot in the gutter.
+        joinStartAtVisualY: prev?.type === "vertical",
+        joinEndAtVisualY: next?.type === "vertical"
+      });
     }
 
-    d += index === 0
-      ? `M ${segment.x1.toFixed(1)} ${segment.y1.toFixed(1)}`
-      : ` L ${segment.x1.toFixed(1)} ${segment.y1.toFixed(1)}`;
+    const startY = prev?.type === "horizontal"
+      ? getHorizontalBridgeY(prev)
+      : Number(segment.y1 || 0);
 
-    d += ` L ${segment.x2.toFixed(1)} ${segment.y2.toFixed(1)}`;
+    const endY = next?.type === "horizontal"
+      ? getHorizontalBridgeY(next)
+      : Number(segment.y2 || 0);
+
+    d += index === 0
+      ? `M ${segment.x1.toFixed(1)} ${startY.toFixed(1)}`
+      : ` L ${segment.x1.toFixed(1)} ${startY.toFixed(1)}`;
+
+    d += ` L ${segment.x2.toFixed(1)} ${endY.toFixed(1)}`;
     return d;
   }, "");
 }
@@ -13019,7 +13043,7 @@ function assignWeekHorizontalConnectorLanes(routes = []){
   const minUsefulOverlap = isMobileViewport() ? 7 : 9;
   const touchGap = isMobileViewport() ? 11 : 13;
   const laneLimit = 3;
-  const laneSpacing = isMobileViewport() ? 7 : 8;
+  const laneSpacing = isMobileViewport() ? 8 : 10;
 
   const clusters = [];
   const sorted = [...horizontals].sort((a, b) => a.y - b.y || a.xMin - b.xMin);
