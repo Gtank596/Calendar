@@ -744,7 +744,7 @@ const DATA_SLICE_LABELS = {
 // IndexedDB becomes the roomy offline landscape. localStorage stays as a tiny
 // boot/cache + legacy safety net for this sweep so old data is not endangered.
 const CALENDAR_IDB_NAME = "myCalendarOfflineDB";
-const CALENDAR_IDB_VERSION = 1;
+const CALENDAR_IDB_VERSION = 2;
 
 const CALENDAR_IDB_STORES = [
   "slices",
@@ -796,23 +796,41 @@ function openCalendarIndexedDb(){
 
     req.onupgradeneeded = () => {
       const db = req.result;
+      const upgradeTx = req.transaction;
+
+      const ensureIndex = (store, name, keyPath, options = { unique:false }) => {
+        if(store && !store.indexNames.contains(name)){
+          store.createIndex(name, keyPath, options);
+        }
+      };
 
       if(!db.objectStoreNames.contains("slices")){
         db.createObjectStore("slices", { keyPath: "slice" });
       }
 
+      let eventsStore;
       if(!db.objectStoreNames.contains("events")){
-        const store = db.createObjectStore("events", { keyPath: "id" });
-        store.createIndex("dateISO", "dateISO", { unique:false });
-        store.createIndex("updatedAt", "updatedAt", { unique:false });
+        eventsStore = db.createObjectStore("events", { keyPath: "id" });
+      }else{
+        eventsStore = upgradeTx.objectStore("events");
       }
+      ensureIndex(eventsStore, "dateISO", "dateISO");
+      ensureIndex(eventsStore, "updatedAt", "updatedAt");
+      ensureIndex(eventsStore, "categoryId", "categoryId");
+      ensureIndex(eventsStore, "source", "source");
+      ensureIndex(eventsStore, "startDate", "startDate");
+      ensureIndex(eventsStore, "dateCategory", "dateCategory");
 
+      let budgetTransactionStore;
       if(!db.objectStoreNames.contains("budgetTransactions")){
-        const store = db.createObjectStore("budgetTransactions", { keyPath: "id" });
-        store.createIndex("dateISO", "dateISO", { unique:false });
-        store.createIndex("categoryId", "categoryId", { unique:false });
-        store.createIndex("updatedAt", "updatedAt", { unique:false });
+        budgetTransactionStore = db.createObjectStore("budgetTransactions", { keyPath: "id" });
+      }else{
+        budgetTransactionStore = upgradeTx.objectStore("budgetTransactions");
       }
+      ensureIndex(budgetTransactionStore, "dateISO", "dateISO");
+      ensureIndex(budgetTransactionStore, "categoryId", "categoryId");
+      ensureIndex(budgetTransactionStore, "updatedAt", "updatedAt");
+      ensureIndex(budgetTransactionStore, "source", "source");
 
       if(!db.objectStoreNames.contains("budgetCategories")){
         db.createObjectStore("budgetCategories", { keyPath: "id" });
@@ -905,29 +923,241 @@ function eventsMapToIndexedDbRecords(eventsMap = {}, updatedAt = Date.now()){
         ...event,
         id,
         dateISO,
+        startDate: event.startDate || dateISO,
+        categoryId: event.categoryId || "other",
+        source: event.source || "calendar",
+        dateCategory: `${dateISO}::${event.categoryId || "other"}`,
         updatedAt
       };
 
       records.push(record);
 
-      const price = Number(event.price);
-      if(Number.isFinite(price) && price !== 0){
-        transactions.push({
-          id: `event:${id}`,
-          eventId: id,
-          dateISO,
-          title: event.title || "Untitled",
-          amount: price,
-          type: price < 0 ? "income" : "expense",
-          categoryId: event.categoryId || "other",
-          source: event.source || "calendar",
-          updatedAt
-        });
+      const transaction = budgetTransactionFromEventRecord(record);
+      if(transaction){
+        transactions.push(transaction);
       }
     });
   }
 
   return { events: records, budgetTransactions: transactions };
+}
+
+function budgetTransactionFromEventRecord(record = {}){
+  const price = Number(record.price);
+
+  if(!record?.id || !Number.isFinite(price) || price === 0){
+    return null;
+  }
+
+  return {
+    id: `event:${record.id}`,
+    eventId: record.id,
+    dateISO: record.dateISO || record.startDate || "",
+    title: record.title || "Untitled",
+    amount: price,
+    type: price < 0 ? "income" : "expense",
+    categoryId: record.categoryId || "other",
+    source: record.source || "calendar",
+    updatedAt: Number(record.updatedAt || Date.now())
+  };
+}
+
+function normalizeEventRecordForIndexedDb(event = {}, dateISO = "", updatedAt = Date.now()){
+  const safeDateISO = String(
+    dateISO ||
+    event?.dateISO ||
+    event?.startDate ||
+    selectedDateISO ||
+    ""
+  ).trim();
+
+  const normalized = toEvent({
+    ...(event || {}),
+    id: normalizeIndexedDbRecordId(event?.id, `${safeDateISO}:${Date.now()}`),
+    startDate: event?.startDate || safeDateISO
+  });
+
+  return {
+    ...normalized,
+    id: normalizeIndexedDbRecordId(normalized.id, `${safeDateISO}:${Date.now()}`),
+    dateISO: safeDateISO,
+    startDate: normalized.startDate || safeDateISO,
+    categoryId: normalized.categoryId || "other",
+    source: normalized.source || "calendar",
+    dateCategory: `${safeDateISO}::${normalized.categoryId || "other"}`,
+    updatedAt: Number(updatedAt || Date.now())
+  };
+}
+
+function eventRecordToLegacyEvent(record = {}){
+  const event = { ...(record || {}) };
+  delete event.dateISO;
+  delete event.dateCategory;
+  delete event.updatedAt;
+  return toEvent(event);
+}
+
+async function putIndexedDbEventRecordNow(event = {}, dateISO = "", updatedAt = Date.now()){
+  const db = await openCalendarIndexedDb();
+  if(!db) return null;
+
+  const record = normalizeEventRecordForIndexedDb(event, dateISO, updatedAt);
+  const tx = db.transaction(["events", "budgetTransactions"], "readwrite");
+  const eventStore = tx.objectStore("events");
+  const transactionStore = tx.objectStore("budgetTransactions");
+
+  eventStore.put(record);
+
+  const transaction = budgetTransactionFromEventRecord(record);
+  if(transaction){
+    transactionStore.put(transaction);
+  }else{
+    transactionStore.delete(`event:${record.id}`);
+  }
+
+  await idbTransactionDone(tx);
+  return record;
+}
+
+async function deleteIndexedDbEventRecordNow(eventId){
+  const safeId = String(eventId || "").trim();
+  if(!safeId) return;
+
+  const db = await openCalendarIndexedDb();
+  if(!db) return;
+
+  const tx = db.transaction(["events", "budgetTransactions"], "readwrite");
+  tx.objectStore("events").delete(safeId);
+  tx.objectStore("budgetTransactions").delete(`event:${safeId}`);
+  await idbTransactionDone(tx);
+}
+
+async function applyIndexedDbEventRecordOpsNow(ops = []){
+  const safeOps = (Array.isArray(ops) ? ops : [ops])
+    .filter(op => op && op.slice === "events" && op.store === "events");
+
+  if(!safeOps.length || !indexedDbSupported()) return [];
+
+  const db = await openCalendarIndexedDb();
+  if(!db) return [];
+
+  const tx = db.transaction(["events", "budgetTransactions"], "readwrite");
+  const eventStore = tx.objectStore("events");
+  const transactionStore = tx.objectStore("budgetTransactions");
+  const applied = [];
+
+  for(const op of safeOps){
+    const recordId = String(op.recordId || op.data?.id || "").trim();
+
+    if(op.deleted){
+      if(recordId){
+        eventStore.delete(recordId);
+        transactionStore.delete(`event:${recordId}`);
+        applied.push(op);
+      }
+      continue;
+    }
+
+    if(!op.data) continue;
+
+    const record = normalizeEventRecordForIndexedDb(
+      op.data,
+      op.data.dateISO || op.data.startDate || selectedDateISO || "",
+      op.updatedAt
+    );
+
+    eventStore.put(record);
+
+    const transaction = budgetTransactionFromEventRecord(record);
+    if(transaction){
+      transactionStore.put(transaction);
+    }else{
+      transactionStore.delete(`event:${record.id}`);
+    }
+
+    applied.push({ ...op, recordId: record.id });
+  }
+
+  await idbTransactionDone(tx);
+  return applied;
+}
+
+function applyIndexedDbEventRecordOpsDebounced(ops = []){
+  const safeOps = (Array.isArray(ops) ? ops : [ops]).filter(Boolean);
+  if(!safeOps.length || !indexedDbSupported()) return;
+
+  applyIndexedDbEventRecordOpsNow(safeOps).catch(err => {
+    console.warn("Could not apply targeted event records to IndexedDB; full slice fallback remains available.", err);
+  });
+}
+
+async function getIndexedDbEventsForDay(dateISO = selectedDateISO){
+  const dayISO = String(dateISO || "").trim();
+  if(!dayISO) return [];
+
+  const db = await openCalendarIndexedDb();
+  if(!db) return [];
+
+  const tx = db.transaction("events", "readonly");
+  const rows = await idbRequestToPromise(
+    tx.objectStore("events").index("dateISO").getAll(dayISO)
+  );
+  await idbTransactionDone(tx).catch(() => {});
+
+  return (rows || [])
+    .map(eventRecordToLegacyEvent)
+    .sort((a, b) => String(a.startTime || "").localeCompare(String(b.startTime || "")));
+}
+
+async function getIndexedDbEventsForRange(startISO, endISO){
+  const start = String(startISO || "").trim();
+  const end = String(endISO || start || "").trim();
+  if(!start || !end || typeof IDBKeyRange === "undefined") return {};
+
+  const db = await openCalendarIndexedDb();
+  if(!db) return {};
+
+  const tx = db.transaction("events", "readonly");
+  const range = IDBKeyRange.bound(start, end);
+  const rows = await idbRequestToPromise(
+    tx.objectStore("events").index("dateISO").getAll(range)
+  );
+  await idbTransactionDone(tx).catch(() => {});
+
+  const map = {};
+
+  for(const row of rows || []){
+    const dayISO = row?.dateISO || row?.startDate;
+    if(!dayISO) continue;
+    (map[dayISO] ||= []).push(eventRecordToLegacyEvent(row));
+  }
+
+  for(const dayISO of Object.keys(map)){
+    map[dayISO].sort((a, b) => String(a.startTime || "").localeCompare(String(b.startTime || "")));
+  }
+
+  return normalizeEventsMap(map);
+}
+
+async function countIndexedDbStoreRecords(){
+  const db = await openCalendarIndexedDb();
+  if(!db) return {};
+
+  const counts = {};
+
+  for(const storeName of CALENDAR_IDB_STORES){
+    if(!db.objectStoreNames.contains(storeName)) continue;
+
+    try{
+      const tx = db.transaction(storeName, "readonly");
+      counts[storeName] = await idbRequestToPromise(tx.objectStore(storeName).count());
+      await idbTransactionDone(tx).catch(() => {});
+    }catch{
+      counts[storeName] = null;
+    }
+  }
+
+  return counts;
 }
 
 function budgetPlansToIndexedDbRecords(plans = {}, updatedAt = Date.now()){
@@ -1274,6 +1504,7 @@ async function getCalendarStorageDebugSummary(){
             : 0
         ]))
       : {},
+    indexedDbRecordCounts: indexedDbSupported() ? await countIndexedDbStoreRecords() : {},
     indexedDbUpdatedAt: idbPayload?.updatedAt || 0,
     queuedCloudRows: await countQueuedCloudRecordOps()
   };
@@ -1281,6 +1512,8 @@ async function getCalendarStorageDebugSummary(){
 
 if(typeof window !== "undefined"){
   window.calendarStorageDebug = getCalendarStorageDebugSummary;
+  window.calendarIndexedDbEventsForDay = getIndexedDbEventsForDay;
+  window.calendarIndexedDbEventsForRange = getIndexedDbEventsForRange;
 }
 
 function hasOwn(obj, key){
@@ -1397,7 +1630,7 @@ function readLocalDataSlice(slice, legacyPayload = {}){
   return null;
 }
 
-function writeLocalDataSlice(slice, value){
+function writeLocalDataSlice(slice, value, opts = {}){
   if(value === undefined) return;
 
   const updatedAt = Date.now();
@@ -1420,7 +1653,10 @@ function writeLocalDataSlice(slice, value){
   if(!key) return;
 
   localStorage.setItem(key, JSON.stringify(value));
-  writeIndexedDbSliceDebounced(slice, value, updatedAt);
+
+  if(!(slice === "events" && opts.skipIndexedDbSliceWrite)){
+    writeIndexedDbSliceDebounced(slice, value, updatedAt);
+  }
 }
 
 function getSliceUpdatedAt(payload = {}, slice){
@@ -2924,7 +3160,7 @@ function setLocalPayload(payload, opts = {}){
   const updatedAt = Number(payload.updatedAt || Date.now());
 
   for(const slice of changedSlices){
-    writeLocalDataSlice(slice, safe[slice]);
+    writeLocalDataSlice(slice, safe[slice], opts);
   }
 
   saveLocalMeta(updatedAt, changedSlices);
@@ -9967,9 +10203,16 @@ function saveEvents(previousEventsSnapshot = null, opts = {}){
     ? opts.cloudOps.filter(Boolean)
     : [];
 
+  if(targetedOps.length){
+    applyIndexedDbEventRecordOpsDebounced(targetedOps);
+  }
+
   setLocalPayload(
     { updatedAt, events },
-    { skipCloudPending: targetedOps.length > 0 || !!opts.skipCloudPending }
+    {
+      skipCloudPending: targetedOps.length > 0 || !!opts.skipCloudPending,
+      skipIndexedDbSliceWrite: targetedOps.length > 0
+    }
   );
 
   if(targetedOps.length){
