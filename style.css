@@ -6357,12 +6357,23 @@ body{
 .weekViewGrid .weekEventPill{
   position:relative;
   z-index:5;
+
+  /* Week cards reserve the same two-line footprint whether a time is
+     present or not. Otherwise one timed neighbor can shove a connected
+     pill lower and make the wire look misaligned. */
+  min-height:31px;
+
   transition:
     opacity .18s ease,
     transform .18s ease,
     border-color .18s ease,
     box-shadow .18s ease,
     filter .18s ease;
+}
+
+body[data-calendar-view="week"] #calendarPage .weekEventPill .pillTime{
+  display:block;
+  min-height:11px;
 }
 
 .weekViewGrid .connectedEventPill{
@@ -6598,7 +6609,7 @@ body[data-calendar-view="week"] #calendarPage .dow > div{
   body[data-calendar-view="week"] #calendarPage .day.weekViewDay .eventPill{
     display:block !important;
     height:auto !important;
-    min-height:28px !important;
+    min-height:31px !important;
     margin-top:6px !important;
     padding:6px 7px 6px 10px !important;
     border-radius:12px !important;
@@ -6611,8 +6622,10 @@ body[data-calendar-view="week"] #calendarPage .dow > div{
 
   body[data-calendar-view="week"] #calendarPage .day.weekViewDay .pillTime{
     display:block !important;
+    min-height:10px !important;
     margin-top:2px !important;
     font-size:9.5px !important;
+    line-height:1.05 !important;
     color:rgba(233,236,255,.58) !important;
   }
 
