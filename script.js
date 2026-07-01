@@ -12487,31 +12487,62 @@ function buildWeekRouteSegments(fromRect, toRect, groupId){
 }
 
 function doesHorizontalCrossVertical(h, v){
-  if(!h || !v || h.groupId === v.groupId) return false;
+  if(!h || !v) return false;
 
   const hMinX = Math.min(h.x1, h.x2);
   const hMaxX = Math.max(h.x1, h.x2);
   const vMinY = Math.min(v.y1, v.y2);
   const vMaxY = Math.max(v.y1, v.y2);
+  const vx = Number(v.x1 ?? v.x2 ?? 0);
+  const hy = Number(h.y1 ?? h.y2 ?? 0);
   const buffer = 8;
 
+  // Do not skip same-group wires here. A chain can have multiple route legs,
+  // and a same-color vertical from one leg can still pass through the middle
+  // of a horizontal rail from another leg. Only endpoint touches are ignored
+  // by the buffer below, so real elbows still connect normally.
   return (
-    v.x1 > hMinX + buffer &&
-    v.x1 < hMaxX - buffer &&
-    h.y1 > vMinY + buffer &&
-    h.y1 < vMaxY - buffer
+    vx > hMinX + buffer &&
+    vx < hMaxX - buffer &&
+    hy > vMinY + buffer &&
+    hy < vMaxY - buffer
   );
+}
+
+function getHorizontalVerticalBridgeCrossings(segment, verticalSegments = [], dir = 1){
+  const bridgeRadius = isMobileViewport() ? 6 : 7;
+  const clusterGap = bridgeRadius + (isMobileViewport() ? 3 : 4);
+
+  const raw = (verticalSegments || [])
+    .filter(v => doesHorizontalCrossVertical(segment, v))
+    .map(v => Number(v.x1 ?? v.x2 ?? 0))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+
+  const clusters = [];
+
+  for(const x of raw){
+    const last = clusters[clusters.length - 1];
+
+    if(!last || Math.abs(x - last.center) > clusterGap){
+      clusters.push({ center:x, xs:[x] });
+      continue;
+    }
+
+    last.xs.push(x);
+    last.center = last.xs.reduce((sum, value) => sum + value, 0) / last.xs.length;
+  }
+
+  return clusters
+    .map(cluster => cluster.center)
+    .sort((a, b) => dir > 0 ? a - b : b - a);
 }
 
 function buildHorizontalPathWithBridges(segment, verticalSegments){
   const bridgeRadius = isMobileViewport() ? 6 : 7;
   const y = segment.y1;
   const dir = segment.x2 >= segment.x1 ? 1 : -1;
-
-  const crossings = verticalSegments
-    .filter(v => doesHorizontalCrossVertical(segment, v))
-    .map(v => v.x1)
-    .sort((a, b) => dir > 0 ? a - b : b - a);
+  const crossings = getHorizontalVerticalBridgeCrossings(segment, verticalSegments, dir);
 
   let d = `M ${segment.x1.toFixed(1)} ${y.toFixed(1)}`;
 
@@ -12520,7 +12551,7 @@ function buildHorizontalPathWithBridges(segment, verticalSegments){
     const afterX = crossX + (bridgeRadius * dir);
 
     d += ` L ${beforeX.toFixed(1)} ${y.toFixed(1)}`;
-    d += ` Q ${crossX.toFixed(1)} ${(y - bridgeRadius).toFixed(1)} ${afterX.toFixed(1)} ${y.toFixed(1)}`;
+    d += ` Q ${crossX.toFixed(1)} ${(y + bridgeRadius).toFixed(1)} ${afterX.toFixed(1)} ${y.toFixed(1)}`;
   }
 
   d += ` L ${segment.x2.toFixed(1)} ${y.toFixed(1)}`;
@@ -12641,7 +12672,10 @@ function chooseHorizontalBridgeDirection(segment, crossX, horizontalSegments = [
   if(blockedBelow && !blockedAbove) return -1;
   if(blockedAbove && blockedBelow) return nearestAbove <= nearestBelow ? 1 : -1;
 
-  return -1;
+  // A clean bridge now defaults downward. The top side of a rail is usually
+  // where pill ports and neighboring rails visually merge, which is exactly
+  // the little goblin shown in the screenshot.
+  return 1;
 }
 
 function appendHorizontalPathWithBridges(d, segment, verticalSegments, horizontalSegments = [], isFirst = false){
@@ -12656,10 +12690,11 @@ function appendHorizontalPathWithBridges(d, segment, verticalSegments, horizonta
     y2: visualY
   };
 
-  const crossings = verticalSegments
-    .filter(v => doesHorizontalCrossVertical(bridgeSegment, v))
-    .map(v => v.x1)
-    .sort((a, b) => dir > 0 ? a - b : b - a);
+  const crossings = getHorizontalVerticalBridgeCrossings(
+    bridgeSegment,
+    verticalSegments,
+    dir
+  );
 
   d += isFirst
     ? `M ${segment.x1.toFixed(1)} ${anchorY.toFixed(1)}`
