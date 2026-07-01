@@ -12529,27 +12529,45 @@ function buildHorizontalPathWithBridges(segment, verticalSegments){
 
 function appendHorizontalPathWithBridges(d, segment, verticalSegments, isFirst = false){
   const bridgeRadius = isMobileViewport() ? 6 : 7;
-  const y = segment.y1;
+  const anchorY = Number(segment.y1 || segment.y2 || 0);
+  const visualY = Number.isFinite(Number(segment.visualY))
+    ? Number(segment.visualY)
+    : anchorY;
   const dir = segment.x2 >= segment.x1 ? 1 : -1;
 
+  const bridgeSegment = {
+    ...segment,
+    y1: visualY,
+    y2: visualY
+  };
+
   const crossings = verticalSegments
-    .filter(v => doesHorizontalCrossVertical(segment, v))
+    .filter(v => doesHorizontalCrossVertical(bridgeSegment, v))
     .map(v => v.x1)
     .sort((a, b) => dir > 0 ? a - b : b - a);
 
   d += isFirst
-    ? `M ${segment.x1.toFixed(1)} ${y.toFixed(1)}`
-    : ` L ${segment.x1.toFixed(1)} ${y.toFixed(1)}`;
+    ? `M ${segment.x1.toFixed(1)} ${anchorY.toFixed(1)}`
+    : ` L ${segment.x1.toFixed(1)} ${anchorY.toFixed(1)}`;
+
+  if(Math.abs(visualY - anchorY) > 0.5){
+    d += ` L ${segment.x1.toFixed(1)} ${visualY.toFixed(1)}`;
+  }
 
   for(const crossX of crossings){
     const beforeX = crossX - (bridgeRadius * dir);
     const afterX = crossX + (bridgeRadius * dir);
 
-    d += ` L ${beforeX.toFixed(1)} ${y.toFixed(1)}`;
-    d += ` Q ${crossX.toFixed(1)} ${(y - bridgeRadius).toFixed(1)} ${afterX.toFixed(1)} ${y.toFixed(1)}`;
+    d += ` L ${beforeX.toFixed(1)} ${visualY.toFixed(1)}`;
+    d += ` Q ${crossX.toFixed(1)} ${(visualY - bridgeRadius).toFixed(1)} ${afterX.toFixed(1)} ${visualY.toFixed(1)}`;
   }
 
-  d += ` L ${segment.x2.toFixed(1)} ${y.toFixed(1)}`;
+  d += ` L ${segment.x2.toFixed(1)} ${visualY.toFixed(1)}`;
+
+  if(Math.abs(visualY - anchorY) > 0.5){
+    d += ` L ${segment.x2.toFixed(1)} ${anchorY.toFixed(1)}`;
+  }
+
   return d;
 }
 
@@ -12755,6 +12773,124 @@ function assignWeekVerticalConnectorLanes(routes = []){
   }
 }
 
+function horizontalRangesOverlap(a, b, buffer = 0){
+  const aMin = Math.min(Number(a.x1 || 0), Number(a.x2 || 0));
+  const aMax = Math.max(Number(a.x1 || 0), Number(a.x2 || 0));
+  const bMin = Math.min(Number(b.x1 || 0), Number(b.x2 || 0));
+  const bMax = Math.max(Number(b.x1 || 0), Number(b.x2 || 0));
+
+  return Math.max(aMin, bMin) <= Math.min(aMax, bMax) + buffer;
+}
+
+function horizontalOverlapWidth(a, b){
+  const aMin = Math.min(Number(a.x1 || 0), Number(a.x2 || 0));
+  const aMax = Math.max(Number(a.x1 || 0), Number(a.x2 || 0));
+  const bMin = Math.min(Number(b.x1 || 0), Number(b.x2 || 0));
+  const bMax = Math.max(Number(b.x1 || 0), Number(b.x2 || 0));
+
+  return Math.max(0, Math.min(aMax, bMax) - Math.max(aMin, bMin));
+}
+
+function assignWeekHorizontalConnectorLanes(routes = []){
+  const horizontals = [];
+
+  for(const route of routes || []){
+    for(const segment of route?.segments || []){
+      if(segment?.type !== "horizontal") continue;
+
+      const y = Number(segment.y1 || segment.y2 || 0);
+      const xMin = Math.min(Number(segment.x1 || 0), Number(segment.x2 || 0));
+      const xMax = Math.max(Number(segment.x1 || 0), Number(segment.x2 || 0));
+
+      if(!Number.isFinite(y) || !Number.isFinite(xMin) || !Number.isFinite(xMax)) continue;
+      if(Math.abs(xMax - xMin) < 8) continue;
+
+      segment.visualY = undefined;
+
+      horizontals.push({
+        route,
+        segment,
+        y,
+        xMin,
+        xMax,
+        groupId: String(segment.groupId || route?.group?.id || ""),
+        lane:0
+      });
+    }
+  }
+
+  if(horizontals.length < 2) return;
+
+  // Vertical lanes already get separated in the gutter. This handles the
+  // matching horizontal rails: when two chains sit on nearly the same row and
+  // their horizontal runs overlap, give those rails tiny y-lanes too. The line
+  // still touches the card port; the path builder adds a miniature elbow up or
+  // down to the visual lane and returns to the real anchor at the other end.
+  const yClusterDistance = isMobileViewport() ? 7 : 8;
+  const overlapBuffer = isMobileViewport() ? -2 : 0;
+  const minUsefulOverlap = isMobileViewport() ? 7 : 9;
+  const laneLimit = 3;
+  const laneSpacing = isMobileViewport() ? 3 : 4;
+
+  const clusters = [];
+  const sorted = [...horizontals].sort((a, b) => a.y - b.y || a.xMin - b.xMin);
+
+  for(const item of sorted){
+    let match = null;
+
+    for(const cluster of clusters){
+      const closeY = Math.abs(item.y - cluster.centerY) <= yClusterDistance;
+      const overlapsExisting = cluster.items.some(existing =>
+        horizontalRangesOverlap(item.segment, existing.segment, overlapBuffer) &&
+        horizontalOverlapWidth(item.segment, existing.segment) >= minUsefulOverlap
+      );
+
+      if(closeY && overlapsExisting){
+        match = cluster;
+        break;
+      }
+    }
+
+    if(!match){
+      clusters.push({ centerY:item.y, items:[item] });
+      continue;
+    }
+
+    match.items.push(item);
+    match.centerY = match.items.reduce((sum, x) => sum + x.y, 0) / match.items.length;
+  }
+
+  for(const cluster of clusters){
+    const groupOrder = Array.from(new Set(
+      cluster.items
+        .slice()
+        .sort((a, b) => a.xMin - b.xMin || a.y - b.y || a.groupId.localeCompare(b.groupId))
+        .map(item => item.groupId || `route-${cluster.items.indexOf(item)}`)
+    ));
+
+    if(groupOrder.length < 2) continue;
+
+    const laneCount = Math.min(laneLimit, groupOrder.length);
+    const laneForGroup = new Map();
+
+    groupOrder.forEach((groupId, index) => {
+      laneForGroup.set(groupId, index % laneLimit);
+    });
+
+    const centerLane = (laneCount - 1) / 2;
+
+    for(const item of cluster.items){
+      const rawLane = laneForGroup.get(item.groupId) ?? 0;
+      const lane = Math.min(rawLane, laneCount - 1);
+      const offset = (lane - centerLane) * laneSpacing;
+
+      if(Math.abs(offset) < 0.5) continue;
+
+      item.segment.visualY = item.y + offset;
+    }
+  }
+}
+
 function getWeekRouteItemsForGroup(items = []){
   const sorted = [...(items || [])].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
 
@@ -12868,6 +13004,7 @@ function renderWeekConnections(){
   }
 
   assignWeekVerticalConnectorLanes(allRoutes);
+  assignWeekHorizontalConnectorLanes(allRoutes);
 
   const visibleVerticalSegments = allRoutes.flatMap(route =>
     (route.segments || []).filter(seg => seg.type === "vertical")
