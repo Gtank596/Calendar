@@ -12399,9 +12399,11 @@ function buildWeekRouteSegments(fromRect, toRect, groupId){
 
   let midX = (start.x + end.x) / 2;
 
-  // When the two anchors are very close or overlapping, move the vertical run
-  // into the open gutter instead of making the route fold through a pill.
-  if(Math.abs(start.x - end.x) < 48 || !hasClearHorizontalGap){
+  // If the two cards are in neighboring days, their proper anchors can be
+  // very close together. That is good: the vertical turn belongs in the tiny
+  // gutter between the days, not around the outside of the target card. Only
+  // use the outside escape lane when the anchors have crossed/overlapped.
+  if(!hasClearHorizontalGap){
     const gutter = anchorGap + 8;
     midX = fromBeforeTo
       ? Math.max(fromRect.right, toRect.right) + gutter
