@@ -12493,12 +12493,7 @@ function doesHorizontalCrossVertical(h, v){
   const hMaxX = Math.max(h.x1, h.x2);
   const vMinY = Math.min(v.y1, v.y2);
   const vMaxY = Math.max(v.y1, v.y2);
-
-  // The gutter lanes are intentionally tight. The old 8px endpoint buffer made
-  // nearby crossings look like stacked/overlapped lines instead of drawing a
-  // small bridge. Keep only a tiny safety buffer so parallel bus lanes can
-  // visibly hop over each other in the narrow week-view gutter.
-  const buffer = isMobileViewport() ? 1.5 : 2;
+  const buffer = 8;
 
   return (
     v.x1 > hMinX + buffer &&
@@ -12509,7 +12504,7 @@ function doesHorizontalCrossVertical(h, v){
 }
 
 function buildHorizontalPathWithBridges(segment, verticalSegments){
-  const bridgeRadius = isMobileViewport() ? 4 : 5;
+  const bridgeRadius = isMobileViewport() ? 6 : 7;
   const y = segment.y1;
   const dir = segment.x2 >= segment.x1 ? 1 : -1;
 
@@ -12532,12 +12527,62 @@ function buildHorizontalPathWithBridges(segment, verticalSegments){
   return d;
 }
 
-function appendHorizontalPathWithBridges(d, segment, verticalSegments, isFirst = false){
-  const bridgeRadius = isMobileViewport() ? 4 : 5;
+function getHorizontalBridgeY(segment = {}){
   const anchorY = Number(segment.y1 || segment.y2 || 0);
   const visualY = Number.isFinite(Number(segment.visualY))
     ? Number(segment.visualY)
     : anchorY;
+
+  return visualY;
+}
+
+function horizontalSegmentCoversBridgeX(segment = {}, x = 0, padding = 0){
+  const xMin = Math.min(Number(segment.x1 || 0), Number(segment.x2 || 0)) - padding;
+  const xMax = Math.max(Number(segment.x1 || 0), Number(segment.x2 || 0)) + padding;
+
+  return Number.isFinite(xMin) && Number.isFinite(xMax) && x >= xMin && x <= xMax;
+}
+
+function chooseHorizontalBridgeDirection(segment, crossX, horizontalSegments = []){
+  const bridgeRadius = isMobileViewport() ? 6 : 7;
+  const y = getHorizontalBridgeY(segment);
+  const xPadding = bridgeRadius + 5;
+  const yClearance = bridgeRadius + 5;
+
+  let nearestAbove = Infinity;
+  let nearestBelow = Infinity;
+
+  for(const other of horizontalSegments || []){
+    if(!other || other === segment || other.type !== "horizontal") continue;
+    if(!horizontalSegmentCoversBridgeX(other, crossX, xPadding)) continue;
+
+    const otherY = getHorizontalBridgeY(other);
+    if(!Number.isFinite(otherY) || Math.abs(otherY - y) < 0.75) continue;
+
+    const distance = Math.abs(otherY - y);
+    if(distance > yClearance) continue;
+
+    if(otherY < y) nearestAbove = Math.min(nearestAbove, distance);
+    else nearestBelow = Math.min(nearestBelow, distance);
+  }
+
+  const blockedAbove = Number.isFinite(nearestAbove);
+  const blockedBelow = Number.isFinite(nearestBelow);
+
+  // Bridges used to always arc upward. When a nearby rail already lives above
+  // this one, flip the bridge downward so the little overpass does not crash
+  // into the horizontal line above it. Tiny miniature railroad switch.
+  if(blockedAbove && !blockedBelow) return 1;
+  if(blockedBelow && !blockedAbove) return -1;
+  if(blockedAbove && blockedBelow) return nearestAbove <= nearestBelow ? 1 : -1;
+
+  return -1;
+}
+
+function appendHorizontalPathWithBridges(d, segment, verticalSegments, horizontalSegments = [], isFirst = false){
+  const bridgeRadius = isMobileViewport() ? 6 : 7;
+  const anchorY = Number(segment.y1 || segment.y2 || 0);
+  const visualY = getHorizontalBridgeY(segment);
   const dir = segment.x2 >= segment.x1 ? 1 : -1;
 
   const bridgeSegment = {
@@ -12562,9 +12607,11 @@ function appendHorizontalPathWithBridges(d, segment, verticalSegments, isFirst =
   for(const crossX of crossings){
     const beforeX = crossX - (bridgeRadius * dir);
     const afterX = crossX + (bridgeRadius * dir);
+    const bridgeDirection = chooseHorizontalBridgeDirection(bridgeSegment, crossX, horizontalSegments);
+    const bridgeY = visualY + (bridgeRadius * bridgeDirection);
 
     d += ` L ${beforeX.toFixed(1)} ${visualY.toFixed(1)}`;
-    d += ` Q ${crossX.toFixed(1)} ${(visualY - bridgeRadius).toFixed(1)} ${afterX.toFixed(1)} ${visualY.toFixed(1)}`;
+    d += ` Q ${crossX.toFixed(1)} ${bridgeY.toFixed(1)} ${afterX.toFixed(1)} ${visualY.toFixed(1)}`;
   }
 
   d += ` L ${segment.x2.toFixed(1)} ${visualY.toFixed(1)}`;
@@ -12576,13 +12623,13 @@ function appendHorizontalPathWithBridges(d, segment, verticalSegments, isFirst =
   return d;
 }
 
-function buildPathForWeekRoute(segments, verticalSegments){
+function buildPathForWeekRoute(segments, verticalSegments, horizontalSegments = []){
   const list = Array.isArray(segments) ? segments.filter(Boolean) : [];
   if(!list.length) return "";
 
   return list.reduce((d, segment, index) => {
     if(segment.type === "horizontal"){
-      return appendHorizontalPathWithBridges(d, segment, verticalSegments, index === 0);
+      return appendHorizontalPathWithBridges(d, segment, verticalSegments, horizontalSegments, index === 0);
     }
 
     d += index === 0
@@ -12594,9 +12641,9 @@ function buildPathForWeekRoute(segments, verticalSegments){
   }, "");
 }
 
-function createWeekConnectorPath(svg, segments, group, verticalSegments, extraClass = ""){
+function createWeekConnectorPath(svg, segments, group, verticalSegments, horizontalSegments = [], extraClass = ""){
   const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", buildPathForWeekRoute(segments, verticalSegments));
+  path.setAttribute("d", buildPathForWeekRoute(segments, verticalSegments, horizontalSegments));
   path.setAttribute("class", `weekConnector style-${group.lineStyle || "solid"} ${extraClass}`.trim());
   path.dataset.connectionGroupId = group.id;
   path.dataset.connectionGroupName = group.name;
@@ -13015,12 +13062,16 @@ function renderWeekConnections(){
     (route.segments || []).filter(seg => seg.type === "vertical")
   );
 
+  const visibleHorizontalSegments = allRoutes.flatMap(route =>
+    (route.segments || []).filter(seg => seg.type === "horizontal")
+  );
+
   for(const route of allRoutes){
     if(route.group.lineStyle === "double"){
-      createWeekConnectorPath(svg, route.segments, route.group, visibleVerticalSegments, "style-double-base");
-      createWeekConnectorPath(svg, route.segments, route.group, visibleVerticalSegments, "style-double-top");
+      createWeekConnectorPath(svg, route.segments, route.group, visibleVerticalSegments, visibleHorizontalSegments, "style-double-base");
+      createWeekConnectorPath(svg, route.segments, route.group, visibleVerticalSegments, visibleHorizontalSegments, "style-double-top");
     }else{
-      createWeekConnectorPath(svg, route.segments, route.group, visibleVerticalSegments);
+      createWeekConnectorPath(svg, route.segments, route.group, visibleVerticalSegments, visibleHorizontalSegments);
     }
   }
 
