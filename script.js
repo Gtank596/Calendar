@@ -12943,6 +12943,42 @@ function horizontalOverlapWidth(a, b){
   return Math.max(0, Math.min(aMax, bMax) - Math.max(aMin, bMin));
 }
 
+function horizontalEndpointGap(a, b){
+  const aMin = Math.min(Number(a.x1 || 0), Number(a.x2 || 0));
+  const aMax = Math.max(Number(a.x1 || 0), Number(a.x2 || 0));
+  const bMin = Math.min(Number(b.x1 || 0), Number(b.x2 || 0));
+  const bMax = Math.max(Number(b.x1 || 0), Number(b.x2 || 0));
+
+  if(!Number.isFinite(aMin) || !Number.isFinite(aMax) || !Number.isFinite(bMin) || !Number.isFinite(bMax)){
+    return Infinity;
+  }
+
+  if(aMax < bMin) return bMin - aMax;
+  if(bMax < aMin) return aMin - bMax;
+  return 0;
+}
+
+function horizontalSegmentsNeedSeparateLanes(a, b, opts = {}){
+  const minUsefulOverlap = Number(opts.minUsefulOverlap ?? 0);
+  const touchGap = Number(opts.touchGap ?? 0);
+  const overlapBuffer = Number(opts.overlapBuffer ?? 0);
+
+  const overlapWidth = horizontalOverlapWidth(a, b);
+
+  if(
+    horizontalRangesOverlap(a, b, overlapBuffer) &&
+    overlapWidth >= minUsefulOverlap
+  ){
+    return true;
+  }
+
+  // Two different wires can be mathematically "not overlapping" while still
+  // drawing as one chunky rail: one ends exactly where the other starts, or
+  // their glowing stroke halos almost touch. That was the red-on-purple case
+  // in the week gutter. Treat endpoint kisses as lane conflicts too.
+  return horizontalEndpointGap(a, b) <= touchGap;
+}
+
 function assignWeekHorizontalConnectorLanes(routes = []){
   const horizontals = [];
 
@@ -12981,8 +13017,9 @@ function assignWeekHorizontalConnectorLanes(routes = []){
   const yClusterDistance = isMobileViewport() ? 7 : 8;
   const overlapBuffer = isMobileViewport() ? -2 : 0;
   const minUsefulOverlap = isMobileViewport() ? 7 : 9;
+  const touchGap = isMobileViewport() ? 11 : 13;
   const laneLimit = 3;
-  const laneSpacing = isMobileViewport() ? 3 : 4;
+  const laneSpacing = isMobileViewport() ? 7 : 8;
 
   const clusters = [];
   const sorted = [...horizontals].sort((a, b) => a.y - b.y || a.xMin - b.xMin);
@@ -12993,8 +13030,11 @@ function assignWeekHorizontalConnectorLanes(routes = []){
     for(const cluster of clusters){
       const closeY = Math.abs(item.y - cluster.centerY) <= yClusterDistance;
       const overlapsExisting = cluster.items.some(existing =>
-        horizontalRangesOverlap(item.segment, existing.segment, overlapBuffer) &&
-        horizontalOverlapWidth(item.segment, existing.segment) >= minUsefulOverlap
+        horizontalSegmentsNeedSeparateLanes(item.segment, existing.segment, {
+          overlapBuffer,
+          minUsefulOverlap,
+          touchGap
+        })
       );
 
       if(closeY && overlapsExisting){
