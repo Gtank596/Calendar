@@ -12359,11 +12359,11 @@ function getWeekConnectorLocalRect(el, parentRect){
 
 function buildWeekRouteSegments(fromRect, toRect, groupId){
   const fromBeforeTo = fromRect.centerX <= toRect.centerX;
-  const anchorGap = isMobileViewport() ? 10 : 12;
+  const anchorGap = isMobileViewport() ? 5 : 6;
   const sameLaneThreshold = isMobileViewport() ? 10 : 12;
 
-  // Anchor just outside the cards. The wire should kiss the edge like a little
-  // subway pin, not pass under translucent event text.
+  // Anchor just outside the cards. The wire should feel attached to the card
+  // edge without running under the translucent event text.
   const start = fromBeforeTo
     ? { x: fromRect.right + anchorGap, y: fromRect.centerY }
     : { x: fromRect.x - anchorGap, y: fromRect.centerY };
@@ -12505,6 +12505,33 @@ function createWeekConnectorPath(svg, segments, group, verticalSegments, extraCl
   return path;
 }
 
+function getWeekRouteItemsForGroup(items = []){
+  const sorted = [...(items || [])].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+  // The week wire is a route, not a spiderweb. If the same connected chain has
+  // multiple cards on one day, use one representative card for the inter-day
+  // line and let the other cards simply glow with the chain selection. This
+  // prevents the “one card fired two rails at the next day” look.
+  const dayBuckets = new Map();
+
+  for(const item of sorted){
+    const dayISO = item.dayISO || item.pill?.dataset.weekDayIso || item.sortKey.slice(0, 10) || "";
+    const key = dayISO || `floating-${dayBuckets.size}`;
+
+    if(!dayBuckets.has(key)) dayBuckets.set(key, []);
+    dayBuckets.get(key).push(item);
+  }
+
+  const routeItems = [];
+
+  for(const bucket of dayBuckets.values()){
+    bucket.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    routeItems.push(bucket[0]);
+  }
+
+  return routeItems.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+}
+
 function renderWeekConnections(){
   if(!grid || viewMode !== "week") return;
 
@@ -12533,6 +12560,7 @@ function renderWeekConnections(){
 
     groups.get(groupId).items.push({
       pill,
+      dayISO: pill.dataset.weekDayIso || "",
       sortKey: pill.dataset.weekSortKey || "",
       rect: getWeekConnectorLocalRect(pill, parentRect)
     });
@@ -12542,11 +12570,11 @@ function renderWeekConnections(){
   const allVerticalSegments = [];
 
   for(const group of groups.values()){
-    group.items.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
-    if(group.items.length < 2) continue;
+    const routeItems = getWeekRouteItemsForGroup(group.items);
+    if(routeItems.length < 2) continue;
 
-    for(let i = 0; i < group.items.length - 1; i++){
-      const segments = buildWeekRouteSegments(group.items[i].rect, group.items[i + 1].rect, group.id);
+    for(let i = 0; i < routeItems.length - 1; i++){
+      const segments = buildWeekRouteSegments(routeItems[i].rect, routeItems[i + 1].rect, group.id);
       allRoutes.push({ group, segments });
       allVerticalSegments.push(...segments.filter(seg => seg.type === "vertical"));
     }
@@ -12749,6 +12777,7 @@ function renderWeekView(){
         pill.dataset.connectionGroupName = groupName;
         pill.dataset.connectionColor = groupColor;
         pill.dataset.connectionLineStyle = lineStyle;
+        pill.dataset.weekDayIso = cellISO;
         pill.dataset.weekSortKey = getWeekEventSortKey(ev, cellISO);
         pill.style.setProperty("--connection-color", groupColor);
       }
