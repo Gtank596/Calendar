@@ -744,7 +744,7 @@ const DATA_SLICE_LABELS = {
 // IndexedDB becomes the roomy offline landscape. localStorage stays as a tiny
 // boot/cache + legacy safety net for this sweep so old data is not endangered.
 const CALENDAR_IDB_NAME = "myCalendarOfflineDB";
-const CALENDAR_IDB_VERSION = 2;
+const CALENDAR_IDB_VERSION = 3;
 
 const CALENDAR_IDB_STORES = [
   "slices",
@@ -831,6 +831,8 @@ function openCalendarIndexedDb(){
       ensureIndex(budgetTransactionStore, "categoryId", "categoryId");
       ensureIndex(budgetTransactionStore, "updatedAt", "updatedAt");
       ensureIndex(budgetTransactionStore, "source", "source");
+      ensureIndex(budgetTransactionStore, "type", "type");
+      ensureIndex(budgetTransactionStore, "dateType", "dateType");
 
       if(!db.objectStoreNames.contains("budgetCategories")){
         db.createObjectStore("budgetCategories", { keyPath: "id" });
@@ -944,20 +946,31 @@ function eventsMapToIndexedDbRecords(eventsMap = {}, updatedAt = Date.now()){
 
 function budgetTransactionFromEventRecord(record = {}){
   const price = Number(record.price);
+  const dateISO = String(record.dateISO || record.startDate || "").trim();
 
-  if(!record?.id || !Number.isFinite(price) || price === 0){
+  if(!record?.id || !dateISO || !Number.isFinite(price) || price === 0){
     return null;
   }
+
+  const type = price < 0 ? "income" : "expense";
 
   return {
     id: `event:${record.id}`,
     eventId: record.id,
-    dateISO: record.dateISO || record.startDate || "",
+    dateISO,
+    date: dateISO,
     title: record.title || "Untitled",
     amount: price,
-    type: price < 0 ? "income" : "expense",
+    price,
+    type,
     categoryId: record.categoryId || "other",
+    color: record.color || DEFAULT_COLOR,
     source: record.source || "calendar",
+    recurrence: record.recurrence || null,
+    startDate: record.startDate || dateISO,
+    isOccurrence: false,
+    occursOn: dateISO,
+    dateType: `${dateISO}::${type}`,
     updatedAt: Number(record.updatedAt || Date.now())
   };
 }
@@ -1016,6 +1029,7 @@ async function putIndexedDbEventRecordNow(event = {}, dateISO = "", updatedAt = 
   }
 
   await idbTransactionDone(tx);
+  clearIndexedDbBudgetTransactionRangeCache?.("targeted event record write");
   return record;
 }
 
@@ -1030,6 +1044,7 @@ async function deleteIndexedDbEventRecordNow(eventId){
   tx.objectStore("events").delete(safeId);
   tx.objectStore("budgetTransactions").delete(`event:${safeId}`);
   await idbTransactionDone(tx);
+  clearIndexedDbBudgetTransactionRangeCache?.("targeted event record delete");
 }
 
 async function applyIndexedDbEventRecordOpsNow(ops = []){
@@ -1079,6 +1094,9 @@ async function applyIndexedDbEventRecordOpsNow(ops = []){
   }
 
   await idbTransactionDone(tx);
+  if(applied.length){
+    clearIndexedDbBudgetTransactionRangeCache?.("targeted event record ops");
+  }
   return applied;
 }
 
@@ -1336,6 +1354,7 @@ function requestIndexedDbEventRangeHydration(startISO, endISO, opts = {}){
       if(derivedCache?.budgetItems){
         derivedCache.budgetItems.clear();
         derivedCache.budgetItemsRangeVersion = indexedDbEventRangeCache.version;
+    derivedCache.budgetItemsTxRangeVersion = indexedDbBudgetTransactionRangeCache.version;
       }
 
       if(opts.renderBudget){
@@ -1350,6 +1369,283 @@ function requestIndexedDbEventRangeHydration(startISO, endISO, opts = {}){
       indexedDbEventHydrationRequests.delete(requestKey);
       console.warn("Could not hydrate visible event range from IndexedDB; using in-memory events map.", err);
     });
+}
+
+
+function normalizeBudgetTransactionRecord(record = {}){
+  const price = Number(record.price ?? record.amount);
+  const dateISO = String(record.dateISO || record.date || record.startDate || "").trim();
+
+  if(!record?.id || !dateISO || !Number.isFinite(price) || price === 0){
+    return null;
+  }
+
+  const type = price < 0 ? "income" : "expense";
+  const eventId = String(record.eventId || record.masterId || record.id || "")
+    .replace(/^event:/, "");
+
+  return {
+    ...record,
+    id: normalizeIndexedDbRecordId(record.id, `tx:${dateISO}:${eventId || Date.now()}`),
+    eventId,
+    dateISO,
+    date: dateISO,
+    amount: price,
+    price,
+    type,
+    categoryId: record.categoryId || "other",
+    color: record.color || DEFAULT_COLOR,
+    source: record.source || "calendar",
+    isOccurrence: !!record.isOccurrence,
+    occursOn: record.occursOn || dateISO,
+    dateType: `${dateISO}::${type}`,
+    updatedAt: Number(record.updatedAt || Date.now())
+  };
+}
+
+function budgetTransactionRecordToBudgetItem(record = {}){
+  const tx = normalizeBudgetTransactionRecord(record);
+  if(!tx) return null;
+
+  return {
+    id: `${tx.eventId || tx.id}__${tx.dateISO}`,
+    transactionId: tx.id,
+    eventId: tx.eventId || String(tx.id).replace(/^event:/, ""),
+    date: tx.dateISO,
+    title: tx.title || "Untitled event",
+    price: Number(tx.price),
+    color: tx.color || DEFAULT_COLOR,
+    source: tx.source || "calendar",
+    categoryId: tx.categoryId || "other",
+    isOccurrence: !!tx.isOccurrence,
+    occursOn: tx.occursOn || tx.dateISO
+  };
+}
+
+function indexedDbBudgetTransactionRecordSignature(records = []){
+  return (records || [])
+    .map(record => [
+      record.id || "",
+      record.eventId || "",
+      record.dateISO || record.date || "",
+      record.updatedAt || 0,
+      record.title || "",
+      record.price ?? record.amount ?? "",
+      record.categoryId || "",
+      record.source || "",
+      record.type || ""
+    ].join("|"))
+    .sort()
+    .join("\n");
+}
+
+async function getIndexedDbBudgetTransactionRecordsForRange(startISO, endISO){
+  const start = String(startISO || "").trim();
+  const end = String(endISO || start || "").trim();
+  if(!start || !end || typeof IDBKeyRange === "undefined") return [];
+
+  const db = await openCalendarIndexedDb();
+  if(!db || !db.objectStoreNames.contains("budgetTransactions")) return [];
+
+  const tx = db.transaction("budgetTransactions", "readonly");
+  const rows = await idbRequestToPromise(
+    tx.objectStore("budgetTransactions").index("dateISO").getAll(IDBKeyRange.bound(start, end))
+  );
+  await idbTransactionDone(tx).catch(() => {});
+
+  return Array.isArray(rows)
+    ? rows.map(normalizeBudgetTransactionRecord).filter(Boolean)
+    : [];
+}
+
+async function getIndexedDbBudgetTransactionsForRange(startISO, endISO){
+  const rows = await getIndexedDbBudgetTransactionRecordsForRange(startISO, endISO);
+  return rows
+    .map(budgetTransactionRecordToBudgetItem)
+    .filter(Boolean)
+    .sort((a, b) => a.date.localeCompare(b.date) || String(a.title || "").localeCompare(String(b.title || "")));
+}
+
+const indexedDbBudgetTransactionRangeCache = {
+  startISO: "",
+  endISO: "",
+  signature: "",
+  source: "",
+  version: 0,
+  recordsCount: 0,
+  items: null
+};
+
+const indexedDbBudgetTransactionHydrationRequests = new Map();
+let indexedDbBudgetTransactionHydrationSerial = 0;
+
+function getIndexedDbBudgetTransactionRangeCacheSummary(){
+  return {
+    enabled: !!indexedDbBudgetTransactionRangeCache.items,
+    startISO: indexedDbBudgetTransactionRangeCache.startISO,
+    endISO: indexedDbBudgetTransactionRangeCache.endISO,
+    version: indexedDbBudgetTransactionRangeCache.version,
+    records: indexedDbBudgetTransactionRangeCache.recordsCount || 0,
+    items: indexedDbBudgetTransactionRangeCache.items
+      ? indexedDbBudgetTransactionRangeCache.items.length
+      : 0,
+    source: indexedDbBudgetTransactionRangeCache.source || ""
+  };
+}
+
+function indexedDbBudgetTransactionRangeCacheCoversRange(startISO, endISO){
+  return !!(
+    indexedDbBudgetTransactionRangeCache.items &&
+    startISO >= indexedDbBudgetTransactionRangeCache.startISO &&
+    endISO <= indexedDbBudgetTransactionRangeCache.endISO
+  );
+}
+
+function clearIndexedDbBudgetTransactionRangeCache(reason = "budget transactions changed"){
+  indexedDbBudgetTransactionHydrationRequests.clear();
+  indexedDbBudgetTransactionHydrationSerial += 1;
+
+  if(!indexedDbBudgetTransactionRangeCache.items && !indexedDbBudgetTransactionRangeCache.signature) return;
+
+  indexedDbBudgetTransactionRangeCache.startISO = "";
+  indexedDbBudgetTransactionRangeCache.endISO = "";
+  indexedDbBudgetTransactionRangeCache.signature = "";
+  indexedDbBudgetTransactionRangeCache.source = reason;
+  indexedDbBudgetTransactionRangeCache.recordsCount = 0;
+  indexedDbBudgetTransactionRangeCache.items = null;
+  indexedDbBudgetTransactionRangeCache.version += 1;
+}
+
+function getIndexedDbCachedBudgetTransactionItemsForRange(startISO, endISO){
+  if(!indexedDbBudgetTransactionRangeCacheCoversRange(startISO, endISO)) return null;
+
+  return (indexedDbBudgetTransactionRangeCache.items || [])
+    .filter(item => item.date >= startISO && item.date <= endISO)
+    .map(item => ({ ...item }));
+}
+
+function requestIndexedDbBudgetTransactionRangeHydration(startISO, endISO, opts = {}){
+  const start = String(startISO || "").trim();
+  const end = String(endISO || start || "").trim();
+
+  if(!indexedDbSupported() || !start || !end) return;
+
+  const sameVisibleRange = !!(
+    indexedDbBudgetTransactionRangeCache.items &&
+    indexedDbBudgetTransactionRangeCache.startISO === start &&
+    indexedDbBudgetTransactionRangeCache.endISO === end &&
+    (!opts.source || indexedDbBudgetTransactionRangeCache.source === opts.source)
+  );
+
+  if(sameVisibleRange && !opts.force) return;
+
+  const requestKey = `${start}__${end}`;
+  if(indexedDbBudgetTransactionHydrationRequests.has(requestKey)) return;
+
+  const serial = ++indexedDbBudgetTransactionHydrationSerial;
+  indexedDbBudgetTransactionHydrationRequests.set(requestKey, serial);
+
+  getIndexedDbBudgetTransactionRecordsForRange(start, end)
+    .then(records => {
+      if(indexedDbBudgetTransactionHydrationRequests.get(requestKey) !== serial) return;
+      indexedDbBudgetTransactionHydrationRequests.delete(requestKey);
+
+      const signature = indexedDbBudgetTransactionRecordSignature(records);
+      const sameRange =
+        indexedDbBudgetTransactionRangeCache.startISO === start &&
+        indexedDbBudgetTransactionRangeCache.endISO === end;
+
+      if(sameRange && indexedDbBudgetTransactionRangeCache.signature === signature) return;
+
+      const items = records
+        .map(budgetTransactionRecordToBudgetItem)
+        .filter(Boolean)
+        .sort((a, b) => a.date.localeCompare(b.date) || String(a.title || "").localeCompare(String(b.title || "")));
+
+      indexedDbBudgetTransactionRangeCache.startISO = start;
+      indexedDbBudgetTransactionRangeCache.endISO = end;
+      indexedDbBudgetTransactionRangeCache.signature = signature;
+      indexedDbBudgetTransactionRangeCache.source = opts.source || "IndexedDB budget range hydration";
+      indexedDbBudgetTransactionRangeCache.recordsCount = records.length;
+      indexedDbBudgetTransactionRangeCache.items = items;
+      indexedDbBudgetTransactionRangeCache.version += 1;
+
+      if(derivedCache?.budgetItems){
+        derivedCache.budgetItems.clear();
+        derivedCache.budgetItemsTxRangeVersion = indexedDbBudgetTransactionRangeCache.version;
+      }
+
+      if(opts.renderBudget){
+        queueRender({ budget:true, sliders:true });
+      }
+    })
+    .catch(err => {
+      indexedDbBudgetTransactionHydrationRequests.delete(requestKey);
+      console.warn("Could not hydrate budget transactions from IndexedDB; using computed calendar events.", err);
+    });
+}
+
+function mergeBudgetItemsByKey(...groups){
+  const map = new Map();
+
+  for(const group of groups){
+    for(const item of group || []){
+      if(!item || !item.date) continue;
+      const key = item.id || `${item.eventId || item.transactionId || item.title}__${item.date}`;
+      if(map.has(key)) continue;
+      map.set(key, { ...item, id: key });
+    }
+  }
+
+  return Array.from(map.values())
+    .sort((a, b) => a.date.localeCompare(b.date) || String(a.title || "").localeCompare(String(b.title || "")));
+}
+
+function computeRecurringBudgetItemsUncached(startISO, endISO){
+  const items = [];
+  const seen = new Set();
+  const masters = getAllRecurringMasters()
+    .filter(ev => {
+      const price = Number(ev?.price);
+      return Number.isFinite(price) && price !== 0;
+    });
+
+  let cursor = ymdToDate(startISO);
+  const end = ymdToDate(endISO);
+
+  while(cursor <= end){
+    const iso = dateToYmd(cursor);
+
+    for(const master of masters){
+      if(master.startDate === iso) continue;
+      if(!recurrenceMatches(master, iso)) continue;
+
+      const ex = master.recurrence?.exceptions;
+      if(Array.isArray(ex) && ex.includes(iso)) continue;
+
+      const price = Number(master.price);
+      const key = `${master.id}__${iso}`;
+      if(seen.has(key)) continue;
+      seen.add(key);
+
+      items.push({
+        id: key,
+        eventId: master.id,
+        date: iso,
+        title: master.title || "Untitled event",
+        price,
+        color: master.color || DEFAULT_COLOR,
+        source: master.source || "calendar",
+        categoryId: master.categoryId || "other",
+        isOccurrence: true,
+        occursOn: iso
+      });
+    }
+
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return items.sort((a, b) => a.date.localeCompare(b.date));
 }
 
 async function countIndexedDbStoreRecords(){
@@ -1431,6 +1727,7 @@ async function mirrorSliceToIndexedDbStores(slice, value, updatedAt = Date.now()
       const { events: eventRecords, budgetTransactions } = eventsMapToIndexedDbRecords(value, updatedAt);
       await idbClearAndPutAll(opened, "events", eventRecords);
       await idbClearAndPutAll(opened, "budgetTransactions", budgetTransactions);
+      clearIndexedDbBudgetTransactionRangeCache?.("events slice mirrored");
       return;
     }
 
@@ -1719,6 +2016,7 @@ async function getCalendarStorageDebugSummary(){
       : {},
     indexedDbRecordCounts: indexedDbSupported() ? await countIndexedDbStoreRecords() : {},
     indexedDbEventRangeCache: getIndexedDbEventRangeCacheSummary(),
+    indexedDbBudgetTransactionRangeCache: getIndexedDbBudgetTransactionRangeCacheSummary(),
     indexedDbUpdatedAt: idbPayload?.updatedAt || 0,
     queuedCloudRows: await countQueuedCloudRecordOps()
   };
@@ -1729,6 +2027,8 @@ if(typeof window !== "undefined"){
   window.calendarIndexedDbEventsForDay = getIndexedDbEventsForDay;
   window.calendarIndexedDbEventsForRange = getIndexedDbEventsForRange;
   window.calendarIndexedDbRenderCache = getIndexedDbEventRangeCacheSummary;
+  window.calendarIndexedDbBudgetTransactionsForRange = getIndexedDbBudgetTransactionsForRange;
+  window.calendarIndexedDbBudgetCache = getIndexedDbBudgetTransactionRangeCacheSummary;
 }
 
 function hasOwn(obj, key){
@@ -7721,18 +8021,24 @@ function getBudgetItems(startISO, endISO){
 
   if(
     derivedCache.budgetItemsVersion !== state.meta.eventsVersion ||
-    derivedCache.budgetItemsRangeVersion !== indexedDbEventRangeCache.version
+    derivedCache.budgetItemsRangeVersion !== indexedDbEventRangeCache.version ||
+    derivedCache.budgetItemsTxRangeVersion !== indexedDbBudgetTransactionRangeCache.version
   ){
     derivedCache.budgetItems.clear();
     derivedCache.budgetItemsVersion = state.meta.eventsVersion;
     derivedCache.budgetItemsRangeVersion = indexedDbEventRangeCache.version;
+    derivedCache.budgetItemsTxRangeVersion = indexedDbBudgetTransactionRangeCache.version;
   }
 
   const cacheKey = `${startISO}__${endISO}`;
   const cached = derivedCache.budgetItems.get(cacheKey);
   if(cached) return cached.map(item => ({ ...item }));
 
-  const fresh = computeBudgetItemsUncached(startISO, endISO);
+  const indexedDbItems = getIndexedDbCachedBudgetTransactionItemsForRange(startISO, endISO);
+  const fresh = indexedDbItems
+    ? mergeBudgetItemsByKey(indexedDbItems, computeRecurringBudgetItemsUncached(startISO, endISO))
+    : computeBudgetItemsUncached(startISO, endISO);
+
   derivedCache.budgetItems.set(cacheKey, fresh);
   return fresh.map(item => ({ ...item }));
 }
@@ -8165,8 +8471,14 @@ function renderBudgetPage(){
     budgetTxDate.value = selectedDateISO || range.startISO;
   }
 
+  requestIndexedDbBudgetTransactionRangeHydration(range.startISO, range.endISO, {
+    source: "budget transaction range",
+    renderBudget: true
+  });
+
+  // Keep the event range warm as a bridge for recurring transaction masters.
   requestIndexedDbEventRangeHydration(range.startISO, range.endISO, {
-    source: "budget range",
+    source: "budget recurrence bridge",
     renderBudget: true
   });
 
@@ -10934,6 +11246,7 @@ const renderQueue = {
 const derivedCache = {
   budgetItemsVersion: -1,
   budgetItemsRangeVersion: -1,
+  budgetItemsTxRangeVersion: -1,
   budgetItems: new Map()
 };
 
@@ -10975,12 +11288,14 @@ function invalidateDerivedData(scope = "events"){
   if(scope === "events" || scope === "budget"){
     if(scope === "events"){
       clearIndexedDbEventRangeCache("local event mutation");
+      clearIndexedDbBudgetTransactionRangeCache?.("local event mutation");
     }
 
     state.meta.eventsVersion += 1;
     derivedCache.budgetItems.clear();
     derivedCache.budgetItemsVersion = state.meta.eventsVersion;
     derivedCache.budgetItemsRangeVersion = indexedDbEventRangeCache.version;
+    derivedCache.budgetItemsTxRangeVersion = indexedDbBudgetTransactionRangeCache.version;
   }
 }
 
