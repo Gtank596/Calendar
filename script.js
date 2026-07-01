@@ -12417,7 +12417,11 @@ function getWeekCardAnchor(rect, side = "right", gap = 6){
 
 function buildWeekRouteSegments(fromRect, toRect, groupId){
   const fromBeforeTo = fromRect.centerX <= toRect.centerX;
-  const anchorGap = isMobileViewport() ? 5 : 6;
+
+  // The side ports sit just outside the pill. Keeping the anchor close to the
+  // port gives the gutter more usable room, which matters once 3 parallel
+  // connection lanes are trying to pass through the same narrow doorway.
+  const anchorGap = isMobileViewport() ? 3 : 4;
   const sameLaneThreshold = isMobileViewport() ? 10 : 12;
 
   const start = getWeekCardAnchor(
@@ -12458,9 +12462,26 @@ function buildWeekRouteSegments(fromRect, toRect, groupId){
       : Math.min(fromRect.x, toRect.x) - gutter;
   }
 
+  const laneInset = 0;
+  const laneMinX = hasClearHorizontalGap
+    ? Math.min(start.x, end.x) + laneInset
+    : midX - (isMobileViewport() ? 8 : 10);
+  const laneMaxX = hasClearHorizontalGap
+    ? Math.max(start.x, end.x) - laneInset
+    : midX + (isMobileViewport() ? 8 : 10);
+
   return [
     { type:"horizontal", x1:start.x, y1:start.y, x2:midX, y2:start.y, groupId },
-    { type:"vertical", x1:midX, y1:start.y, x2:midX, y2:end.y, groupId },
+    {
+      type:"vertical",
+      x1:midX,
+      y1:start.y,
+      x2:midX,
+      y2:end.y,
+      groupId,
+      laneMinX,
+      laneMaxX
+    },
     { type:"horizontal", x1:midX, y1:end.y, x2:end.x, y2:end.y, groupId }
   ].filter(seg => Math.abs(seg.x1 - seg.x2) > 1 || Math.abs(seg.y1 - seg.y2) > 1);
 }
@@ -12621,6 +12642,9 @@ function assignWeekVerticalConnectorLanes(routes = []){
         x,
         yMin,
         yMax,
+        groupId: String(segment.groupId || route?.group?.id || ""),
+        laneMinX: Number(segment.laneMinX),
+        laneMaxX: Number(segment.laneMaxX),
         lane:0
       });
     }
@@ -12628,9 +12652,14 @@ function assignWeekVerticalConnectorLanes(routes = []){
 
   if(verticals.length < 2) return;
 
-  const clusterDistance = isMobileViewport() ? 14 : 18;
-  const overlapBuffer = isMobileViewport() ? 3 : 4;
-  const laneSpacing = isMobileViewport() ? 7 : 9;
+  // Adjacent week cards only leave a small gutter between them. Instead of
+  // letting every vertical segment choose the same centerline, treat that
+  // gutter like a tiny 3-lane road: left / center / right. More than 3 chains
+  // intentionally reuse those lanes rather than exploding into the pills.
+  const clusterDistance = isMobileViewport() ? 12 : 16;
+  const laneLimit = 3;
+  const minLaneSpacing = isMobileViewport() ? 4 : 5;
+  const maxLaneSpacing = isMobileViewport() ? 5 : 6;
 
   const clusters = [];
   const sortedByX = [...verticals].sort((a, b) => a.x - b.x);
@@ -12650,34 +12679,78 @@ function assignWeekVerticalConnectorLanes(routes = []){
   for(const cluster of clusters){
     if(cluster.items.length < 2) continue;
 
-    const active = [];
-    let maxLane = 0;
+    const groupOrder = Array.from(new Set(
+      cluster.items
+        .slice()
+        .sort((a, b) => a.yMin - b.yMin || a.yMax - b.yMax || a.groupId.localeCompare(b.groupId))
+        .map(item => item.groupId || `route-${cluster.items.indexOf(item)}`)
+    ));
 
-    cluster.items.sort((a, b) => a.yMin - b.yMin || a.yMax - b.yMax || a.x - b.x);
+    const laneCount = Math.min(laneLimit, Math.max(1, groupOrder.length));
+    const laneForGroup = new Map();
 
+    groupOrder.forEach((groupId, index) => {
+      laneForGroup.set(groupId, index % laneLimit);
+    });
+
+    // If every item belongs to one chain, keep it in the middle. Otherwise,
+    // give each chain a stable lane through this gutter so colors do not stack
+    // on top of each other when their vertical spans barely miss overlapping.
     for(const item of cluster.items){
-      for(let i = active.length - 1; i >= 0; i--){
-        if(!rangesOverlap(active[i].yMin, active[i].yMax, item.yMin, item.yMax, overlapBuffer)){
-          active.splice(i, 1);
-        }
-      }
-
-      let lane = 0;
-      const used = new Set(active.map(x => x.lane));
-      while(used.has(lane)) lane += 1;
-
-      item.lane = lane;
-      maxLane = Math.max(maxLane, lane);
-      active.push(item);
+      item.lane = laneCount === 1
+        ? 0
+        : laneForGroup.get(item.groupId) ?? 0;
     }
 
-    if(maxLane <= 0) continue;
+    const finiteMin = cluster.items
+      .map(item => item.laneMinX)
+      .filter(Number.isFinite);
+    const finiteMax = cluster.items
+      .map(item => item.laneMaxX)
+      .filter(Number.isFinite);
 
-    const centerLane = maxLane / 2;
+    const corridorMin = finiteMin.length ? Math.max(...finiteMin) : NaN;
+    const corridorMax = finiteMax.length ? Math.min(...finiteMax) : NaN;
+    const hasCorridor = Number.isFinite(corridorMin) && Number.isFinite(corridorMax) && corridorMax > corridorMin;
+    const requiredSpread = (laneCount - 1) * minLaneSpacing;
+
+    let spacing = laneCount > 1 ? maxLaneSpacing : 0;
+    let centerX = cluster.centerX;
+
+    if(hasCorridor){
+      const available = corridorMax - corridorMin;
+
+      if(laneCount > 1){
+        spacing = Math.min(maxLaneSpacing, Math.max(minLaneSpacing, available / (laneCount - 1)));
+      }
+
+      const spread = spacing * (laneCount - 1);
+
+      if(available >= requiredSpread){
+        centerX = clamp(
+          cluster.centerX,
+          corridorMin + spread / 2,
+          corridorMax - spread / 2
+        );
+      }else{
+        // Last-resort squeeze: stay centered in the real gutter instead of
+        // throwing lanes outward into the event cards.
+        spacing = laneCount > 1 ? Math.max(3, available / Math.max(1, laneCount - 1)) : 0;
+        centerX = (corridorMin + corridorMax) / 2;
+      }
+    }
+
+    const centerLane = (laneCount - 1) / 2;
 
     for(const item of cluster.items){
-      const offset = (item.lane - centerLane) * laneSpacing;
-      setWeekRouteVerticalX(item.route, item.segment, item.x + offset);
+      const normalizedLane = laneCount <= 1 ? 0 : Math.min(item.lane, laneCount - 1);
+      let nextX = centerX + ((normalizedLane - centerLane) * spacing);
+
+      if(Number.isFinite(item.laneMinX) && Number.isFinite(item.laneMaxX) && item.laneMaxX > item.laneMinX){
+        nextX = clamp(nextX, item.laneMinX, item.laneMaxX);
+      }
+
+      setWeekRouteVerticalX(item.route, item.segment, nextX);
     }
   }
 }
