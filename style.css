@@ -6395,7 +6395,7 @@ body[data-calendar-view="week"] #calendarPage .weekEventPill .pillTime{
 .weekViewGrid .weekEventPill.connectedEventPill.connector-right::after{
   content:"";
   position:absolute;
-  top:50%;
+  top:var(--connector-anchor-y, 50%);
   width:7px;
   height:12px;
   transform:translateY(-50%);
@@ -6412,12 +6412,14 @@ body[data-calendar-view="week"] #calendarPage .weekEventPill .pillTime{
 
 .weekViewGrid .weekEventPill.connectedEventPill.connector-left::before{
   left:-5px;
+  top:var(--connector-left-y, var(--connector-anchor-y, 50%));
   border-right:0;
   border-radius:999px 0 0 999px;
 }
 
 .weekViewGrid .weekEventPill.connectedEventPill.connector-right::after{
   right:-5px;
+  top:var(--connector-right-y, var(--connector-anchor-y, 50%));
   border-left:0;
   border-radius:0 999px 999px 0;
 }

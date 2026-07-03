@@ -12686,8 +12686,10 @@ function appendHorizontalPathWithBridges(d, segment, verticalSegments, horizonta
   const isFirst = !!opts.isFirst;
   const joinStartAtVisualY = !!opts.joinStartAtVisualY;
   const joinEndAtVisualY = !!opts.joinEndAtVisualY;
-  const startY = joinStartAtVisualY ? visualY : anchorY;
-  const endY = joinEndAtVisualY ? visualY : anchorY;
+  const anchorStartAtVisualY = !!opts.anchorStartAtVisualY;
+  const anchorEndAtVisualY = !!opts.anchorEndAtVisualY;
+  const startY = (joinStartAtVisualY || anchorStartAtVisualY) ? visualY : anchorY;
+  const endY = (joinEndAtVisualY || anchorEndAtVisualY) ? visualY : anchorY;
 
   const bridgeSegment = {
     ...segment,
@@ -12737,6 +12739,8 @@ function buildPathForWeekRoute(segments, verticalSegments, horizontalSegments = 
     const next = list[index + 1];
 
     if(segment.type === "horizontal"){
+      const hasVisualY = Number.isFinite(Number(segment.visualY));
+
       return appendHorizontalPathWithBridges(d, segment, verticalSegments, horizontalSegments, {
         isFirst: index === 0,
         // When a y-laned horizontal rail joins a vertical turn, keep that
@@ -12744,7 +12748,13 @@ function buildPathForWeekRoute(segments, verticalSegments, horizontalSegments = 
         // colors that merely touch endpoint-to-endpoint both return to the
         // original y first, creating the little red/purple knot in the gutter.
         joinStartAtVisualY: prev?.type === "vertical",
-        joinEndAtVisualY: next?.type === "vertical"
+        joinEndAtVisualY: next?.type === "vertical",
+        // Same idea at the actual pill ports: if the rail earned a visual
+        // y-lane, let the side anchor move with it instead of snapping back
+        // to the pill's exact center. The offset is tiny and still stays
+        // inside the rounded pill, but it removes the last shared-pixel knot.
+        anchorStartAtVisualY: !!segment.anchorStartAtVisualY || (!prev && hasVisualY),
+        anchorEndAtVisualY: !!segment.anchorEndAtVisualY || (!next && hasVisualY)
       });
     }
 
@@ -12763,6 +12773,60 @@ function buildPathForWeekRoute(segments, verticalSegments, horizontalSegments = 
     d += ` L ${segment.x2.toFixed(1)} ${endY.toFixed(1)}`;
     return d;
   }, "");
+}
+
+function setWeekPillConnectorAnchorY(pill, rect, side = "right", y = 0){
+  if(!pill || !rect || !Number.isFinite(Number(y))) return;
+
+  const height = Math.max(1, Number(rect.height || 0));
+  const relativeY = Number(y) - Number(rect.y || 0);
+
+  // Keep the nub inside the pill's rounded sides. It can breathe a little
+  // above/below center, but never drifts into the corners.
+  const minPct = 30;
+  const maxPct = 70;
+  const pct = clamp((relativeY / height) * 100, minPct, maxPct);
+  const prop = side === "left" ? "--connector-left-y" : "--connector-right-y";
+
+  pill.style.setProperty(prop, `${pct.toFixed(1)}%`);
+}
+
+function clearWeekPillConnectorAnchorY(pill){
+  if(!pill) return;
+  pill.style.removeProperty("--connector-left-y");
+  pill.style.removeProperty("--connector-right-y");
+}
+
+function applyWeekConnectorAnchorOffsets(routes = []){
+  for(const route of routes || []){
+    const segments = Array.isArray(route?.segments) ? route.segments : [];
+    if(!segments.length) continue;
+
+    const first = segments[0];
+    const last = segments[segments.length - 1];
+
+    if(first?.type === "horizontal" && Number.isFinite(Number(first.visualY))){
+      const visualY = getHorizontalBridgeY(first);
+      first.anchorStartAtVisualY = true;
+      setWeekPillConnectorAnchorY(
+        route.fromItem?.pill,
+        route.fromItem?.rect,
+        route.fromSide || "right",
+        visualY
+      );
+    }
+
+    if(last?.type === "horizontal" && Number.isFinite(Number(last.visualY))){
+      const visualY = getHorizontalBridgeY(last);
+      last.anchorEndAtVisualY = true;
+      setWeekPillConnectorAnchorY(
+        route.toItem?.pill,
+        route.toItem?.rect,
+        route.toSide || "left",
+        visualY
+      );
+    }
+  }
 }
 
 function createWeekConnectorPath(svg, segments, group, verticalSegments, horizontalSegments = [], extraClass = ""){
@@ -13038,12 +13102,15 @@ function assignWeekHorizontalConnectorLanes(routes = []){
   // their horizontal runs overlap, give those rails tiny y-lanes too. The line
   // still touches the card port; the path builder adds a miniature elbow up or
   // down to the visual lane and returns to the real anchor at the other end.
-  const yClusterDistance = isMobileViewport() ? 7 : 8;
-  const overlapBuffer = isMobileViewport() ? -2 : 0;
-  const minUsefulOverlap = isMobileViewport() ? 7 : 9;
-  const touchGap = isMobileViewport() ? 11 : 13;
+  // Treat rails that merely kiss at the pill anchor as conflicts too. This
+  // is intentionally more generous than pure geometry because the line glow
+  // makes near-misses look like overlaps. The actual offset stays small.
+  const yClusterDistance = isMobileViewport() ? 12 : 14;
+  const overlapBuffer = isMobileViewport() ? 1 : 2;
+  const minUsefulOverlap = isMobileViewport() ? 3 : 4;
+  const touchGap = isMobileViewport() ? 18 : 22;
   const laneLimit = 3;
-  const laneSpacing = isMobileViewport() ? 8 : 10;
+  const laneSpacing = isMobileViewport() ? 5 : 6;
 
   const clusters = [];
   const sorted = [...horizontals].sort((a, b) => a.y - b.y || a.xMin - b.xMin);
@@ -13193,6 +13260,7 @@ function renderWeekConnections(){
 
   pills.forEach(pill => {
     pill.classList.remove("connector-left", "connector-right");
+    clearWeekPillConnectorAnchorY(pill);
   });
 
   const allRoutes = [];
@@ -13213,14 +13281,17 @@ function renderWeekConnections(){
       fromItem.pill.classList.add(fromBeforeTo ? "connector-right" : "connector-left");
       toItem.pill.classList.add(fromBeforeTo ? "connector-left" : "connector-right");
 
+      const fromSide = fromBeforeTo ? "right" : "left";
+      const toSide = fromBeforeTo ? "left" : "right";
       const segments = buildWeekRouteSegments(fromItem.rect, toItem.rect, group.id);
-      allRoutes.push({ group, segments });
+      allRoutes.push({ group, segments, fromItem, toItem, fromSide, toSide });
       allVerticalSegments.push(...segments.filter(seg => seg.type === "vertical"));
     }
   }
 
   assignWeekVerticalConnectorLanes(allRoutes);
   assignWeekHorizontalConnectorLanes(allRoutes);
+  applyWeekConnectorAnchorOffsets(allRoutes);
 
   const visibleVerticalSegments = allRoutes.flatMap(route =>
     (route.segments || []).filter(seg => seg.type === "vertical")
