@@ -13192,7 +13192,12 @@ function assignWeekHorizontalConnectorLanes(routes = []){
       const xMax = Math.max(Number(segment.x1 || 0), Number(segment.x2 || 0));
 
       if(!Number.isFinite(y) || !Number.isFinite(xMin) || !Number.isFinite(xMax)) continue;
-      if(Math.abs(xMax - xMin) < 8) continue;
+      // NOTE: this used to skip segments under 8px, which excluded the short
+      // exit/entry stubs right next to a card (the exact segments most likely
+      // to collide when two cards in neighboring days share a row height).
+      // Only skip truly-degenerate (near zero-length) segments now, so those
+      // stubs get laned like everything else.
+      if(Math.abs(xMax - xMin) < 0.5) continue;
 
       segment.visualY = undefined;
 
