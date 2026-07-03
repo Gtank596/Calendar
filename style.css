@@ -6887,7 +6887,7 @@ body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
 .weekConnectionRailInner{
   height:100%;
   display:grid;
-  grid-template-columns:minmax(280px, 1fr) minmax(260px, .95fr);
+  grid-template-columns:minmax(0, 1fr) minmax(0, .95fr);
   gap:10px;
   align-items:stretch;
 }
@@ -6903,6 +6903,7 @@ body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
   border-radius:16px;
   background:rgba(255,255,255,.03);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+  overflow:hidden;
 }
 
 .weekConnectionAddLineBtn{
@@ -6945,7 +6946,7 @@ body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
 }
 
 .weekConnectionGlobalEditRow{
-  grid-template-columns:minmax(150px, 1fr) 72px 112px;
+  grid-template-columns:minmax(96px, 1fr) 62px 92px;
   min-width:0;
 }
 
@@ -6999,10 +7000,11 @@ body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
 }
 
 .weekConnectionGlobalEdit{
-  flex:1;
+  flex:1 1 auto;
   min-width:0;
+  width:100%;
   display:grid;
-  grid-template-columns:minmax(150px, .55fr) minmax(230px, 1fr);
+  grid-template-columns:minmax(98px, 116px) minmax(0, 1fr);
   align-items:center;
   gap:10px;
 }
@@ -7021,12 +7023,20 @@ body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
   letter-spacing:.01em;
 }
 
+.weekConnectionGlobalEditTop > div{
+  min-width:0;
+}
+
+.weekConnectionRailInner.editingSelectedConnection .weekConnectionComposer{
+  min-width:0;
+}
+
+.weekConnectionRailInner.editingSelectedConnection .weekConnectionSelectedHint{
+  flex:0 0 auto;
+}
+
 .weekConnectionGlobalEditHint{
-  margin-top:2px;
-  color:rgba(233,236,255,.52);
-  font-size:10.5px;
-  font-weight:700;
-  line-height:1.25;
+  display:none;
 }
 
 .weekConnectionSelectedChip,
@@ -7119,7 +7129,7 @@ body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
   }
 
   .weekConnectionGlobalEditRow{
-    grid-template-columns:minmax(120px, 1fr) 48px 92px;
+    grid-template-columns:minmax(110px, 1fr) 48px 86px;
     min-width:0;
   }
 

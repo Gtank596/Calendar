@@ -12583,7 +12583,6 @@ function renderSelectedConnectionEditorHtml(selected = null){
         <span class="weekConnectionBannerDot"></span>
         <div>
           <div class="weekConnectionGlobalEditTitle">Editing selected line</div>
-          <div class="weekConnectionGlobalEditHint">Changes apply to every event in this connected chain.</div>
         </div>
       </div>
 
@@ -12912,15 +12911,7 @@ function renderConnectionChipsHtml(groupMeta = collectWeekConnectionGroupMeta(),
     ? (selectedMeta || groupMeta.get(selectedConnectionGroupId))
     : null;
 
-  const banner = selected
-    ? `
-      <button class="weekConnectionSelectedChip" type="button" data-clear-selected="1" style="--connection-color:${escapeHtml(selected.color || DEFAULT_COLOR)}" title="Clear selected chain">
-        <span class="weekConnectionBannerDot"></span>
-        <span>Connected chain: <b>${escapeHtml(selected.name || "Untitled chain")}</b></span>
-        <span class="weekConnectionBannerCount">${selected.count || 0} events</span>
-      </button>
-    `
-    : `<div class="weekConnectionSelectedHint">Week lines</div>`;
+  const banner = `<div class="weekConnectionSelectedHint">Week lines</div>`;
 
   const chips = groups.length
     ? groups.map(group => `
