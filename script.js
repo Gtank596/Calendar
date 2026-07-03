@@ -2399,6 +2399,50 @@ function setCloudLastSyncAt(time = Date.now()){
   localStorage.setItem(CLOUD_LAST_SYNC_KEY, String(Math.max(0, Number(time || Date.now()))));
 }
 
+function stableCloudCompareString(value){
+  try{
+    const seen = new WeakSet();
+
+    return JSON.stringify(value, (key, item) => {
+      if(item && typeof item === "object"){
+        if(seen.has(item)) return null;
+        seen.add(item);
+
+        if(Array.isArray(item)) return item;
+
+        return Object.keys(item)
+          .sort()
+          .reduce((out, k) => {
+            out[k] = item[k];
+            return out;
+          }, {});
+      }
+
+      return item;
+    });
+  }catch{
+    return String(value ?? "");
+  }
+}
+
+function normalizeSliceForCloudCompare(slice, value){
+  if(slice === "events"){
+    return normalizeEventsMap(value || {});
+  }
+
+  return value;
+}
+
+function cloudSliceDiffers(slice, cloudPayload = {}, localPayload = {}){
+  if(!hasOwn(cloudPayload, slice)) return false;
+
+  return stableCloudCompareString(
+    normalizeSliceForCloudCompare(slice, cloudPayload[slice])
+  ) !== stableCloudCompareString(
+    normalizeSliceForCloudCompare(slice, localPayload[slice])
+  );
+}
+
 function setCloudReadDebugSummary(summary = {}){
   cloudSyncLastReadSummary = {
     mode: summary.mode || "none",
@@ -2613,7 +2657,11 @@ async function enqueueCloudRecordOpsForSlices(slices = [], reason = "local chang
     if(!db || !db.objectStoreNames.contains("syncQueue")) return [];
 
     const local = getLocalPayload();
-    const ops = buildCloudRecordOpsForSlices(local, safeSlices, true);
+
+    // Normal sync is a row merge, not a cloud replacement. Missing local rows
+    // can mean “this device has not pulled them yet,” so do not invent delete
+    // tombstones from absence here. Real deletes still travel as targeted ops.
+    const ops = buildCloudRecordOpsForSlices(local, safeSlices, false);
     if(!ops.length) return [];
 
     const tx = db.transaction("syncQueue", "readwrite");
@@ -3700,7 +3748,10 @@ async function writeCloudStateNow(slices = null){
   let ops = await getQueuedCloudRecordOps(dirtySlices);
 
   if(!ops.length){
-    ops = buildCloudRecordOpsForSlices(payload, dirtySlices, true);
+    // Full/device-wide writes should upsert what this device knows, not delete
+    // rows it simply has not seen yet. Explicit event deletes already enqueue
+    // their own tombstone ops through makeEventCloudOp(..., true).
+    ops = buildCloudRecordOpsForSlices(payload, dirtySlices, false);
   }
 
   const rows = cloudOpsToSupabaseRows(ops);
@@ -3807,12 +3858,30 @@ async function pullCloudIfNewer(opts = {}){
   }
 
   const pendingSlices = getPendingSliceList();
+
   const slicesToPull = DATA_SLICE_NAMES.filter(slice => {
-    if(pendingSlices.includes(slice)) return false;
-    return getSliceUpdatedAt(cloud, slice) > getSliceUpdatedAt(local, slice);
+    // Automatic/background pulls should not silently overwrite unsynced local
+    // edits. A manual full Pull is an intentional cloud-wins action, so it can
+    // recover a stale device even when a pending flag or equal timestamp is in
+    // the way.
+    if(!forceFull && pendingSlices.includes(slice)) return false;
+    if(!hasOwn(cloud, slice)) return false;
+
+    const cloudTime = getSliceUpdatedAt(cloud, slice);
+    const localTime = getSliceUpdatedAt(local, slice);
+
+    if(cloudTime > localTime) return true;
+
+    // Row sync can produce equal slice timestamps while the row set is still
+    // different. This is exactly what happens when one device has 3 events and
+    // the cloud already has 7: the old timestamp gate says “current,” even
+    // though the data is not current.
+    if(forceFull && cloudSliceDiffers(slice, cloud, local)) return true;
+
+    return false;
   });
 
-  if(isCloudPending() && pendingSlices.length){
+  if(isCloudPending() && pendingSlices.length && !forceFull){
     const safeToWrite = pendingSlices.every(slice =>
       getSliceUpdatedAt(local, slice) >= getSliceUpdatedAt(cloud, slice)
     );
@@ -3840,8 +3909,13 @@ async function pullCloudIfNewer(opts = {}){
       appliedSlices: slicesToPull
     });
     setCloudLastSyncAt(Date.now());
+
+    if(forceFull && pendingSlices.some(slice => slicesToPull.includes(slice))){
+      localStorage.removeItem(CLOUD_PENDING_KEY);
+    }
+
     setCloudStatus(
-      `Cloud: Pulled ${slicesToPull.length} slice${slicesToPull.length === 1 ? "" : "s"} via ${preferDelta ? "delta" : "full"} sync • ${new Date(cloud.updatedAt).toLocaleString()}`
+      `Cloud: Pulled ${slicesToPull.length} slice${slicesToPull.length === 1 ? "" : "s"} via ${preferDelta ? "delta" : "full"} sync • ${new Date(cloud.updatedAt || Date.now()).toLocaleString()}`
     );
   }else{
     setCloudLastSyncAt(Date.now());
