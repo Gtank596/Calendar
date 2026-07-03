@@ -232,6 +232,7 @@ const eventCatDDMenu = document.getElementById("eventCatDDMenu");
 const eventConnectionGroup = document.getElementById("eventConnectionGroup");
 const eventConnectionColor = document.getElementById("eventConnectionColor");
 const eventConnectionLineStyle = document.getElementById("eventConnectionLineStyle");
+const weekConnectionRail = document.getElementById("weekConnectionRail");
 
 const startTimeInput = document.getElementById("startTimeInput");
 const endTimeInput = document.getElementById("endTimeInput");
@@ -700,6 +701,7 @@ function snapshotBeforeChange(){
 // 04. UTILITY CONSTANTS
 // ============================================================================
 const DEFAULT_COLOR = "#7a5aff";
+const CONNECTION_LINE_STYLES = ["solid", "dashed", "dotted", "double"];
 const STORAGE_KEY = "myCalendarData_v4";
 const SPLIT_STORAGE_VERSION = 3;
 const EVENTS_STORAGE_KEY = "myCalendarEvents_v1";
@@ -11170,9 +11172,14 @@ const days = Array.isArray(obj?.recurrence?.days)
 
   const connectionGroupId = rawConnectionId || connectionGroupIds[0] || normalizeConnectionGroupId(rawConnectionGroup);
   const connectionColor = (obj?.connectionColor ?? obj?.color ?? DEFAULT_COLOR).toString().trim();
-  const connectionLineStyle = ["solid", "dashed", "dotted", "double"].includes(obj?.connectionLineStyle)
-    ? obj.connectionLineStyle
-    : "solid";
+  const connectionLineStyle = normalizeConnectionLineStyle(obj?.connectionLineStyle);
+  const connections = normalizeEventConnections(obj, color || DEFAULT_COLOR);
+  const primaryConnection = connections[0] || {
+    id: connectionGroupId,
+    name: rawConnectionGroup || obj?.connectionGroupName || obj?.connectionGroup || "",
+    color: connectionColor.startsWith("#") ? connectionColor : (color.startsWith("#") ? color : DEFAULT_COLOR),
+    lineStyle: connectionLineStyle
+  };
 
   return {
   id: obj?.id || cryptoId(),
@@ -11182,11 +11189,12 @@ const days = Array.isArray(obj?.recurrence?.days)
   source: (obj?.source ?? "calendar").toString(),
 categoryId: (obj?.categoryId ?? "other").toString(),
   color: color.startsWith("#") ? color : DEFAULT_COLOR,
-  connectionGroupId,
-  connectionGroupName: rawConnectionGroup || obj?.connectionGroupName || obj?.connectionGroup || "",
-  connectionGroupIds,
-  connectionColor: connectionColor.startsWith("#") ? connectionColor : (color.startsWith("#") ? color : DEFAULT_COLOR),
-  connectionLineStyle,
+  connectionGroupId: primaryConnection?.id || "",
+  connectionGroupName: primaryConnection?.name || "",
+  connectionGroupIds: connections.length ? connections.map(conn => conn.id) : connectionGroupIds,
+  connections,
+  connectionColor: primaryConnection?.color || (connectionColor.startsWith("#") ? connectionColor : (color.startsWith("#") ? color : DEFAULT_COLOR)),
+  connectionLineStyle: primaryConnection?.lineStyle || connectionLineStyle,
   startTime,
   endTime,
   startDate: (obj?.startDate ?? "").toString(),
@@ -11681,6 +11689,10 @@ eventColor?.addEventListener("input", () => {
   if(eventConnectionColor && !eventConnectionColor.value){
     eventConnectionColor.value = eventColor.value || DEFAULT_COLOR;
   }
+
+  if(viewMode === "week"){
+    renderWeekConnectionRail();
+  }
 });
 
 // ============================================================================
@@ -11703,6 +11715,7 @@ let selectedDateISO = null;
 let selectedEventId = null;
 let editBaseDateISO = null;
 let selectedConnectionGroupId = null;
+let connectionEditorRows = [];
 let lastWeekAutoScrollKey = "";
 let weekConnectionResizeTimer = null;
 
@@ -11949,6 +11962,12 @@ function resetDowHeader(){
     cell.onclick = null;
     cell.innerHTML = WEEK_DOW_LABELS[index] || "";
   });
+
+  if(viewMode !== "week"){
+    dow.classList.remove("hasConnectionRail");
+    const rail = document.getElementById("weekConnectionRail");
+    if(rail) rail.innerHTML = "";
+  }
 }
 
 function updateWeekDowHeader(weekStartDate, todayISO){
@@ -11975,6 +11994,8 @@ function updateWeekDowHeader(weekStartDate, todayISO){
       selectDate(cellISO);
     };
   });
+
+  renderWeekConnectionRail();
 }
 
 function startOfWeek(dt){
@@ -12332,18 +12353,115 @@ function normalizeConnectionGroupId(value = ""){
     .replace(/^-+|-+$/g, "");
 }
 
-function getEventConnectionGroupIds(ev = {}){
-  const ids = [];
+function normalizeConnectionLineStyle(value = "solid"){
+  return CONNECTION_LINE_STYLES.includes(value) ? value : "solid";
+}
 
-  if(Array.isArray(ev.connectionGroupIds)){
-    ids.push(...ev.connectionGroupIds.map(x => String(x || "").trim()).filter(Boolean));
+function safeHexColor(value = "", fallback = DEFAULT_COLOR){
+  const color = String(value || "").trim();
+  return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
+}
+
+function normalizeEventConnectionRecord(record = {}, fallbackColor = DEFAULT_COLOR){
+  const rawName = String(
+    record?.name ??
+    record?.label ??
+    record?.connectionGroupName ??
+    record?.connectionGroup ??
+    record?.group ??
+    ""
+  ).trim();
+
+  const rawId = String(
+    record?.id ??
+    record?.connectionGroupId ??
+    record?.groupId ??
+    ""
+  ).trim();
+
+  const id = rawId || normalizeConnectionGroupId(rawName);
+  if(!id) return null;
+
+  const name = rawName || getEventConnectionGroupName({}, id);
+  const color = safeHexColor(
+    record?.color ?? record?.connectionColor ?? fallbackColor,
+    safeHexColor(fallbackColor, DEFAULT_COLOR)
+  );
+
+  return {
+    id,
+    name,
+    color,
+    lineStyle: normalizeConnectionLineStyle(record?.lineStyle ?? record?.connectionLineStyle)
+  };
+}
+
+function normalizeEventConnections(ev = {}, fallbackColor = DEFAULT_COLOR){
+  const out = [];
+  const seen = new Set();
+
+  const add = (record = {}) => {
+    const normalized = normalizeEventConnectionRecord(record, fallbackColor);
+    if(!normalized || seen.has(normalized.id)) return;
+    seen.add(normalized.id);
+    out.push(normalized);
+  };
+
+  if(Array.isArray(ev?.connections)){
+    ev.connections.forEach(add);
   }
 
-  if(ev.connectionGroupId) ids.push(String(ev.connectionGroupId).trim());
+  const legacyName = String(ev?.connectionGroupName ?? ev?.connectionGroup ?? "").trim();
+  const legacyId = String(ev?.connectionGroupId ?? "").trim();
 
-  const nameId = normalizeConnectionGroupId(ev.connectionGroupName || ev.connectionGroup || "");
-  if(nameId) ids.push(nameId);
+  if(legacyId || legacyName){
+    add({
+      id: legacyId || normalizeConnectionGroupId(legacyName),
+      name: legacyName,
+      color: ev?.connectionColor || ev?.color || fallbackColor,
+      lineStyle: ev?.connectionLineStyle || "solid"
+    });
+  }
 
+  if(Array.isArray(ev?.connectionGroupIds)){
+    ev.connectionGroupIds.forEach((id, index) => {
+      const safeId = String(id || "").trim();
+      if(!safeId) return;
+
+      add({
+        id: safeId,
+        name: index === 0 ? legacyName : "",
+        color: ev?.connectionColor || ev?.color || fallbackColor,
+        lineStyle: ev?.connectionLineStyle || "solid"
+      });
+    });
+  }
+
+  return out;
+}
+
+function getEventConnections(ev = {}){
+  return normalizeEventConnections(ev, ev?.color || ev?.connectionColor || DEFAULT_COLOR);
+}
+
+function getPillWeekConnections(pill){
+  if(Array.isArray(pill?.__weekConnections)){
+    return pill.__weekConnections.map(conn => normalizeEventConnectionRecord(conn)).filter(Boolean);
+  }
+
+  const legacyId = pill?.dataset?.connectionGroupId || "";
+  if(!legacyId) return [];
+
+  return [normalizeEventConnectionRecord({
+    id: legacyId,
+    name: pill?.dataset?.connectionGroupName || legacyId,
+    color: pill?.dataset?.connectionColor || DEFAULT_COLOR,
+    lineStyle: pill?.dataset?.connectionLineStyle || "solid"
+  })].filter(Boolean);
+}
+
+function getEventConnectionGroupIds(ev = {}){
+  const ids = getEventConnections(ev).map(conn => conn.id);
   return [...new Set(ids.filter(Boolean))];
 }
 
@@ -12351,10 +12469,7 @@ function getEventPrimaryConnectionGroupId(ev = {}){
   return getEventConnectionGroupIds(ev)[0] || "";
 }
 
-function getEventConnectionGroupName(ev = {}, groupId = ""){
-  const name = String(ev.connectionGroupName || ev.connectionGroup || "").trim();
-  if(name) return name;
-
+function formatConnectionNameFromId(groupId = ""){
   return String(groupId || "")
     .split("-")
     .filter(Boolean)
@@ -12362,15 +12477,29 @@ function getEventConnectionGroupName(ev = {}, groupId = ""){
     .join(" ");
 }
 
-function getEventConnectionLineStyle(ev = {}){
-  return ["solid", "dashed", "dotted", "double"].includes(ev.connectionLineStyle)
-    ? ev.connectionLineStyle
-    : "solid";
+function getEventConnectionGroupName(ev = {}, groupId = ""){
+  const safeGroupId = String(groupId || "").trim();
+  const match = getEventConnections(ev).find(conn => conn.id === safeGroupId);
+  if(match?.name) return match.name;
+
+  const name = String(ev.connectionGroupName || ev.connectionGroup || "").trim();
+  if(name && (!safeGroupId || normalizeConnectionGroupId(name) === safeGroupId || ev.connectionGroupId === safeGroupId)){
+    return name;
+  }
+
+  return formatConnectionNameFromId(safeGroupId);
 }
 
-function getEventConnectionColor(ev = {}){
-  const color = String(ev.connectionColor || ev.color || DEFAULT_COLOR).trim();
-  return color.startsWith("#") ? color : DEFAULT_COLOR;
+function getEventConnectionLineStyle(ev = {}, groupId = ""){
+  const safeGroupId = String(groupId || "").trim();
+  const match = getEventConnections(ev).find(conn => !safeGroupId || conn.id === safeGroupId);
+  return match?.lineStyle || normalizeConnectionLineStyle(ev.connectionLineStyle);
+}
+
+function getEventConnectionColor(ev = {}, groupId = ""){
+  const safeGroupId = String(groupId || "").trim();
+  const match = getEventConnections(ev).find(conn => !safeGroupId || conn.id === safeGroupId);
+  return match?.color || safeHexColor(ev.connectionColor || ev.color || DEFAULT_COLOR);
 }
 
 function getWeekEventSortKey(ev = {}, iso = ""){
@@ -12401,22 +12530,324 @@ function clearConnectionSelection(){
   }
 }
 
+function getLegacyConnectionEditorRow(){
+  const name = String(eventConnectionGroup?.value || "").trim();
+  const id = normalizeConnectionGroupId(name);
+  if(!name && !id) return null;
+
+  return normalizeEventConnectionRecord({
+    id,
+    name,
+    color: eventConnectionColor?.value || eventColor?.value || DEFAULT_COLOR,
+    lineStyle: eventConnectionLineStyle?.value || "solid"
+  }, eventColor?.value || DEFAULT_COLOR);
+}
+
+function syncLegacyConnectionFieldsFromEditorRows(){
+  const first = connectionEditorRows[0] || null;
+
+  if(eventConnectionGroup) eventConnectionGroup.value = first?.name || "";
+  if(eventConnectionColor) eventConnectionColor.value = first?.color || eventColor?.value || DEFAULT_COLOR;
+  if(eventConnectionLineStyle) eventConnectionLineStyle.value = first?.lineStyle || "solid";
+}
+
+function setConnectionEditorRows(connections = []){
+  const fallbackColor = eventColor?.value || DEFAULT_COLOR;
+
+  connectionEditorRows = (connections || [])
+    .map(conn => normalizeEventConnectionRecord(conn, fallbackColor))
+    .filter(Boolean);
+
+  syncLegacyConnectionFieldsFromEditorRows();
+  renderWeekConnectionRail({ preserveRows:true });
+}
+
+function getConnectionEditorRowsFromRail(opts = {}){
+  const keepEmpty = !!opts.keepEmpty;
+  const rail = document.getElementById("weekConnectionRail");
+  const rowEls = rail ? Array.from(rail.querySelectorAll(".weekConnectionEditRow")) : [];
+
+  if(!rowEls.length){
+    return connectionEditorRows.map(row => ({ ...row }));
+  }
+
+  const fallbackColor = eventColor?.value || DEFAULT_COLOR;
+
+  return rowEls
+    .map(row => {
+      const name = String(row.querySelector(".weekConnectionNameInput")?.value || "").trim();
+      const color = safeHexColor(row.querySelector(".weekConnectionColorInput")?.value || fallbackColor, fallbackColor);
+      const lineStyle = normalizeConnectionLineStyle(row.querySelector(".weekConnectionStyleSelect")?.value || "solid");
+
+      if(!name && !keepEmpty) return null;
+
+      const id = normalizeConnectionGroupId(name);
+      if(!id && !keepEmpty) return null;
+
+      return {
+        id,
+        name,
+        color,
+        lineStyle
+      };
+    })
+    .filter(Boolean);
+}
+
+function getConnectionRowsForSave(){
+  let rows = [];
+
+  if(viewMode === "week"){
+    rows = getConnectionEditorRowsFromRail({ keepEmpty:false });
+  }
+
+  // Month/day do not show connection controls. If an existing event already
+  // has connections, preserve them while editing normal fields there.
+  if(!rows.length && connectionEditorRows.length){
+    rows = connectionEditorRows;
+  }
+
+  return rows
+    .map(row => normalizeEventConnectionRecord(row, eventColor?.value || DEFAULT_COLOR))
+    .filter(row => row && row.id && row.name);
+}
+
+function getConnectionFieldsForSave(fallbackColor = DEFAULT_COLOR){
+  const connections = getConnectionRowsForSave();
+  const primary = connections[0] || null;
+
+  return {
+    connections,
+    connectionGroupId: primary?.id || "",
+    connectionGroupName: primary?.name || "",
+    connectionGroupIds: connections.map(conn => conn.id),
+    connectionColor: primary?.color || fallbackColor || DEFAULT_COLOR,
+    connectionLineStyle: primary?.lineStyle || "solid"
+  };
+}
+
+function syncConnectionEditorRowsFromLegacy(){
+  const legacy = getLegacyConnectionEditorRow();
+
+  if(legacy){
+    if(connectionEditorRows.length){
+      connectionEditorRows = [legacy, ...connectionEditorRows.slice(1)];
+    }else{
+      connectionEditorRows = [legacy];
+    }
+  }else if(connectionEditorRows.length <= 1){
+    connectionEditorRows = [];
+  }
+
+  renderWeekConnectionRail({ preserveRows:true });
+}
+
+function ensureWeekConnectionRail(){
+  if(!dow) return null;
+
+  let rail = document.getElementById("weekConnectionRail");
+
+  if(!rail){
+    rail = document.createElement("section");
+    rail.id = "weekConnectionRail";
+    rail.className = "weekConnectionRail";
+    rail.setAttribute("aria-live", "polite");
+    dow.appendChild(rail);
+  }
+
+  dow.classList.toggle("hasConnectionRail", viewMode === "week");
+  return rail;
+}
+
+function collectWeekConnectionGroupMeta(){
+  const meta = new Map();
+  if(!grid) return meta;
+
+  const cards = Array.from(grid.querySelectorAll(".weekEventPill"));
+
+  for(const card of cards){
+    for(const conn of getPillWeekConnections(card)){
+      if(!conn?.id) continue;
+
+      if(!meta.has(conn.id)){
+        meta.set(conn.id, {
+          id: conn.id,
+          name: conn.name || formatConnectionNameFromId(conn.id),
+          color: conn.color || DEFAULT_COLOR,
+          lineStyle: conn.lineStyle || "solid",
+          count: 0
+        });
+      }
+
+      meta.get(conn.id).count += 1;
+    }
+  }
+
+  return meta;
+}
+
+function renderConnectionEditorRowsHtml(){
+  if(!connectionEditorRows.length){
+    return `<div class="weekConnectionEmptyHint">No line on this event yet.</div>`;
+  }
+
+  return connectionEditorRows.map((row, index) => {
+    const safeRow = normalizeEventConnectionRecord(row, eventColor?.value || DEFAULT_COLOR) || {
+      id:"",
+      name:"",
+      color:eventColor?.value || DEFAULT_COLOR,
+      lineStyle:"solid"
+    };
+
+    return `
+      <div class="weekConnectionEditRow" data-index="${index}">
+        <input
+          class="input weekConnectionNameInput"
+          value="${escapeHtml(safeRow.name || "")}"
+          placeholder="e.g., Work routine"
+          aria-label="Connection line name"
+        />
+        <input
+          class="weekConnectionColorInput"
+          type="color"
+          value="${escapeHtml(safeHexColor(safeRow.color, DEFAULT_COLOR))}"
+          aria-label="Connection line color"
+        />
+        <select class="input weekConnectionStyleSelect" aria-label="Connection line style">
+          ${CONNECTION_LINE_STYLES.map(style => `
+            <option value="${style}" ${style === safeRow.lineStyle ? "selected" : ""}>${style.charAt(0).toUpperCase() + style.slice(1)}</option>
+          `).join("")}
+        </select>
+        <button class="weekConnectionRemoveBtn" type="button" data-index="${index}" title="Remove this line">×</button>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderConnectionChipsHtml(groupMeta = collectWeekConnectionGroupMeta(), selectedMeta = null){
+  const groups = Array.from(groupMeta.values())
+    .sort((a, b) => (b.count || 0) - (a.count || 0) || String(a.name || "").localeCompare(String(b.name || "")));
+
+  const selected = selectedConnectionGroupId
+    ? (selectedMeta || groupMeta.get(selectedConnectionGroupId))
+    : null;
+
+  const banner = selected
+    ? `
+      <button class="weekConnectionSelectedChip" type="button" data-clear-selected="1" style="--connection-color:${escapeHtml(selected.color || DEFAULT_COLOR)}" title="Clear selected chain">
+        <span class="weekConnectionBannerDot"></span>
+        <span>Connected chain: <b>${escapeHtml(selected.name || "Untitled chain")}</b></span>
+        <span class="weekConnectionBannerCount">${selected.count || 0} events</span>
+      </button>
+    `
+    : `<div class="weekConnectionSelectedHint">Week lines</div>`;
+
+  const chips = groups.length
+    ? groups.map(group => `
+      <button
+        class="weekConnectionChip ${selectedConnectionGroupId === group.id ? "active" : ""}"
+        type="button"
+        data-group-id="${escapeHtml(group.id)}"
+        style="--connection-color:${escapeHtml(group.color || DEFAULT_COLOR)}"
+        title="Highlight ${escapeHtml(group.name || group.id)}"
+      >
+        <span class="weekConnectionBannerDot"></span>
+        <span class="weekConnectionChipName">${escapeHtml(group.name || group.id)}</span>
+        <span class="weekConnectionBannerCount">${group.count || 0}</span>
+      </button>
+    `).join("")
+    : `<span class="weekConnectionNoChips">Add matching line names to two events and the wire appears here.</span>`;
+
+  return `${banner}<div class="weekConnectionChipScroller">${chips}</div>`;
+}
+
+function renderWeekConnectionRail(opts = {}){
+  const rail = document.getElementById("weekConnectionRail");
+
+  if(viewMode !== "week"){
+    dow?.classList.remove("hasConnectionRail");
+    if(rail) rail.innerHTML = "";
+    return;
+  }
+
+  const safeRail = ensureWeekConnectionRail();
+  if(!safeRail) return;
+
+  if(!opts.preserveRows){
+    connectionEditorRows = getConnectionEditorRowsFromRail({ keepEmpty:true });
+  }
+
+  const groupMeta = collectWeekConnectionGroupMeta();
+
+  safeRail.innerHTML = `
+    <div class="weekConnectionRailInner">
+      <div class="weekConnectionComposer">
+        <button class="weekConnectionAddLineBtn" type="button" title="Add a connection line to the current event">+ Line</button>
+        <div class="weekConnectionEditorRows">${renderConnectionEditorRowsHtml()}</div>
+      </div>
+
+      <div class="weekConnectionChipWrap">
+        ${renderConnectionChipsHtml(groupMeta, opts.selectedMeta || null)}
+      </div>
+    </div>
+  `;
+
+  safeRail.querySelector(".weekConnectionAddLineBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    connectionEditorRows = getConnectionEditorRowsFromRail({ keepEmpty:true });
+    connectionEditorRows.push({
+      id:"",
+      name:"",
+      color:eventColor?.value || DEFAULT_COLOR,
+      lineStyle:"solid"
+    });
+    renderWeekConnectionRail();
+
+    const inputs = safeRail.querySelectorAll(".weekConnectionNameInput");
+    inputs[inputs.length - 1]?.focus({ preventScroll:true });
+  });
+
+  safeRail.querySelectorAll(".weekConnectionRemoveBtn").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const index = parseInt(btn.dataset.index || "-1", 10);
+      connectionEditorRows = getConnectionEditorRowsFromRail({ keepEmpty:true });
+      if(index >= 0) connectionEditorRows.splice(index, 1);
+      syncLegacyConnectionFieldsFromEditorRows();
+      renderWeekConnectionRail();
+    });
+  });
+
+  safeRail.querySelectorAll(".weekConnectionNameInput, .weekConnectionColorInput, .weekConnectionStyleSelect").forEach(input => {
+    const eventName = input.matches("select") ? "change" : "input";
+    input.addEventListener(eventName, () => {
+      connectionEditorRows = getConnectionEditorRowsFromRail({ keepEmpty:true });
+      syncLegacyConnectionFieldsFromEditorRows();
+    });
+  });
+
+  safeRail.querySelectorAll(".weekConnectionChip[data-group-id]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const groupId = btn.dataset.groupId || "";
+      if(selectedConnectionGroupId === groupId){
+        clearConnectionSelection();
+      }else{
+        selectConnectionGroup(groupId);
+      }
+    });
+  });
+
+  safeRail.querySelector("[data-clear-selected]")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    clearConnectionSelection();
+  });
+}
+
 function setWeekConnectionBanner(groupMeta = null){
   const existing = grid?.querySelector(".weekConnectionBanner");
   if(existing) existing.remove();
-
-  if(!grid || !groupMeta || !selectedConnectionGroupId) return;
-
-  const banner = document.createElement("div");
-  banner.className = "weekConnectionBanner";
-  banner.style.setProperty("--connection-color", groupMeta.color || DEFAULT_COLOR);
-  banner.innerHTML = `
-    <span class="weekConnectionBannerDot"></span>
-    <span>Connected chain: <b>${escapeHtml(groupMeta.name || "Untitled chain")}</b></span>
-    <span class="weekConnectionBannerCount">${groupMeta.count || 0} events</span>
-  `;
-
-  grid.appendChild(banner);
+  renderWeekConnectionRail({ selectedMeta: groupMeta });
 }
 
 function renderWeekConnectionHighlights(){
@@ -12428,28 +12859,31 @@ function renderWeekConnectionHighlights(){
   // state to every week pill. Otherwise unrelated events with no connection
   // group stay bright while the selected chain is trying to take focus.
   const allCards = Array.from(grid.querySelectorAll(".weekEventPill"));
-  const connectedCards = allCards.filter(card => card.dataset.connectionGroupId);
+  const connectedCards = allCards.filter(card => getPillWeekConnections(card).length);
   const paths = Array.from(grid.querySelectorAll(".weekConnector[data-connection-group-id]"));
   const groupMeta = new Map();
 
   for(const card of connectedCards){
-    const groupId = card.dataset.connectionGroupId || "";
-    if(!groupId) continue;
+    for(const conn of getPillWeekConnections(card)){
+      const groupId = conn.id || "";
+      if(!groupId) continue;
 
-    if(!groupMeta.has(groupId)){
-      groupMeta.set(groupId, {
-        name: card.dataset.connectionGroupName || groupId,
-        color: card.dataset.connectionColor || DEFAULT_COLOR,
-        count: 0
-      });
+      if(!groupMeta.has(groupId)){
+        groupMeta.set(groupId, {
+          id: groupId,
+          name: conn.name || formatConnectionNameFromId(groupId),
+          color: conn.color || DEFAULT_COLOR,
+          count: 0
+        });
+      }
+
+      groupMeta.get(groupId).count += 1;
     }
-
-    groupMeta.get(groupId).count += 1;
   }
 
   allCards.forEach(card => {
-    const groupId = card.dataset.connectionGroupId || "";
-    const isMatch = selected && groupId === selected;
+    const cardConnections = getPillWeekConnections(card);
+    const isMatch = !!(selected && cardConnections.some(conn => conn.id === selected));
 
     card.classList.toggle("chain-selected", !!isMatch);
     card.classList.toggle("chain-dimmed", !!selected && !isMatch);
@@ -13428,29 +13862,33 @@ function renderWeekConnections(){
   svg.style.width = `${layerWidth}px`;
   svg.style.height = `${layerHeight}px`;
 
-  const pills = Array.from(grid.querySelectorAll(".weekEventPill[data-connection-group-id]"));
+  const pills = Array.from(grid.querySelectorAll(".weekEventPill.connectedEventPill"));
   const groups = new Map();
 
   for(const pill of pills){
-    const groupId = pill.dataset.connectionGroupId;
-    if(!groupId) continue;
+    const connections = getPillWeekConnections(pill);
 
-    if(!groups.has(groupId)){
-      groups.set(groupId, {
-        id: groupId,
-        name: pill.dataset.connectionGroupName || getEventConnectionGroupName({}, groupId),
-        color: pill.dataset.connectionColor || DEFAULT_COLOR,
-        lineStyle: pill.dataset.connectionLineStyle || "solid",
-        items: []
+    for(const conn of connections){
+      const groupId = conn.id || "";
+      if(!groupId) continue;
+
+      if(!groups.has(groupId)){
+        groups.set(groupId, {
+          id: groupId,
+          name: conn.name || getEventConnectionGroupName({}, groupId),
+          color: conn.color || DEFAULT_COLOR,
+          lineStyle: conn.lineStyle || "solid",
+          items: []
+        });
+      }
+
+      groups.get(groupId).items.push({
+        pill,
+        dayISO: pill.dataset.weekDayIso || "",
+        sortKey: pill.dataset.weekSortKey || "",
+        rect: getWeekConnectorLocalRect(pill, parentRect)
       });
     }
-
-    groups.get(groupId).items.push({
-      pill,
-      dayISO: pill.dataset.weekDayIso || "",
-      sortKey: pill.dataset.weekSortKey || "",
-      rect: getWeekConnectorLocalRect(pill, parentRect)
-    });
   }
 
   pills.forEach(pill => {
@@ -13697,20 +14135,19 @@ function renderWeekView(){
       const pill = document.createElement("span");
       pill.className = "eventPill weekEventPill";
 
-      const groupId = getEventPrimaryConnectionGroupId(ev);
-      if(groupId){
-        const groupName = getEventConnectionGroupName(ev, groupId);
-        const groupColor = getEventConnectionColor(ev);
-        const lineStyle = getEventConnectionLineStyle(ev);
+      const pillConnections = getEventConnections(ev);
+      if(pillConnections.length){
+        const primaryConnection = pillConnections[0];
 
+        pill.__weekConnections = pillConnections;
         pill.classList.add("connectedEventPill");
-        pill.dataset.connectionGroupId = groupId;
-        pill.dataset.connectionGroupName = groupName;
-        pill.dataset.connectionColor = groupColor;
-        pill.dataset.connectionLineStyle = lineStyle;
+        pill.dataset.connectionGroupId = primaryConnection.id;
+        pill.dataset.connectionGroupName = primaryConnection.name || getEventConnectionGroupName(ev, primaryConnection.id);
+        pill.dataset.connectionColor = primaryConnection.color || DEFAULT_COLOR;
+        pill.dataset.connectionLineStyle = primaryConnection.lineStyle || "solid";
         pill.dataset.weekDayIso = cellISO;
         pill.dataset.weekSortKey = getWeekEventSortKey(ev, cellISO);
-        pill.style.setProperty("--connection-color", groupColor);
+        pill.style.setProperty("--connection-color", primaryConnection.color || DEFAULT_COLOR);
       }
 
       const t = formatTimeRange(ev.startTime, ev.endTime);
@@ -14135,6 +14572,7 @@ if(eventCategory) eventCategory.value = "other";
 if(eventConnectionGroup) eventConnectionGroup.value = "";
 if(eventConnectionColor) eventConnectionColor.value = eventColor?.value || DEFAULT_COLOR;
 if(eventConnectionLineStyle) eventConnectionLineStyle.value = "solid";
+setConnectionEditorRows([]);
 renderEventCategoryOptions();
 }
 
@@ -14166,6 +14604,7 @@ renderEventCategoryOptions();
   setAmPm(endAmPm, /PM$/i.test(ev.endTime||"") ? "pm" : "am");
 
   if(eventColor) eventColor.value = ev.color || DEFAULT_COLOR;
+  setConnectionEditorRows(getEventConnections(ev));
 
   // If this event is a trip band (background shading), show that in the Repeat dropdown.
   const isTrip = (ev?.span?.mode === "bg");
@@ -14228,13 +14667,7 @@ if(priceRaw !== ""){
 
   const color = (eventColor?.value || DEFAULT_COLOR).toString();
 const categoryId = eventCategory?.value || "other";
-const connectionGroupName = (eventConnectionGroup?.value || "").toString().trim();
-const connectionGroupId = normalizeConnectionGroupId(connectionGroupName);
-const connectionColor = (eventConnectionColor?.value || color || DEFAULT_COLOR).toString();
-const connectionLineStyle = ["solid", "dashed", "dotted", "double"].includes(eventConnectionLineStyle?.value)
-  ? eventConnectionLineStyle.value
-  : "solid";
-
+const connectionFields = getConnectionFieldsForSave(color);
   const freq = (eventRepeat?.value || "none").toString();
   const until = (repeatUntil?.value || "").toString().trim();
   const interval = Math.max(1, parseInt(repeatInterval?.value || "1",10) || 1);
@@ -14287,11 +14720,7 @@ const before = snapshotBeforeChange();
 price,
 categoryId,
         color,
-        connectionGroupId,
-        connectionGroupName,
-        connectionGroupIds: connectionGroupId ? [connectionGroupId] : [],
-        connectionColor,
-        connectionLineStyle,
+        ...connectionFields,
         startTime: startStr,
         endTime: endStr,
         startDate: existing.startDate || selectedDateISO,
@@ -14311,11 +14740,7 @@ categoryId,
         price,
         categoryId,
         color,
-        connectionGroupId,
-        connectionGroupName,
-        connectionGroupIds: connectionGroupId ? [connectionGroupId] : [],
-        connectionColor,
-        connectionLineStyle,
+        ...connectionFields,
         startTime: startStr,
         endTime: endStr,
         startDate: selectedDateISO,
@@ -14327,7 +14752,20 @@ categoryId,
       changedEventForCloud = newEv;
     }
   } else {
-    const newEv = { id: cryptoId(), title, details, price, categoryId, color, startTime: startStr, endTime: endStr, startDate: selectedDateISO, span, recurrence: nextRecurrence };
+    const newEv = {
+      id: cryptoId(),
+      title,
+      details,
+      price,
+      categoryId,
+      color,
+      ...connectionFields,
+      startTime: startStr,
+      endTime: endStr,
+      startDate: selectedDateISO,
+      span,
+      recurrence: nextRecurrence
+    };
     list.push(newEv);
     selectedEventId = newEv.id;
     changedEventForCloud = newEv;
