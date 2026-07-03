@@ -6851,58 +6851,45 @@ body[data-calendar-view="week"] #calendarPage .day.weekViewDay.selectedDay .num{
 }
 
 /* =========================================================
-   WEEK CONNECTION RAIL — WEEK VIEW ONLY
+   WEEK CONNECTION RAIL + SELECTED LINE EDITOR
    ---------------------------------------------------------
-   The connection composer/chips live in the weekday header.
-   Month and Day view stay completely clean: no rail, no editor
-   connection block, no stray chain banner.
+   The rail only appears in Week view. Selecting a chip/wire
+   turns the left side into a tiny chain-wide line editor.
    ========================================================= */
-.connectionGrid{
-  display:none !important;
-}
-
 .weekConnectionRail{
   display:none;
 }
 
-.weekConnectionBanner{
-  display:none !important;
-}
-
 body[data-calendar-view="week"] #calendarPage .dow.hasConnectionRail{
-  height:128px;
-  min-height:128px;
+  height:132px;
   overflow:visible;
-  background:
-    linear-gradient(180deg, rgba(255,255,255,.052), rgba(255,255,255,.025));
 }
 
-body[data-calendar-view="week"] #calendarPage .dow.hasConnectionRail > div.weekDowDay{
+body[data-calendar-view="week"] #calendarPage .dow.hasConnectionRail > div{
   height:44px;
 }
 
-body[data-calendar-view="week"] #calendarPage .dow.hasConnectionRail .weekConnectionRail{
+body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
+  display:block;
   position:absolute;
   left:0;
   right:0;
   top:44px;
-  z-index:30;
-  display:block;
-  min-height:84px;
+  min-height:78px;
   padding:8px 10px 10px;
-  border-top:1px solid rgba(255,255,255,.075);
+  border-top:1px solid rgba(255,255,255,.08);
   background:
-    radial-gradient(420px 120px at 18% 0%, rgba(120,90,255,.16), transparent 65%),
-    linear-gradient(180deg, rgba(12,16,31,.78), rgba(12,16,31,.48));
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.035);
+    radial-gradient(360px 110px at 14% 0%, rgba(120,90,255,.12), transparent 68%),
+    rgba(255,255,255,.018);
+  z-index:20;
 }
 
 .weekConnectionRailInner{
+  height:100%;
   display:grid;
-  grid-template-columns:minmax(280px, 1.05fr) minmax(280px, .95fr);
+  grid-template-columns:minmax(280px, 1fr) minmax(260px, .95fr);
   gap:10px;
   align-items:stretch;
-  height:100%;
 }
 
 .weekConnectionComposer,
@@ -6913,208 +6900,230 @@ body[data-calendar-view="week"] #calendarPage .dow.hasConnectionRail .weekConnec
   gap:8px;
   padding:8px;
   border:1px solid rgba(255,255,255,.08);
-  border-radius:15px;
-  background:rgba(255,255,255,.028);
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.035);
-}
-
-.weekConnectionComposer{
-  align-items:flex-start;
+  border-radius:16px;
+  background:rgba(255,255,255,.03);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
 }
 
 .weekConnectionAddLineBtn{
   flex:0 0 auto;
-  min-width:64px;
-  height:34px;
-  padding:0 11px;
-  border-radius:12px;
-  border:1px solid rgba(140,110,255,.42);
-  background:linear-gradient(180deg, rgba(126,96,255,.34), rgba(110,84,235,.20));
+  height:36px;
+  padding:0 12px;
+  border-radius:13px;
+  border:1px solid rgba(140,110,255,.58);
+  background:linear-gradient(180deg, rgba(126,96,255,.42), rgba(110,84,235,.24));
   color:#fff;
-  font-size:12px;
+  font-size:13px;
   font-weight:850;
   cursor:pointer;
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,.10),
-    0 8px 18px rgba(90,60,220,.16);
+  box-shadow:0 10px 22px rgba(80,55,200,.18);
 }
 
 .weekConnectionAddLineBtn:hover{
-  border-color:rgba(165,145,255,.62);
-  background:linear-gradient(180deg, rgba(126,96,255,.44), rgba(110,84,235,.26));
+  transform:translateY(-1px);
+  border-color:rgba(170,150,255,.75);
+  background:linear-gradient(180deg, rgba(140,112,255,.56), rgba(120,90,255,.34));
 }
 
 .weekConnectionEditorRows{
+  flex:1;
   min-width:0;
-  flex:1 1 auto;
   display:flex;
-  flex-direction:column;
-  gap:6px;
-  max-height:70px;
-  overflow:auto;
-  padding-right:2px;
-}
-
-.weekConnectionEditRow{
-  display:grid;
-  grid-template-columns:minmax(120px, 1fr) 38px 104px 28px;
-  gap:6px;
   align-items:center;
+  gap:8px;
+  overflow-x:auto;
+  padding-bottom:2px;
 }
 
-.weekConnectionEditRow .input,
-.weekConnectionColorInput,
-.weekConnectionStyleSelect{
-  height:30px;
-  min-height:0;
-  border-radius:10px;
+.weekConnectionEditRow,
+.weekConnectionGlobalEditRow{
+  display:grid;
+  grid-template-columns:minmax(150px, 1fr) 72px 112px auto;
+  align-items:center;
+  gap:8px;
+  min-width:min(560px, 100%);
+}
+
+.weekConnectionGlobalEditRow{
+  grid-template-columns:minmax(150px, 1fr) 72px 112px;
+  min-width:0;
+}
+
+.weekConnectionNameInput,
+.weekConnectionGlobalNameInput,
+.weekConnectionStyleSelect,
+.weekConnectionGlobalStyleSelect{
+  height:34px;
+  min-height:34px;
   font-size:12px;
 }
 
-.weekConnectionNameInput{
-  min-width:0;
-}
-
-.weekConnectionColorInput{
-  width:38px;
-  padding:2px;
-  border:1px solid rgba(255,255,255,.12);
+.weekConnectionColorInput,
+.weekConnectionGlobalColorInput{
+  width:100%;
+  height:34px;
+  padding:3px;
+  border-radius:11px;
+  border:1px solid rgba(255,255,255,.10);
   background:rgba(255,255,255,.05);
   cursor:pointer;
 }
 
 .weekConnectionRemoveBtn{
-  width:28px;
-  height:28px;
-  border-radius:10px;
+  width:32px;
+  height:32px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:11px;
   border:1px solid rgba(255,110,130,.24);
   background:rgba(255,70,100,.10);
-  color:rgba(255,220,226,.92);
+  color:rgba(255,220,226,.94);
   font-weight:900;
   cursor:pointer;
 }
 
 .weekConnectionRemoveBtn:hover{
   background:rgba(255,70,100,.18);
-  border-color:rgba(255,110,130,.38);
+  border-color:rgba(255,110,130,.40);
 }
 
 .weekConnectionEmptyHint,
 .weekConnectionNoChips,
 .weekConnectionSelectedHint{
-  color:rgba(233,236,255,.50);
+  color:rgba(233,236,255,.48);
   font-size:12px;
-  font-weight:750;
-}
-
-.weekConnectionSelectedHint{
-  flex:0 0 auto;
-  padding:0 2px;
+  font-weight:800;
   text-transform:uppercase;
-  letter-spacing:.08em;
-  font-size:11px;
+  letter-spacing:.04em;
 }
 
-.weekConnectionChipWrap{
-  overflow:hidden;
+.weekConnectionGlobalEdit{
+  flex:1;
+  min-width:0;
+  display:grid;
+  grid-template-columns:minmax(150px, .55fr) minmax(230px, 1fr);
+  align-items:center;
+  gap:10px;
+}
+
+.weekConnectionGlobalEditTop{
+  min-width:0;
+  display:flex;
+  align-items:center;
+  gap:9px;
+}
+
+.weekConnectionGlobalEditTitle{
+  color:#fff;
+  font-size:12px;
+  font-weight:900;
+  letter-spacing:.01em;
+}
+
+.weekConnectionGlobalEditHint{
+  margin-top:2px;
+  color:rgba(233,236,255,.52);
+  font-size:10.5px;
+  font-weight:700;
+  line-height:1.25;
 }
 
 .weekConnectionSelectedChip,
 .weekConnectionChip{
-  display:inline-flex;
-  align-items:center;
-  gap:7px;
-  min-width:0;
-  height:30px;
-  padding:0 10px;
-  border-radius:999px;
-  border:1px solid rgba(255,255,255,.10);
-  background:rgba(255,255,255,.04);
-  color:rgba(233,236,255,.86);
-  font-size:12px;
-  font-weight:800;
-  white-space:nowrap;
+  border:1px solid rgba(255,255,255,.12);
+  background:rgba(255,255,255,.045);
+  color:rgba(233,236,255,.88);
   cursor:pointer;
 }
 
 .weekConnectionSelectedChip{
   flex:0 0 auto;
-  border-color:rgba(160,135,255,.28);
-  background:
-    linear-gradient(90deg, rgba(255,255,255,.075), rgba(255,255,255,.035)),
-    rgba(12,16,31,.72);
-}
-
-.weekConnectionChip.active,
-.weekConnectionChip:hover,
-.weekConnectionSelectedChip:hover{
-  border-color:rgba(160,135,255,.48);
-  background:
-    linear-gradient(90deg, rgba(120,90,255,.20), rgba(255,255,255,.045)),
-    rgba(12,16,31,.72);
-  color:#fff;
-}
-
-.weekConnectionChipName{
-  overflow:hidden;
-  text-overflow:ellipsis;
-  max-width:130px;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  max-width:min(290px, 48%);
+  height:36px;
+  padding:0 12px;
+  border-radius:999px;
+  box-shadow:0 0 18px color-mix(in srgb, var(--connection-color, #7a5aff) 26%, transparent);
 }
 
 .weekConnectionChipScroller{
+  flex:1;
   min-width:0;
-  flex:1 1 auto;
   display:flex;
   align-items:center;
-  gap:7px;
-  overflow:auto hidden;
+  gap:8px;
+  overflow-x:auto;
   padding-bottom:2px;
-  scrollbar-width:thin;
 }
 
-.weekConnectionChipScroller::-webkit-scrollbar,
-.weekConnectionEditorRows::-webkit-scrollbar{
-  width:8px;
-  height:8px;
-}
-
-.weekConnectionChipScroller::-webkit-scrollbar-thumb,
-.weekConnectionEditorRows::-webkit-scrollbar-thumb{
-  background:rgba(122,90,255,.45);
+.weekConnectionChip{
+  flex:0 0 auto;
+  min-width:36px;
+  height:34px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:7px;
+  padding:0 10px;
   border-radius:999px;
 }
 
-@media (max-width:900px){
+.weekConnectionChip.active{
+  border-color:color-mix(in srgb, var(--connection-color, #7a5aff) 70%, white 10%);
+  background:color-mix(in srgb, var(--connection-color, #7a5aff) 22%, rgba(255,255,255,.04));
+  color:#fff;
+  box-shadow:0 0 18px color-mix(in srgb, var(--connection-color, #7a5aff) 30%, transparent);
+}
+
+.weekConnectionChipName{
+  max-width:120px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-size:12px;
+  font-weight:850;
+}
+
+@media (max-width:760px){
   body[data-calendar-view="week"] #calendarPage .dow.hasConnectionRail{
-    height:178px;
-    min-height:178px;
+    height:148px;
   }
 
-  body[data-calendar-view="week"] #calendarPage .dow.hasConnectionRail .weekConnectionRail{
-    min-height:134px;
+  body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
+    min-height:94px;
+    padding:7px 8px 9px;
   }
 
   .weekConnectionRailInner{
     grid-template-columns:1fr;
+    gap:7px;
   }
 
   .weekConnectionComposer,
   .weekConnectionChipWrap{
-    min-height:58px;
-  }
-}
-
-@media (max-width:520px){
-  .weekConnectionEditRow{
-    grid-template-columns:minmax(100px, 1fr) 34px 88px 26px;
+    padding:7px;
   }
 
-  .weekConnectionAddLineBtn{
-    min-width:54px;
-    padding:0 8px;
+  .weekConnectionGlobalEdit{
+    grid-template-columns:1fr;
+    gap:7px;
   }
 
-  .weekConnectionChipName{
-    max-width:96px;
+  .weekConnectionEditRow,
+  .weekConnectionGlobalEditRow{
+    grid-template-columns:minmax(120px, 1fr) 48px 92px auto;
+    min-width:430px;
+  }
+
+  .weekConnectionGlobalEditRow{
+    grid-template-columns:minmax(120px, 1fr) 48px 92px;
+    min-width:0;
+  }
+
+  .weekConnectionSelectedChip{
+    max-width:46vw;
   }
 }

@@ -12516,6 +12516,7 @@ function selectConnectionGroup(groupId){
 
   if(viewMode === "week"){
     renderWeekConnectionHighlights();
+    renderWeekConnectionRail();
   }
 }
 
@@ -12527,6 +12528,7 @@ function clearConnectionSelection(){
 
   if(viewMode === "week"){
     renderWeekConnectionHighlights();
+    renderWeekConnectionRail();
   }
 }
 
@@ -12549,6 +12551,184 @@ function syncLegacyConnectionFieldsFromEditorRows(){
   if(eventConnectionGroup) eventConnectionGroup.value = first?.name || "";
   if(eventConnectionColor) eventConnectionColor.value = first?.color || eventColor?.value || DEFAULT_COLOR;
   if(eventConnectionLineStyle) eventConnectionLineStyle.value = first?.lineStyle || "solid";
+}
+
+function getSelectedConnectionMeta(groupMeta = collectWeekConnectionGroupMeta()){
+  const safeGroupId = String(selectedConnectionGroupId || "").trim();
+  if(!safeGroupId) return null;
+
+  return groupMeta.get(safeGroupId) || null;
+}
+
+function renderSelectedConnectionEditorHtml(selected = null){
+  const safeSelected = selected
+    ? normalizeEventConnectionRecord(selected, selected.color || eventColor?.value || DEFAULT_COLOR)
+    : null;
+
+  if(!safeSelected){
+    return `
+      <div class="weekConnectionEmptyHint">
+        Select a chain chip or wire to edit that line.
+      </div>
+    `;
+  }
+
+  return `
+    <div
+      class="weekConnectionGlobalEdit"
+      data-group-id="${escapeHtml(safeSelected.id)}"
+      style="--connection-color:${escapeHtml(safeSelected.color || DEFAULT_COLOR)}"
+    >
+      <div class="weekConnectionGlobalEditTop">
+        <span class="weekConnectionBannerDot"></span>
+        <div>
+          <div class="weekConnectionGlobalEditTitle">Editing selected line</div>
+          <div class="weekConnectionGlobalEditHint">Changes apply to every event in this connected chain.</div>
+        </div>
+      </div>
+
+      <div class="weekConnectionGlobalEditRow" data-group-id="${escapeHtml(safeSelected.id)}">
+        <input
+          class="input weekConnectionGlobalNameInput"
+          value="${escapeHtml(safeSelected.name || formatConnectionNameFromId(safeSelected.id))}"
+          placeholder="e.g., Work routine"
+          aria-label="Selected connection line name"
+        />
+        <input
+          class="weekConnectionGlobalColorInput"
+          type="color"
+          value="${escapeHtml(safeHexColor(safeSelected.color, DEFAULT_COLOR))}"
+          aria-label="Selected connection line color"
+        />
+        <select class="input weekConnectionGlobalStyleSelect" aria-label="Selected connection line style">
+          ${CONNECTION_LINE_STYLES.map(style => `
+            <option value="${style}" ${style === safeSelected.lineStyle ? "selected" : ""}>${style.charAt(0).toUpperCase() + style.slice(1)}</option>
+          `).join("")}
+        </select>
+      </div>
+    </div>
+  `;
+}
+
+function readSelectedConnectionEditorRow(){
+  const row = document.querySelector(".weekConnectionGlobalEditRow");
+  const oldGroupId = String(row?.dataset?.groupId || selectedConnectionGroupId || "").trim();
+  if(!row || !oldGroupId) return null;
+
+  const name = String(row.querySelector(".weekConnectionGlobalNameInput")?.value || "").trim();
+  if(!name) return null;
+
+  const fallbackColor = eventColor?.value || DEFAULT_COLOR;
+  const color = safeHexColor(
+    row.querySelector(".weekConnectionGlobalColorInput")?.value || fallbackColor,
+    fallbackColor
+  );
+  const lineStyle = normalizeConnectionLineStyle(
+    row.querySelector(".weekConnectionGlobalStyleSelect")?.value || "solid"
+  );
+
+  const next = normalizeEventConnectionRecord({
+    id: normalizeConnectionGroupId(name),
+    name,
+    color,
+    lineStyle
+  }, fallbackColor);
+
+  if(!next?.id) return null;
+
+  return { oldGroupId, next };
+}
+
+function eventHasConnectionGroup(ev = {}, groupId = ""){
+  const safeGroupId = String(groupId || "").trim();
+  if(!safeGroupId) return false;
+
+  return getEventConnections(ev).some(conn =>
+    conn.id === safeGroupId || normalizeConnectionGroupId(conn.name || "") === safeGroupId
+  );
+}
+
+function dedupeEventConnections(connections = [], fallbackColor = DEFAULT_COLOR){
+  const out = [];
+  const seen = new Set();
+
+  for(const conn of connections || []){
+    const normalized = normalizeEventConnectionRecord(conn, fallbackColor);
+    if(!normalized || seen.has(normalized.id)) continue;
+    seen.add(normalized.id);
+    out.push(normalized);
+  }
+
+  return out;
+}
+
+function withUpdatedConnectionGroup(ev = {}, oldGroupId = "", nextConnection = null){
+  const safeOldGroupId = String(oldGroupId || "").trim();
+  const safeNext = normalizeEventConnectionRecord(nextConnection, ev?.color || DEFAULT_COLOR);
+
+  if(!safeOldGroupId || !safeNext) return ev;
+
+  let changed = false;
+  const updatedConnections = getEventConnections(ev).map(conn => {
+    const matches =
+      conn.id === safeOldGroupId ||
+      normalizeConnectionGroupId(conn.name || "") === safeOldGroupId;
+
+    if(!matches) return conn;
+    changed = true;
+    return { ...safeNext };
+  });
+
+  if(!changed) return ev;
+
+  const connections = dedupeEventConnections(updatedConnections, ev?.color || DEFAULT_COLOR);
+  const primary = connections[0] || null;
+
+  return toEvent({
+    ...ev,
+    connections,
+    connectionGroupId: primary?.id || "",
+    connectionGroupName: primary?.name || "",
+    connectionGroupIds: connections.map(conn => conn.id),
+    connectionColor: primary?.color || ev.connectionColor || ev.color || DEFAULT_COLOR,
+    connectionLineStyle: primary?.lineStyle || ev.connectionLineStyle || "solid"
+  });
+}
+
+function applySelectedConnectionEditorChange(){
+  const edit = readSelectedConnectionEditorRow();
+  if(!edit) return;
+
+  const { oldGroupId, next } = edit;
+  const before = snapshotBeforeChange();
+  let changed = false;
+
+  for(const dayKey of Object.keys(events || {})){
+    const list = Array.isArray(events[dayKey]) ? events[dayKey] : [];
+
+    events[dayKey] = list.map(ev => {
+      if(!eventHasConnectionGroup(ev, oldGroupId)) return ev;
+
+      const updated = withUpdatedConnectionGroup(ev, oldGroupId, next);
+      if(updated !== ev) changed = true;
+      return updated;
+    });
+  }
+
+  if(!changed) return;
+
+  selectedConnectionGroupId = next.id;
+  state.selectedConnectionGroupId = next.id;
+
+  saveEvents(before, { reason: "week connection line edit" });
+  syncStateFromLegacy();
+
+  if(selectedEventId){
+    populateFormFromSelected();
+  }
+
+  render();
+  renderEventList();
 }
 
 function setConnectionEditorRows(connections = []){
@@ -12773,21 +12953,35 @@ function renderWeekConnectionRail(opts = {}){
   const safeRail = ensureWeekConnectionRail();
   if(!safeRail) return;
 
-  if(!opts.preserveRows){
+  if(!opts.preserveRows && !selectedConnectionGroupId){
     connectionEditorRows = getConnectionEditorRowsFromRail({ keepEmpty:true });
   }
 
   const groupMeta = collectWeekConnectionGroupMeta();
+  const selectedMetaFromGrid = getSelectedConnectionMeta(groupMeta);
+  const selectedMeta = selectedConnectionGroupId
+    ? {
+        ...(selectedMetaFromGrid || {}),
+        ...(opts.selectedMeta || {})
+      }
+    : null;
+
+  const isEditingSelectedGroup = !!(selectedConnectionGroupId && selectedMeta?.id);
 
   safeRail.innerHTML = `
-    <div class="weekConnectionRailInner">
+    <div class="weekConnectionRailInner ${isEditingSelectedGroup ? "editingSelectedConnection" : ""}">
       <div class="weekConnectionComposer">
-        <button class="weekConnectionAddLineBtn" type="button" title="Add a connection line to the current event">+ Line</button>
-        <div class="weekConnectionEditorRows">${renderConnectionEditorRowsHtml()}</div>
+        ${isEditingSelectedGroup
+          ? renderSelectedConnectionEditorHtml(selectedMeta)
+          : `
+            <button class="weekConnectionAddLineBtn" type="button" title="Add a connection line to the current event">+ Line</button>
+            <div class="weekConnectionEditorRows">${renderConnectionEditorRowsHtml()}</div>
+          `
+        }
       </div>
 
       <div class="weekConnectionChipWrap">
-        ${renderConnectionChipsHtml(groupMeta, opts.selectedMeta || null)}
+        ${renderConnectionChipsHtml(groupMeta, selectedMeta || null)}
       </div>
     </div>
   `;
@@ -12803,7 +12997,7 @@ function renderWeekConnectionRail(opts = {}){
     });
     renderWeekConnectionRail();
 
-    const inputs = safeRail.querySelectorAll(".weekConnectionNameInput");
+    const inputs = safeRail.querySelectorAll(".weekConnectionEditRow .weekConnectionNameInput");
     inputs[inputs.length - 1]?.focus({ preventScroll:true });
   });
 
@@ -12818,12 +13012,27 @@ function renderWeekConnectionRail(opts = {}){
     });
   });
 
-  safeRail.querySelectorAll(".weekConnectionNameInput, .weekConnectionColorInput, .weekConnectionStyleSelect").forEach(input => {
+  safeRail.querySelectorAll(".weekConnectionEditRow .weekConnectionNameInput, .weekConnectionEditRow .weekConnectionColorInput, .weekConnectionEditRow .weekConnectionStyleSelect").forEach(input => {
     const eventName = input.matches("select") ? "change" : "input";
     input.addEventListener(eventName, () => {
       connectionEditorRows = getConnectionEditorRowsFromRail({ keepEmpty:true });
       syncLegacyConnectionFieldsFromEditorRows();
     });
+  });
+
+  safeRail.querySelectorAll(".weekConnectionGlobalNameInput, .weekConnectionGlobalColorInput, .weekConnectionGlobalStyleSelect").forEach(input => {
+    const apply = () => applySelectedConnectionEditorChange();
+
+    input.addEventListener("change", apply);
+
+    if(input.classList.contains("weekConnectionGlobalNameInput")){
+      input.addEventListener("keydown", (e) => {
+        if(e.key === "Enter"){
+          e.preventDefault();
+          input.blur();
+        }
+      });
+    }
   });
 
   safeRail.querySelectorAll(".weekConnectionChip[data-group-id]").forEach(btn => {
@@ -12873,6 +13082,7 @@ function renderWeekConnectionHighlights(){
           id: groupId,
           name: conn.name || formatConnectionNameFromId(groupId),
           color: conn.color || DEFAULT_COLOR,
+          lineStyle: conn.lineStyle || "solid",
           count: 0
         });
       }
