@@ -12405,17 +12405,23 @@ function getWeekConnectorLocalRect(el, parentRect){
   };
 }
 
-function getWeekCardAnchor(rect, side = "right", gap = 6){
+function getWeekCardAnchor(rect, side = "right", gap = 6, yOffset = 0){
   // Each pill has a left and right anchor. A route entering from the previous
   // day lands on the left anchor; a route leaving toward the next day exits
-  // from the right anchor. That keeps wires from cutting across a pill when
-  // connected events sit on different vertical lanes.
+  // from the right anchor. When several routes share the same side of the
+  // same pill, the caller can add a tiny yOffset so the wires fan into
+  // separate pinholes instead of all snapping to the exact center.
+  const height = Math.max(1, Number(rect?.height || 0));
+  const maxOffset = Math.max(0, Math.min(isMobileViewport() ? 7 : 9, (height / 2) - 8));
+  const safeOffset = clamp(Number(yOffset || 0), -maxOffset, maxOffset);
+  const y = Number(rect?.centerY || 0) + safeOffset;
+
   return side === "left"
-    ? { x: rect.x - gap, y: rect.centerY }
-    : { x: rect.right + gap, y: rect.centerY };
+    ? { x: rect.x - gap, y }
+    : { x: rect.right + gap, y };
 }
 
-function buildWeekRouteSegments(fromRect, toRect, groupId){
+function buildWeekRouteSegments(fromRect, toRect, groupId, opts = {}){
   const fromBeforeTo = fromRect.centerX <= toRect.centerX;
 
   // The side ports sit just outside the pill. Keeping the anchor close to the
@@ -12423,20 +12429,31 @@ function buildWeekRouteSegments(fromRect, toRect, groupId){
   // connection lanes are trying to pass through the same narrow doorway.
   const anchorGap = isMobileViewport() ? 3 : 4;
   const sameLaneThreshold = isMobileViewport() ? 10 : 12;
+  const fromAnchorYOffset = Number(opts.fromAnchorYOffset || 0);
+  const toAnchorYOffset = Number(opts.toAnchorYOffset || 0);
+  const hasCustomPortLane =
+    Math.abs(fromAnchorYOffset) > 0.5 ||
+    Math.abs(toAnchorYOffset) > 0.5;
 
   const start = getWeekCardAnchor(
     fromRect,
     fromBeforeTo ? "right" : "left",
-    anchorGap
+    anchorGap,
+    fromAnchorYOffset
   );
 
   const end = getWeekCardAnchor(
     toRect,
     fromBeforeTo ? "left" : "right",
-    anchorGap
+    anchorGap,
+    toAnchorYOffset
   );
 
-  const sameLane = Math.abs(start.y - end.y) <= sameLaneThreshold;
+  // Normal routes can tolerate small natural DOM y differences and still draw
+  // as one clean rail. Port-fanned routes cannot: if one endpoint moved, a
+  // single "horizontal" segment would silently collapse back to y1 in the
+  // path builder. Force a small dogleg so the custom anchor y actually lives.
+  const sameLane = Math.abs(start.y - end.y) <= (hasCustomPortLane ? 0.75 : sameLaneThreshold);
   const hasClearHorizontalGap = fromBeforeTo
     ? start.x < end.x
     : start.x > end.x;
@@ -12484,6 +12501,84 @@ function buildWeekRouteSegments(fromRect, toRect, groupId){
     },
     { type:"horizontal", x1:midX, y1:end.y, x2:end.x, y2:end.y, groupId }
   ].filter(seg => Math.abs(seg.x1 - seg.x2) > 1 || Math.abs(seg.y1 - seg.y2) > 1);
+}
+
+
+function getWeekRoutePortKey(item, side = "right"){
+  const pillKey =
+    item?.pill?.dataset?.weekSortKey ||
+    item?.sortKey ||
+    item?.dayISO ||
+    "floating";
+
+  return `${pillKey}::${side}`;
+}
+
+function getWeekPortFanoutMaxOffset(rect = {}){
+  const height = Math.max(1, Number(rect.height || 0));
+  return Math.max(0, Math.min(isMobileViewport() ? 7 : 9, (height / 2) - 8));
+}
+
+function assignWeekPortFanoutOffsets(routes = []){
+  const ports = new Map();
+
+  const addPort = (route, endpoint) => {
+    const isFrom = endpoint === "from";
+    const item = isFrom ? route.fromItem : route.toItem;
+    const side = isFrom ? route.fromSide : route.toSide;
+    const otherItem = isFrom ? route.toItem : route.fromItem;
+    if(!item || !side) return;
+
+    const key = getWeekRoutePortKey(item, side);
+    if(!ports.has(key)) ports.set(key, []);
+
+    ports.get(key).push({
+      route,
+      endpoint,
+      item,
+      side,
+      otherY: Number(otherItem?.rect?.centerY || 0),
+      otherX: Number(otherItem?.rect?.centerX || 0),
+      groupId: String(route.group?.id || "")
+    });
+  };
+
+  for(const route of routes || []){
+    route.fromAnchorYOffset = 0;
+    route.toAnchorYOffset = 0;
+    addPort(route, "from");
+    addPort(route, "to");
+  }
+
+  for(const entries of ports.values()){
+    if(entries.length < 2) continue;
+
+    entries.sort((a, b) =>
+      a.otherY - b.otherY ||
+      a.otherX - b.otherX ||
+      a.groupId.localeCompare(b.groupId)
+    );
+
+    const maxOffset = Math.min(...entries.map(entry => getWeekPortFanoutMaxOffset(entry.item?.rect || {})));
+    if(maxOffset <= 0) continue;
+
+    const laneCount = entries.length;
+    const idealSpacing = isMobileViewport() ? 6 : 7;
+    const spacing = laneCount <= 1
+      ? 0
+      : Math.min(idealSpacing, (maxOffset * 2) / Math.max(1, laneCount - 1));
+    const centerLane = (laneCount - 1) / 2;
+
+    entries.forEach((entry, index) => {
+      const offset = clamp((index - centerLane) * spacing, -maxOffset, maxOffset);
+
+      if(entry.endpoint === "from"){
+        entry.route.fromAnchorYOffset = offset;
+      }else{
+        entry.route.toAnchorYOffset = offset;
+      }
+    });
+  }
 }
 
 function doesHorizontalCrossVertical(h, v){
@@ -12783,8 +12878,8 @@ function setWeekPillConnectorAnchorY(pill, rect, side = "right", y = 0){
 
   // Keep the nub inside the pill's rounded sides. It can breathe a little
   // above/below center, but never drifts into the corners.
-  const minPct = 30;
-  const maxPct = 70;
+  const minPct = 24;
+  const maxPct = 76;
   const pct = clamp((relativeY / height) * 100, minPct, maxPct);
   const prop = side === "left" ? "--connector-left-y" : "--connector-right-y";
 
@@ -12804,6 +12899,24 @@ function applyWeekConnectorAnchorOffsets(routes = []){
 
     const first = segments[0];
     const last = segments[segments.length - 1];
+
+    if(Math.abs(Number(route.fromAnchorYOffset || 0)) > 0.5){
+      setWeekPillConnectorAnchorY(
+        route.fromItem?.pill,
+        route.fromItem?.rect,
+        route.fromSide || "right",
+        Number(route.fromItem?.rect?.centerY || 0) + Number(route.fromAnchorYOffset || 0)
+      );
+    }
+
+    if(Math.abs(Number(route.toAnchorYOffset || 0)) > 0.5){
+      setWeekPillConnectorAnchorY(
+        route.toItem?.pill,
+        route.toItem?.rect,
+        route.toSide || "left",
+        Number(route.toItem?.rect?.centerY || 0) + Number(route.toAnchorYOffset || 0)
+      );
+    }
 
     if(first?.type === "horizontal" && Number.isFinite(Number(first.visualY))){
       const visualY = getHorizontalBridgeY(first);
@@ -13105,12 +13218,12 @@ function assignWeekHorizontalConnectorLanes(routes = []){
   // Treat rails that merely kiss at the pill anchor as conflicts too. This
   // is intentionally more generous than pure geometry because the line glow
   // makes near-misses look like overlaps. The actual offset stays small.
-  const yClusterDistance = isMobileViewport() ? 12 : 14;
-  const overlapBuffer = isMobileViewport() ? 1 : 2;
-  const minUsefulOverlap = isMobileViewport() ? 3 : 4;
-  const touchGap = isMobileViewport() ? 18 : 22;
-  const laneLimit = 3;
-  const laneSpacing = isMobileViewport() ? 5 : 6;
+  const yClusterDistance = isMobileViewport() ? 14 : 18;
+  const overlapBuffer = isMobileViewport() ? 4 : 6;
+  const minUsefulOverlap = isMobileViewport() ? 1 : 1;
+  const touchGap = isMobileViewport() ? 34 : 42;
+  const laneLimit = 4;
+  const laneMaxSpread = isMobileViewport() ? 16 : 20;
 
   const clusters = [];
   const sorted = [...horizontals].sort((a, b) => a.y - b.y || a.xMin - b.xMin);
@@ -13165,7 +13278,10 @@ function assignWeekHorizontalConnectorLanes(routes = []){
     for(const item of cluster.items){
       const rawLane = laneForGroup.get(item.groupId) ?? 0;
       const lane = Math.min(rawLane, laneCount - 1);
-      const offset = (lane - centerLane) * laneSpacing;
+      const normalizedLane = centerLane > 0
+        ? (lane - centerLane) / centerLane
+        : 0;
+      const offset = normalizedLane * (laneMaxSpread / 2);
 
       if(Math.abs(offset) < 0.5) continue;
 
@@ -13283,10 +13399,27 @@ function renderWeekConnections(){
 
       const fromSide = fromBeforeTo ? "right" : "left";
       const toSide = fromBeforeTo ? "left" : "right";
-      const segments = buildWeekRouteSegments(fromItem.rect, toItem.rect, group.id);
-      allRoutes.push({ group, segments, fromItem, toItem, fromSide, toSide });
-      allVerticalSegments.push(...segments.filter(seg => seg.type === "vertical"));
+      allRoutes.push({
+        group,
+        segments: [],
+        fromItem,
+        toItem,
+        fromSide,
+        toSide,
+        fromAnchorYOffset: 0,
+        toAnchorYOffset: 0
+      });
     }
+  }
+
+  assignWeekPortFanoutOffsets(allRoutes);
+
+  for(const route of allRoutes){
+    route.segments = buildWeekRouteSegments(route.fromItem.rect, route.toItem.rect, route.group.id, {
+      fromAnchorYOffset: route.fromAnchorYOffset,
+      toAnchorYOffset: route.toAnchorYOffset
+    });
+    allVerticalSegments.push(...route.segments.filter(seg => seg.type === "vertical"));
   }
 
   assignWeekVerticalConnectorLanes(allRoutes);
