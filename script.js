@@ -12617,6 +12617,52 @@ function getSelectedConnectionMeta(groupMeta = collectWeekConnectionGroupMeta())
   return groupMeta.get(safeGroupId) || null;
 }
 
+function formatConnectionLineStyleLabel(style = "solid"){
+  const normalized = normalizeConnectionLineStyle(style);
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function renderWeekConnectionStyleDropdown(value = "solid", inputClass = "weekConnectionStyleSelect", ariaLabel = "Connection line style"){
+  const current = normalizeConnectionLineStyle(value);
+
+  return `
+    <div class="weekConnectionStyleDD" data-current-style="${escapeHtml(current)}">
+      <input type="hidden" class="${escapeHtml(inputClass)}" value="${escapeHtml(current)}" />
+      <button class="weekConnectionStyleDDButton" type="button" aria-label="${escapeHtml(ariaLabel)}">
+        <span class="weekConnectionStyleDDLabel">${escapeHtml(formatConnectionLineStyleLabel(current))}</span>
+        <span class="weekConnectionStyleDDArrow">▾</span>
+      </button>
+      <div class="weekConnectionStyleDDMenu" role="listbox" aria-label="${escapeHtml(ariaLabel)}">
+        ${CONNECTION_LINE_STYLES.map(style => `
+          <button
+            class="weekConnectionStyleDDOption ${style === current ? "active" : ""}"
+            type="button"
+            data-line-style="${escapeHtml(style)}"
+            role="option"
+            aria-selected="${style === current ? "true" : "false"}"
+          >
+            ${escapeHtml(formatConnectionLineStyleLabel(style))}
+          </button>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function connectionRecordsEqual(a = {}, b = {}, fallbackColor = DEFAULT_COLOR){
+  const left = normalizeEventConnectionRecord(a, fallbackColor);
+  const right = normalizeEventConnectionRecord(b, fallbackColor);
+
+  if(!left || !right) return left === right;
+
+  return (
+    left.id === right.id &&
+    String(left.name || "") === String(right.name || "") &&
+    safeHexColor(left.color || fallbackColor, fallbackColor) === safeHexColor(right.color || fallbackColor, fallbackColor) &&
+    normalizeConnectionLineStyle(left.lineStyle) === normalizeConnectionLineStyle(right.lineStyle)
+  );
+}
+
 function renderSelectedConnectionEditorHtml(selected = null){
   const safeSelected = selected
     ? normalizeEventConnectionRecord(selected, selected.color || eventColor?.value || DEFAULT_COLOR)
@@ -12656,11 +12702,11 @@ function renderSelectedConnectionEditorHtml(selected = null){
           value="${escapeHtml(safeHexColor(safeSelected.color, DEFAULT_COLOR))}"
           aria-label="Selected connection line color"
         />
-        <select class="input weekConnectionGlobalStyleSelect" aria-label="Selected connection line style">
-          ${CONNECTION_LINE_STYLES.map(style => `
-            <option value="${style}" ${style === safeSelected.lineStyle ? "selected" : ""}>${style.charAt(0).toUpperCase() + style.slice(1)}</option>
-          `).join("")}
-        </select>
+        ${renderWeekConnectionStyleDropdown(
+          safeSelected.lineStyle,
+          "weekConnectionGlobalStyleSelect",
+          "Selected connection line style"
+        )}
       </div>
     </div>
   `;
@@ -12731,6 +12777,8 @@ function withUpdatedConnectionGroup(ev = {}, oldGroupId = "", nextConnection = n
       normalizeConnectionGroupId(conn.name || "") === safeOldGroupId;
 
     if(!matches) return conn;
+    if(connectionRecordsEqual(conn, safeNext, ev?.color || DEFAULT_COLOR)) return conn;
+
     changed = true;
     return { ...safeNext };
   });
@@ -12783,6 +12831,7 @@ function applySelectedConnectionEditorChange(){
     populateFormFromSelected();
   }
 
+  renderWeekConnectionRail({ selectedMeta: next, preserveRows:true });
   render();
   renderEventList();
 }
@@ -12950,11 +12999,11 @@ function renderConnectionEditorRowsHtml(){
           value="${escapeHtml(safeHexColor(safeRow.color, DEFAULT_COLOR))}"
           aria-label="Connection line color"
         />
-        <select class="input weekConnectionStyleSelect" aria-label="Connection line style">
-          ${CONNECTION_LINE_STYLES.map(style => `
-            <option value="${style}" ${style === safeRow.lineStyle ? "selected" : ""}>${style.charAt(0).toUpperCase() + style.slice(1)}</option>
-          `).join("")}
-        </select>
+        ${renderWeekConnectionStyleDropdown(
+          safeRow.lineStyle,
+          "weekConnectionStyleSelect",
+          "Connection line style"
+        )}
         <button class="weekConnectionRemoveBtn" type="button" data-index="${index}" title="Remove this line">×</button>
       </div>
     `;
@@ -13061,16 +13110,19 @@ function renderWeekConnectionRail(opts = {}){
     });
   });
 
-  safeRail.querySelectorAll(".weekConnectionEditRow .weekConnectionNameInput, .weekConnectionEditRow .weekConnectionColorInput, .weekConnectionEditRow .weekConnectionStyleSelect").forEach(input => {
-    const eventName = input.matches("select") ? "change" : "input";
-    input.addEventListener(eventName, () => {
+  safeRail.querySelectorAll(".weekConnectionEditRow .weekConnectionNameInput, .weekConnectionEditRow .weekConnectionColorInput").forEach(input => {
+    input.addEventListener("input", () => {
       connectionEditorRows = getConnectionEditorRowsFromRail({ keepEmpty:true });
       syncLegacyConnectionFieldsFromEditorRows();
     });
   });
 
-  safeRail.querySelectorAll(".weekConnectionGlobalNameInput, .weekConnectionGlobalColorInput, .weekConnectionGlobalStyleSelect").forEach(input => {
+  safeRail.querySelectorAll(".weekConnectionGlobalNameInput, .weekConnectionGlobalColorInput").forEach(input => {
     const apply = () => applySelectedConnectionEditorChange();
+
+    if(input.classList.contains("weekConnectionGlobalColorInput")){
+      input.addEventListener("input", apply);
+    }
 
     input.addEventListener("change", apply);
 
@@ -13082,6 +13134,51 @@ function renderWeekConnectionRail(opts = {}){
         }
       });
     }
+  });
+
+  safeRail.querySelectorAll(".weekConnectionStyleDDButton").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const dd = btn.closest(".weekConnectionStyleDD");
+      if(!dd) return;
+
+      safeRail.querySelectorAll(".weekConnectionStyleDD.open").forEach(openDD => {
+        if(openDD !== dd) openDD.classList.remove("open");
+      });
+
+      dd.classList.toggle("open");
+    });
+  });
+
+  safeRail.querySelectorAll(".weekConnectionStyleDDOption[data-line-style]").forEach(option => {
+    option.addEventListener("click", (e) => {
+      e.stopPropagation();
+
+      const dd = option.closest(".weekConnectionStyleDD");
+      if(!dd) return;
+
+      const value = normalizeConnectionLineStyle(option.dataset.lineStyle || "solid");
+      const hidden = dd.querySelector(".weekConnectionStyleSelect, .weekConnectionGlobalStyleSelect");
+      const label = dd.querySelector(".weekConnectionStyleDDLabel");
+
+      if(hidden) hidden.value = value;
+      if(label) label.textContent = formatConnectionLineStyleLabel(value);
+      dd.dataset.currentStyle = value;
+      dd.classList.remove("open");
+
+      dd.querySelectorAll(".weekConnectionStyleDDOption").forEach(btn => {
+        const active = normalizeConnectionLineStyle(btn.dataset.lineStyle || "solid") === value;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-selected", active ? "true" : "false");
+      });
+
+      if(hidden?.classList.contains("weekConnectionGlobalStyleSelect")){
+        applySelectedConnectionEditorChange();
+      }else{
+        connectionEditorRows = getConnectionEditorRowsFromRail({ keepEmpty:true });
+        syncLegacyConnectionFieldsFromEditorRows();
+      }
+    });
   });
 
   safeRail.querySelectorAll(".weekConnectionChip[data-group-id]").forEach(btn => {
