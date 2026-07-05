@@ -12712,7 +12712,7 @@ function renderSelectedConnectionEditorHtml(selected = null){
   `;
 }
 
-function readSelectedConnectionEditorRow(){
+function readSelectedConnectionEditorRow(overrides = {}){
   const row = document.querySelector(".weekConnectionGlobalEditRow");
   const oldGroupId = String(row?.dataset?.groupId || selectedConnectionGroupId || "").trim();
   if(!row || !oldGroupId) return null;
@@ -12726,7 +12726,7 @@ function readSelectedConnectionEditorRow(){
     fallbackColor
   );
   const lineStyle = normalizeConnectionLineStyle(
-    row.querySelector(".weekConnectionGlobalStyleSelect")?.value || "solid"
+    overrides.lineStyle ?? row.querySelector(".weekConnectionGlobalStyleSelect")?.value ?? "solid"
   );
 
   const next = normalizeEventConnectionRecord({
@@ -12799,8 +12799,8 @@ function withUpdatedConnectionGroup(ev = {}, oldGroupId = "", nextConnection = n
   });
 }
 
-function applySelectedConnectionEditorChange(){
-  const edit = readSelectedConnectionEditorRow();
+function applySelectedConnectionEditorChange(overrides = {}){
+  const edit = readSelectedConnectionEditorRow(overrides);
   if(!edit) return;
 
   const { oldGroupId, next } = edit;
@@ -13151,7 +13151,8 @@ function renderWeekConnectionRail(opts = {}){
   });
 
   safeRail.querySelectorAll(".weekConnectionStyleDDOption[data-line-style]").forEach(option => {
-    option.addEventListener("click", (e) => {
+    const chooseLineStyle = (e) => {
+      e.preventDefault();
       e.stopPropagation();
 
       const dd = option.closest(".weekConnectionStyleDD");
@@ -13173,12 +13174,15 @@ function renderWeekConnectionRail(opts = {}){
       });
 
       if(hidden?.classList.contains("weekConnectionGlobalStyleSelect")){
-        applySelectedConnectionEditorChange();
+        applySelectedConnectionEditorChange({ lineStyle: value });
       }else{
         connectionEditorRows = getConnectionEditorRowsFromRail({ keepEmpty:true });
         syncLegacyConnectionFieldsFromEditorRows();
       }
-    });
+    };
+
+    option.addEventListener("pointerdown", chooseLineStyle);
+    option.addEventListener("click", chooseLineStyle);
   });
 
   safeRail.querySelectorAll(".weekConnectionChip[data-group-id]").forEach(btn => {
