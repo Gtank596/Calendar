@@ -1262,6 +1262,32 @@ function collectLegacyAndCachedDirectEvents(){
   return Array.from(byId.values());
 }
 
+function indexedDbConnectionSignature(record = {}){
+  const connections = Array.isArray(record.connections)
+    ? record.connections
+    : [];
+
+  const connectionParts = connections
+    .map(conn => normalizeEventConnectionRecord(conn, record.color || DEFAULT_COLOR))
+    .filter(Boolean)
+    .map(conn => [
+      conn.id || "",
+      conn.name || "",
+      safeHexColor(conn.color || DEFAULT_COLOR, DEFAULT_COLOR),
+      normalizeConnectionLineStyle(conn.lineStyle)
+    ].join("~"))
+    .sort()
+    .join(",");
+
+  return [
+    record.connectionGroupId || "",
+    record.connectionGroupName || "",
+    safeHexColor(record.connectionColor || record.color || DEFAULT_COLOR, DEFAULT_COLOR),
+    normalizeConnectionLineStyle(record.connectionLineStyle),
+    connectionParts
+  ].join("|");
+}
+
 function indexedDbEventRecordSignature(records = []){
   return (records || [])
     .map(record => [
@@ -1276,10 +1302,23 @@ function indexedDbEventRecordSignature(records = []){
       record.source || "",
       record.span?.end || "",
       record.recurrence?.freq || "none",
-      record.recurrence?.until || ""
+      record.recurrence?.until || "",
+      indexedDbConnectionSignature(record)
     ].join("|"))
     .sort()
     .join("\n");
+}
+
+function indexedDbRecordsAreOlderThanLocalEvents(records = []){
+  const localEventTime = getSliceUpdatedAt(getLocalPayload?.() || {}, "events");
+  if(!localEventTime) return false;
+
+  const newestRecordTime = Math.max(
+    0,
+    ...(records || []).map(record => Number(record?.updatedAt || 0))
+  );
+
+  return newestRecordTime < localEventTime;
 }
 
 async function getIndexedDbEventRecordsForRange(startISO, endISO){
@@ -1343,6 +1382,13 @@ function requestIndexedDbEventRangeHydration(startISO, endISO, opts = {}){
     .then(records => {
       if(indexedDbEventHydrationRequests.get(requestKey) !== serial) return;
       indexedDbEventHydrationRequests.delete(requestKey);
+
+      if(indexedDbRecordsAreOlderThanLocalEvents(records) && !opts.allowStale){
+        // A local edit can render before the debounced IndexedDB mirror finishes.
+        // In that tiny window, IndexedDB still contains the previous line style,
+        // so accepting the hydration would make the week rail look one click behind.
+        return;
+      }
 
       const signature = indexedDbEventRecordSignature(records);
       const sameRange =
@@ -12805,6 +12851,8 @@ function applySelectedConnectionEditorChange(overrides = {}){
 
   const { oldGroupId, next } = edit;
   const before = snapshotBeforeChange();
+  const updatedAt = Date.now();
+  const changedEventOps = [];
   let changed = false;
 
   for(const dayKey of Object.keys(events || {})){
@@ -12814,7 +12862,10 @@ function applySelectedConnectionEditorChange(overrides = {}){
       if(!eventHasConnectionGroup(ev, oldGroupId)) return ev;
 
       const updated = withUpdatedConnectionGroup(ev, oldGroupId, next);
-      if(updated !== ev) changed = true;
+      if(updated !== ev){
+        changed = true;
+        changedEventOps.push(makeEventCloudOp(updated, dayKey, updatedAt, false));
+      }
       return updated;
     });
   }
@@ -12824,7 +12875,11 @@ function applySelectedConnectionEditorChange(overrides = {}){
   selectedConnectionGroupId = next.id;
   state.selectedConnectionGroupId = next.id;
 
-  saveEvents(before, { reason: "week connection line edit" });
+  saveEvents(before, {
+    reason: "week connection line edit",
+    updatedAt,
+    cloudOps: changedEventOps
+  });
   syncStateFromLegacy();
 
   if(selectedEventId){
@@ -13181,7 +13236,6 @@ function renderWeekConnectionRail(opts = {}){
       }
     };
 
-    option.addEventListener("pointerdown", chooseLineStyle);
     option.addEventListener("click", chooseLineStyle);
   });
 
