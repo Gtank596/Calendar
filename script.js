@@ -1,4 +1,4 @@
-// ===========================================================================
+// ============================================================================
 // My Digital Calendar
 // Offline calendar + budget dashboard + weather + file sync
 //
@@ -10017,6 +10017,8 @@ function detectHabitWeekday(sourceDates){
 function openEventInEditor(ev, dayISO){
   if(!ev) return;
 
+  const canPatchWeekSelection = isISOInCurrentRenderedWeek(dayISO);
+
   selectedDateISO = dayISO;
 
   if(ev._isOccurrence && ev._masterId){
@@ -10040,7 +10042,12 @@ function openEventInEditor(ev, dayISO){
   populateFormFromSelected();
   openMobileEditor();
   renderEventList();
-  render();
+
+  if(canPatchWeekSelection){
+    refreshWeekSelectionOnly();
+  }else{
+    render();
+  }
 }
 
 // ============================================================================
@@ -11990,7 +11997,7 @@ function updateWeekDowHeader(weekStartDate, todayISO){
     });
     cell.innerHTML = `<span class="dowLabel">${escapeHtml(label)}</span>`;
     cell.onclick = () => {
-      clearConnectionSelection();
+      clearConnectionSelection({ silent:true });
       selectDate(cellISO);
     };
   });
@@ -12003,6 +12010,54 @@ function startOfWeek(dt){
   d.setHours(0,0,0,0);
   d.setDate(d.getDate() - d.getDay());
   return d;
+}
+
+function getWeekBoundsForDate(dt = view){
+  const start = startOfWeek(dt);
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+
+  return {
+    start,
+    end,
+    startISO: dateToYmd(start),
+    endISO: dateToYmd(end)
+  };
+}
+
+function isISOInCurrentRenderedWeek(iso){
+  if(viewMode !== "week" || !grid || !iso) return false;
+
+  const bounds = getWeekBoundsForDate(view);
+  if(iso < bounds.startISO || iso > bounds.endISO) return false;
+
+  return !!grid.querySelector(`.weekViewDay[data-iso="${iso}"]`);
+}
+
+function refreshWeekSelectionOnly(){
+  if(viewMode !== "week") return;
+
+  if(grid){
+    grid.querySelectorAll(".weekViewDay").forEach(dayEl => {
+      dayEl.classList.toggle("selectedDay", dayEl.dataset.iso === selectedDateISO);
+    });
+  }
+
+  if(dow){
+    Array.from(dow.children).slice(0, 7).forEach(cell => {
+      cell.classList.toggle("selectedDow", cell.dataset.iso === selectedDateISO);
+    });
+  }
+
+  if(grid && !selectedConnectionGroupId){
+    grid.querySelectorAll(".chain-selected, .chain-dimmed").forEach(el => {
+      el.classList.remove("chain-selected", "chain-dimmed");
+    });
+
+    grid.querySelectorAll(".weekConnector.selected, .weekConnector.dimmed").forEach(el => {
+      el.classList.remove("selected", "dimmed");
+    });
+  }
 }
 
 function fmtWeekRange(dt){
@@ -12520,13 +12575,13 @@ function selectConnectionGroup(groupId){
   }
 }
 
-function clearConnectionSelection(){
+function clearConnectionSelection(opts = {}){
   if(!selectedConnectionGroupId) return;
 
   selectedConnectionGroupId = null;
   state.selectedConnectionGroupId = null;
 
-  if(viewMode === "week"){
+  if(viewMode === "week" && !opts.silent){
     renderWeekConnectionHighlights();
     renderWeekConnectionRail();
   }
@@ -14378,7 +14433,7 @@ function renderWeekView(){
     }
 
     dayEl.addEventListener("click", () => {
-      clearConnectionSelection();
+      clearConnectionSelection({ silent:true });
       selectDate(cellISO);
     });
     grid.appendChild(dayEl);
@@ -14828,12 +14883,17 @@ renderEventCategoryOptions();
 }
 
 function selectDate(iso, opts={silent:false}){
+  const canPatchWeekSelection = isISOInCurrentRenderedWeek(iso);
+  const shouldExpandEditor = !opts.silent && isEditorCollapsed();
   const nextView = (viewMode === "week" || viewMode === "day") ? ymdToDate(iso) : view;
+
   setCalendarState({ selectedDateISO: iso, view: nextView }, { render:false });
-// If the editor is collapsed, clicking a day should pop it back open.
-if(!opts.silent && isEditorCollapsed()){
-  setEditorCollapsed(false);
-}
+
+  // If the editor is collapsed, clicking a day should pop it back open.
+  // That layout transition still gets a full render because the grid width changes.
+  if(shouldExpandEditor){
+    setEditorCollapsed(false);
+  }
 
   if(panelTitle) panelTitle.textContent = "Edit day";
   if(panelSub) panelSub.textContent = fmtPrettyISO(iso);
@@ -14844,7 +14904,13 @@ if(!opts.silent && isEditorCollapsed()){
 
   syncStateFromLegacy();
 
-  if(!opts.silent) queueRender({ calendar:true });
+  if(!opts.silent){
+    if(canPatchWeekSelection && !shouldExpandEditor){
+      refreshWeekSelectionOnly();
+    }else{
+      queueRender({ calendar:true });
+    }
+  }
 }
 
 addBtn?.addEventListener("click", () => {
