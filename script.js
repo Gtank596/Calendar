@@ -1,4 +1,4 @@
-// ===========================================================================
+// ============================================================================
 // My Digital Calendar
 // Offline calendar + budget dashboard + weather + file sync
 //
@@ -229,6 +229,8 @@ const eventCatDDLabel = document.getElementById("eventCatDDLabel");
 const eventCatDDMenu = document.getElementById("eventCatDDMenu");
 
 // Week-view connection/thread controls
+// The old side-panel connection inputs have been removed from the editor;
+// these refs intentionally resolve to null in current markup for legacy-safe code paths.
 const eventConnectionGroup = document.getElementById("eventConnectionGroup");
 const eventConnectionColor = document.getElementById("eventConnectionColor");
 const eventConnectionLineStyle = document.getElementById("eventConnectionLineStyle");
@@ -12835,8 +12837,9 @@ function getConnectionRowsForSave(){
     rows = getConnectionEditorRowsFromRail({ keepEmpty:false });
   }
 
-  // Month/day do not show connection controls. If an existing event already
-  // has connections, preserve them while editing normal fields there.
+  // Month/day and the side editor do not expose connection controls. If an
+  // existing event already has connections, preserve them while editing normal
+  // fields there. New week lines are created from the week rail only.
   if(!rows.length && connectionEditorRows.length){
     rows = connectionEditorRows;
   }
