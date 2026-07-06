@@ -10065,6 +10065,12 @@ function detectHabitWeekday(sourceDates){
 function openEventInEditor(ev, dayISO){
   if(!ev) return;
 
+  const openedUnconnectedWeekEvent = viewMode === "week" && !getEventPrimaryConnectionGroupId(ev);
+
+  if(openedUnconnectedWeekEvent){
+    clearConnectionSelection({ silent:true });
+  }
+
   const canPatchWeekSelection = isISOInCurrentRenderedWeek(dayISO);
 
   selectedDateISO = dayISO;
@@ -10090,6 +10096,14 @@ function openEventInEditor(ev, dayISO){
   populateFormFromSelected();
   openMobileEditor();
   renderEventList();
+
+  if(openedUnconnectedWeekEvent){
+    requestAnimationFrame(() => {
+      document
+        .querySelector("#weekConnectionRail .draftConnectionRow .weekConnectionNameInput")
+        ?.focus({ preventScroll:true });
+    });
+  }
 
   if(canPatchWeekSelection){
     refreshWeekSelectionOnly();
@@ -13032,21 +13046,62 @@ function collectWeekConnectionGroupMeta(){
   return meta;
 }
 
-function renderConnectionEditorRowsHtml(){
-  if(!connectionEditorRows.length){
-    return `<div class="weekConnectionEmptyHint">No line on this event yet.</div>`;
+function getSelectedEventForConnectionRail(){
+  if(!selectedEventId) return null;
+
+  const baseKey = getEditDateKey?.() || selectedDateISO;
+  if(!baseKey) return null;
+
+  const list = getEventsForDay(baseKey);
+  return list.find(ev => ev.id === selectedEventId) || null;
+}
+
+function getDraftConnectionRowForSelectedEvent(){
+  if(viewMode !== "week" || selectedConnectionGroupId) return null;
+
+  const ev = getSelectedEventForConnectionRail();
+  if(!ev || getEventConnections(ev).length) return null;
+
+  return {
+    id:"",
+    name:"",
+    color:eventColor?.value || ev.color || DEFAULT_COLOR,
+    lineStyle:"solid",
+    draft:true
+  };
+}
+
+function getConnectionEditorRowsForDisplay(){
+  const draft = getDraftConnectionRowForSelectedEvent();
+
+  if(draft && !connectionEditorRows.length){
+    return [draft];
   }
 
-  return connectionEditorRows.map((row, index) => {
+  return connectionEditorRows;
+}
+
+function renderConnectionEditorRowsHtml(rows = getConnectionEditorRowsForDisplay()){
+  const displayRows = Array.isArray(rows) ? rows : [];
+
+  if(!displayRows.length){
+    return `<div class="weekConnectionEmptyHint">Select an event to add or edit lines.</div>`;
+  }
+
+  return displayRows.map((row, index) => {
     const safeRow = normalizeEventConnectionRecord(row, eventColor?.value || DEFAULT_COLOR) || {
       id:"",
       name:"",
       color:eventColor?.value || DEFAULT_COLOR,
       lineStyle:"solid"
     };
+    const isDraft = !!(
+      row?.draft ||
+      (getDraftConnectionRowForSelectedEvent() && displayRows.length === 1 && !String(safeRow.name || "").trim())
+    );
 
     return `
-      <div class="weekConnectionEditRow" data-index="${index}">
+      <div class="weekConnectionEditRow ${isDraft ? "draftConnectionRow" : ""}" data-index="${index}">
         <input
           class="input weekConnectionNameInput"
           value="${escapeHtml(safeRow.name || "")}"
@@ -13064,7 +13119,7 @@ function renderConnectionEditorRowsHtml(){
           "weekConnectionStyleSelect",
           "Connection line style"
         )}
-        <button class="weekConnectionRemoveBtn" type="button" data-index="${index}" title="Remove this line">×</button>
+        ${isDraft ? "" : `<button class="weekConnectionRemoveBtn" type="button" data-index="${index}" title="Remove this line">×</button>`}
       </div>
     `;
   }).join("");
@@ -13112,7 +13167,16 @@ function renderWeekConnectionRail(opts = {}){
   if(!safeRail) return;
 
   if(!opts.preserveRows && !selectedConnectionGroupId){
-    connectionEditorRows = getConnectionEditorRowsFromRail({ keepEmpty:true });
+    const hadRowsBeforeRead = connectionEditorRows.length > 0;
+    const rowsFromRail = getConnectionEditorRowsFromRail({ keepEmpty:true });
+    const onlyEmptyDraft = !!(
+      getDraftConnectionRowForSelectedEvent() &&
+      !hadRowsBeforeRead &&
+      rowsFromRail.length === 1 &&
+      !String(rowsFromRail[0]?.name || "").trim()
+    );
+
+    connectionEditorRows = onlyEmptyDraft ? [] : rowsFromRail;
   }
 
   const groupMeta = collectWeekConnectionGroupMeta();
@@ -13125,16 +13189,17 @@ function renderWeekConnectionRail(opts = {}){
     : null;
 
   const isEditingSelectedGroup = !!(selectedConnectionGroupId && selectedMeta?.id);
+  const draftRow = !isEditingSelectedGroup ? getDraftConnectionRowForSelectedEvent() : null;
+  const displayRows = !isEditingSelectedGroup
+    ? (draftRow && !connectionEditorRows.length ? [draftRow] : connectionEditorRows)
+    : [];
 
   safeRail.innerHTML = `
-    <div class="weekConnectionRailInner ${isEditingSelectedGroup ? "editingSelectedConnection" : ""}">
+    <div class="weekConnectionRailInner ${isEditingSelectedGroup ? "editingSelectedConnection" : ""} ${draftRow ? "draftingEventConnection" : ""}">
       <div class="weekConnectionComposer">
         ${isEditingSelectedGroup
           ? renderSelectedConnectionEditorHtml(selectedMeta)
-          : `
-            <button class="weekConnectionAddLineBtn" type="button" title="Add a connection line to the current event">+ Line</button>
-            <div class="weekConnectionEditorRows">${renderConnectionEditorRowsHtml()}</div>
-          `
+          : `<div class="weekConnectionEditorRows">${renderConnectionEditorRowsHtml(displayRows)}</div>`
         }
       </div>
 
@@ -13143,21 +13208,6 @@ function renderWeekConnectionRail(opts = {}){
       </div>
     </div>
   `;
-
-  safeRail.querySelector(".weekConnectionAddLineBtn")?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    connectionEditorRows = getConnectionEditorRowsFromRail({ keepEmpty:true });
-    connectionEditorRows.push({
-      id:"",
-      name:"",
-      color:eventColor?.value || DEFAULT_COLOR,
-      lineStyle:"solid"
-    });
-    renderWeekConnectionRail();
-
-    const inputs = safeRail.querySelectorAll(".weekConnectionEditRow .weekConnectionNameInput");
-    inputs[inputs.length - 1]?.focus({ preventScroll:true });
-  });
 
   safeRail.querySelectorAll(".weekConnectionRemoveBtn").forEach(btn => {
     btn.addEventListener("click", (e) => {

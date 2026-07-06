@@ -6842,7 +6842,8 @@ body[data-calendar-view="week"] #calendarPage .day.weekViewDay.selectedDay .num{
    WEEK CONNECTION RAIL + SELECTED LINE EDITOR
    ---------------------------------------------------------
    The rail only appears in Week view. Selecting a chip/wire
-   turns the left side into a tiny chain-wide line editor.
+   edits that chain; selecting an unconnected event opens a
+   draft line row automatically.
    ========================================================= */
 .weekConnectionRail{
   display:none;
@@ -6894,28 +6895,9 @@ body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
   overflow:hidden;
 }
 
-.weekConnectionAddLineBtn{
-  flex:0 0 auto;
-  height:36px;
-  padding:0 12px;
-  border-radius:13px;
-  border:1px solid rgba(140,110,255,.58);
-  background:linear-gradient(180deg, rgba(126,96,255,.42), rgba(110,84,235,.24));
-  color:#fff;
-  font-size:13px;
-  font-weight:850;
-  cursor:pointer;
-  box-shadow:0 10px 22px rgba(80,55,200,.18);
-}
-
-.weekConnectionAddLineBtn:hover{
-  transform:translateY(-1px);
-  border-color:rgba(170,150,255,.75);
-  background:linear-gradient(180deg, rgba(140,112,255,.56), rgba(120,90,255,.34));
-}
-
 .weekConnectionEditorRows{
   flex:1;
+  width:100%;
   min-width:0;
   display:flex;
   align-items:center;
@@ -6927,10 +6909,15 @@ body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
 .weekConnectionEditRow,
 .weekConnectionGlobalEditRow{
   display:grid;
-  grid-template-columns:minmax(150px, 1fr) 72px 112px auto;
+  grid-template-columns:minmax(92px, 1fr) 68px 96px auto;
   align-items:center;
   gap:8px;
-  min-width:min(560px, 100%);
+  width:100%;
+  min-width:0;
+}
+
+.weekConnectionEditRow.draftConnectionRow{
+  grid-template-columns:minmax(92px, 1fr) 68px 96px;
 }
 
 .weekConnectionGlobalEditRow{
@@ -7218,8 +7205,12 @@ body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
 
   .weekConnectionEditRow,
   .weekConnectionGlobalEditRow{
-    grid-template-columns:minmax(120px, 1fr) 48px 92px auto;
-    min-width:430px;
+    grid-template-columns:minmax(110px, 1fr) 48px 86px auto;
+    min-width:0;
+  }
+
+  .weekConnectionEditRow.draftConnectionRow{
+    grid-template-columns:minmax(110px, 1fr) 48px 86px;
   }
 
   .weekConnectionGlobalEditRow{
