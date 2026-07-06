@@ -7245,3 +7245,76 @@ body[data-calendar-view="week"] #calendarPage .weekConnectionRail{
 .weekConnectionEditorRows{
   overflow:visible;
 }
+
+/* =========================================================
+   WEEK CONNECTION RAIL SCROLLBARS
+   ---------------------------------------------------------
+   Keeps the Week Lines chip scroller from falling back to the
+   bright native scrollbar chrome.
+   ========================================================= */
+.weekConnectionChipScroller,
+.weekConnectionEditorRows,
+body[data-calendar-view="week"] #calendarPage .calendar{
+  scrollbar-width:thin;
+  scrollbar-color:rgba(144,116,255,.78) rgba(255,255,255,.045);
+}
+
+.weekConnectionChipScroller{
+  padding-bottom:7px;
+  margin-bottom:-5px;
+}
+
+.weekConnectionChipScroller::-webkit-scrollbar,
+.weekConnectionEditorRows::-webkit-scrollbar,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar{
+  width:10px;
+  height:10px;
+}
+
+.weekConnectionChipScroller::-webkit-scrollbar-track,
+.weekConnectionEditorRows::-webkit-scrollbar-track,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-track{
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.075);
+  background:
+    linear-gradient(90deg, rgba(255,255,255,.045), rgba(120,90,255,.075));
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.045),
+    inset 0 -1px 0 rgba(0,0,0,.28);
+}
+
+.weekConnectionChipScroller::-webkit-scrollbar-thumb,
+.weekConnectionEditorRows::-webkit-scrollbar-thumb,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-thumb{
+  border-radius:999px;
+  border:2px solid rgba(18,22,42,.92);
+  background:
+    linear-gradient(90deg, rgba(122,90,255,.72), rgba(166,140,255,.95));
+  box-shadow:
+    0 0 10px rgba(122,90,255,.35),
+    inset 0 1px 0 rgba(255,255,255,.22);
+}
+
+.weekConnectionChipScroller::-webkit-scrollbar-thumb:hover,
+.weekConnectionEditorRows::-webkit-scrollbar-thumb:hover,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-thumb:hover{
+  background:
+    linear-gradient(90deg, rgba(144,112,255,.88), rgba(190,170,255,1));
+  box-shadow:
+    0 0 14px rgba(122,90,255,.48),
+    inset 0 1px 0 rgba(255,255,255,.28);
+}
+
+.weekConnectionChipScroller::-webkit-scrollbar-button,
+.weekConnectionEditorRows::-webkit-scrollbar-button,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-button{
+  width:0;
+  height:0;
+  display:none;
+}
+
+.weekConnectionChipScroller::-webkit-scrollbar-corner,
+.weekConnectionEditorRows::-webkit-scrollbar-corner,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-corner{
+  background:transparent;
+}
