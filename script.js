@@ -11773,6 +11773,10 @@ let selectedConnectionGroupId = null;
 let connectionEditorRows = [];
 let lastWeekAutoScrollKey = "";
 let weekConnectionResizeTimer = null;
+let weekConnectionRenderQueued = false;
+let weekConnectionGeometryCheckQueued = false;
+let weekConnectionResizeObserver = null;
+let lastWeekConnectionGeometryKey = "";
 
 // ============================================================================
 // 12B. APP STATE STORE + RENDER SCHEDULER
@@ -12160,6 +12164,7 @@ function renderMonthView(){
   grid.innerHTML = "";
   grid.classList.remove("weekViewGrid");
   clearConnectionSelection();
+  disconnectWeekConnectionGeometryObservers();
   grid.style.gridTemplateColumns = "repeat(7, 1fr)";
   if(dow) dow.style.display = "";
   resetDowHeader();
@@ -14244,6 +14249,96 @@ function getWeekRouteItemsForGroup(items = []){
   return routeItems.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
 }
 
+function getWeekConnectionGeometryKey(){
+  if(!grid || viewMode !== "week") return "";
+
+  const calendarEl = grid.closest(".calendar");
+  const gridRect = grid.getBoundingClientRect();
+  const calendarRect = calendarEl?.getBoundingClientRect?.() || { width:0, height:0 };
+  const docEl = document.documentElement;
+
+  // This is the tiny tripwire for the scrollbar goblin: if a body/page
+  // scrollbar appears, the usable viewport and the grid/card widths can shift
+  // after the week wires were drawn. We only redraw when those real geometry
+  // numbers change, not on every day click.
+  return [
+    Math.round(docEl?.clientWidth || 0),
+    Math.round(window.innerWidth || 0),
+    Math.round(calendarRect.width || 0),
+    Math.round(calendarEl?.clientWidth || 0),
+    Math.round(calendarEl?.scrollWidth || 0),
+    Math.round(gridRect.width || 0),
+    Math.round(gridRect.height || 0),
+    Math.round(grid.scrollWidth || 0),
+    Math.round(grid.scrollHeight || 0),
+    Array.from(grid.querySelectorAll(".weekViewDay")).map(dayEl => {
+      const rect = dayEl.getBoundingClientRect();
+      return `${Math.round(rect.width)}x${Math.round(rect.height)}:${Math.round(dayEl.clientWidth || 0)}:${Math.round(dayEl.scrollHeight || 0)}`;
+    }).join(","),
+    Array.from(grid.querySelectorAll(".weekEventPill.connectedEventPill")).map(pill => {
+      const rect = pill.getBoundingClientRect();
+      return `${pill.dataset.weekSortKey || ""}:${Math.round(rect.left - gridRect.left)}:${Math.round(rect.top - gridRect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`;
+    }).join(",")
+  ].join("|");
+}
+
+function disconnectWeekConnectionGeometryObservers(){
+  if(weekConnectionResizeObserver){
+    weekConnectionResizeObserver.disconnect();
+    weekConnectionResizeObserver = null;
+  }
+
+  lastWeekConnectionGeometryKey = "";
+}
+
+function queueWeekConnectionsRenderIfGeometryChanged(){
+  if(viewMode !== "week" || !grid) return;
+  if(weekConnectionGeometryCheckQueued) return;
+
+  weekConnectionGeometryCheckQueued = true;
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      weekConnectionGeometryCheckQueued = false;
+
+      const nextKey = getWeekConnectionGeometryKey();
+      if(!nextKey || nextKey === lastWeekConnectionGeometryKey) return;
+
+      lastWeekConnectionGeometryKey = nextKey;
+      queueWeekConnectionsRender();
+    });
+  });
+}
+
+function updateWeekConnectionGeometryObservers(){
+  if(weekConnectionResizeObserver){
+    weekConnectionResizeObserver.disconnect();
+    weekConnectionResizeObserver = null;
+  }
+
+  if(viewMode !== "week" || !grid || typeof ResizeObserver === "undefined") return;
+
+  weekConnectionResizeObserver = new ResizeObserver(() => {
+    queueWeekConnectionsRenderIfGeometryChanged();
+  });
+
+  const calendarEl = grid.closest(".calendar");
+  const targets = [
+    document.documentElement,
+    document.body,
+    calendarEl,
+    dow,
+    grid,
+    ...Array.from(grid.querySelectorAll(".weekViewDay")),
+    ...Array.from(grid.querySelectorAll(".weekEventPill.connectedEventPill"))
+  ].filter(Boolean);
+
+  for(const target of new Set(targets)){
+    try{ weekConnectionResizeObserver.observe(target); }
+    catch{}
+  }
+}
+
 function renderWeekConnections(){
   if(!grid || viewMode !== "week") return;
 
@@ -14375,11 +14470,21 @@ function renderWeekConnections(){
   }
 
   renderWeekConnectionHighlights();
+  lastWeekConnectionGeometryKey = getWeekConnectionGeometryKey();
 }
 
 function queueWeekConnectionsRender(){
+  if(viewMode !== "week" || !grid) return;
+  if(weekConnectionRenderQueued) return;
+
+  weekConnectionRenderQueued = true;
+
   requestAnimationFrame(() => {
-    renderWeekConnections();
+    requestAnimationFrame(() => {
+      weekConnectionRenderQueued = false;
+      renderWeekConnections();
+      lastWeekConnectionGeometryKey = getWeekConnectionGeometryKey();
+    });
   });
 }
 
@@ -14426,8 +14531,14 @@ window.addEventListener("resize", () => {
   weekConnectionResizeTimer = setTimeout(() => {
     lastWeekAutoScrollKey = "";
     alignDowToGrid();
-    queueWeekConnectionsRender();
+    updateWeekConnectionGeometryObservers();
+    queueWeekConnectionsRenderIfGeometryChanged();
   }, 120);
+});
+
+window.visualViewport?.addEventListener("resize", () => {
+  if(viewMode !== "week") return;
+  queueWeekConnectionsRenderIfGeometryChanged();
 });
 
 function renderWeekView(){
@@ -14604,7 +14715,8 @@ function renderWeekView(){
 
   requestAnimationFrame(() => {
     alignDowToGrid();
-    renderWeekConnections();
+    updateWeekConnectionGeometryObservers();
+    queueWeekConnectionsRender();
     queueMobileWeekScroll(weekStartISO, weekEndISO, todayISO);
   });
 }
@@ -14625,6 +14737,7 @@ function renderDayView(){
   grid.innerHTML = "";
   grid.classList.remove("weekViewGrid");
   clearConnectionSelection();
+  disconnectWeekConnectionGeometryObservers();
   grid.style.gridTemplateColumns = "1fr";
   if(dow) dow.style.display = "none";
   resetDowHeader();
@@ -14855,10 +14968,18 @@ pill.addEventListener("dblclick", (e) => {
 
 function renderEventList(){
   if(!eventsList) return;
+
+  const settleWeekConnectionsAfterPanelLayout = () => {
+    if(viewMode === "week"){
+      queueWeekConnectionsRenderIfGeometryChanged();
+    }
+  };
+
   eventsList.innerHTML = "";
 
   if(!selectedDateISO){
     eventsList.innerHTML = `<div class="hint">Select a day to see events.</div>`;
+    settleWeekConnectionsAfterPanelLayout();
     return;
   }
 
@@ -14866,6 +14987,7 @@ function renderEventList(){
 
   if(list.length === 0){
     eventsList.innerHTML = `<div class="hint">No events yet. Click <b>+ New</b> and add one.</div>`;
+    settleWeekConnectionsAfterPanelLayout();
     return;
   }
 
@@ -14912,6 +15034,8 @@ function renderEventList(){
 
     eventsList.appendChild(item);
   }
+
+  settleWeekConnectionsAfterPanelLayout();
 }
 
 function renderNowLine(dayEl){
@@ -15065,6 +15189,7 @@ function selectDate(iso, opts={silent:false}){
   if(!opts.silent){
     if(canPatchWeekSelection && !shouldExpandEditor){
       refreshWeekSelectionOnly();
+      queueWeekConnectionsRenderIfGeometryChanged();
     }else{
       queueRender({ calendar:true });
     }
