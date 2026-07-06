@@ -7318,3 +7318,94 @@ body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-butto
 body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-corner{
   background:transparent;
 }
+
+/* =========================================================
+   WEEK CONNECTION RAIL SCROLLBAR — FORCE DARK NATIVE CHROME
+   ---------------------------------------------------------
+   Some Windows/Chrome builds ignore narrow target scrollbar
+   rules unless the scrolling element advertises dark chrome.
+   These broader, later rules intentionally win over the OS
+   white horizontal scrollbar in the Week Lines rail.
+   ========================================================= */
+body[data-calendar-view="week"] #weekConnectionRail,
+body[data-calendar-view="week"] #weekConnectionRail *,
+body[data-calendar-view="week"] #calendarPage .calendar{
+  color-scheme:dark !important;
+}
+
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipWrap,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionEditorRows{
+  scrollbar-width:thin !important;
+  scrollbar-color:rgba(158,132,255,.95) rgba(14,18,34,.88) !important;
+}
+
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller{
+  padding-bottom:8px !important;
+  margin-bottom:-6px !important;
+}
+
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller::-webkit-scrollbar,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionEditorRows::-webkit-scrollbar,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar{
+  width:10px !important;
+  height:10px !important;
+  background:rgba(14,18,34,.88) !important;
+}
+
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller::-webkit-scrollbar-track,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller::-webkit-scrollbar-track-piece,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionEditorRows::-webkit-scrollbar-track,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionEditorRows::-webkit-scrollbar-track-piece,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-track,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-track-piece{
+  border-radius:999px !important;
+  border:1px solid rgba(170,150,255,.12) !important;
+  background:
+    linear-gradient(90deg, rgba(14,18,34,.96), rgba(34,28,62,.96)) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.055),
+    inset 0 -1px 0 rgba(0,0,0,.42) !important;
+}
+
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller::-webkit-scrollbar-thumb,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionEditorRows::-webkit-scrollbar-thumb,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-thumb{
+  min-width:32px !important;
+  border-radius:999px !important;
+  border:2px solid rgba(14,18,34,.96) !important;
+  background:
+    linear-gradient(90deg, rgba(116,86,245,.92), rgba(178,154,255,1)) !important;
+  box-shadow:
+    0 0 12px rgba(122,90,255,.44),
+    inset 0 1px 0 rgba(255,255,255,.28) !important;
+}
+
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller::-webkit-scrollbar-thumb:hover,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionEditorRows::-webkit-scrollbar-thumb:hover,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-thumb:hover{
+  background:
+    linear-gradient(90deg, rgba(140,112,255,1), rgba(205,190,255,1)) !important;
+  box-shadow:
+    0 0 16px rgba(122,90,255,.58),
+    inset 0 1px 0 rgba(255,255,255,.34) !important;
+}
+
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller::-webkit-scrollbar-button,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller::-webkit-scrollbar-button:single-button,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller::-webkit-scrollbar-button:start:decrement,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller::-webkit-scrollbar-button:end:increment,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionEditorRows::-webkit-scrollbar-button,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-button{
+  width:0 !important;
+  height:0 !important;
+  display:none !important;
+  background:transparent !important;
+  border:0 !important;
+}
+
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionChipScroller::-webkit-scrollbar-corner,
+body[data-calendar-view="week"] #weekConnectionRail .weekConnectionEditorRows::-webkit-scrollbar-corner,
+body[data-calendar-view="week"] #calendarPage .calendar::-webkit-scrollbar-corner{
+  background:transparent !important;
+}
