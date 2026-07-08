@@ -122,6 +122,21 @@
 
 <div class="settingsDivider"></div>
 
+<!-- Reminders V1: notification permission UX (script.js section 17) -->
+<div class="settingBlock" id="notifSettingBlock">
+  <div class="settingBlockTop">
+    <span>Event reminders</span>
+  </div>
+
+  <div id="notifPermissionStatus" class="settingHint">Browser notifications: checking…</div>
+
+  <button id="notifEnableBtn" class="tiny notifEnableBtn" type="button">Enable browser notifications</button>
+
+  <div class="settingHint">Reminders fire while the calendar is open (tab or installed app). If notifications are blocked or unsupported, reminders appear as in-app popups instead.</div>
+</div>
+
+<div class="settingsDivider"></div>
+
 <label class="settingRow">
   <input type="checkbox" id="weatherEnabled" checked>
   Show weather in day view
@@ -314,6 +329,22 @@
             <div class="timeCol" id="repeatUntilCol" style="display:none;">
               <div class="timeMiniLabel">Repeat until (optional)</div>
               <input id="repeatUntil" class="input" type="date" />
+            </div>
+          </div>
+
+          <!-- Reminders V1: per-event reminder offset (script.js section 17) -->
+          <div class="timeGrid reminderGrid">
+            <div class="timeCol">
+              <div class="timeMiniLabel">Reminder</div>
+              <select id="eventReminder" class="input">
+                <option value="">No reminder</option>
+                <option value="0">At time of event</option>
+                <option value="5">5 minutes before</option>
+                <option value="15">15 minutes before</option>
+                <option value="30">30 minutes before</option>
+                <option value="60">1 hour before</option>
+                <option value="1440">1 day before</option>
+              </select>
             </div>
           </div>
 
@@ -846,6 +877,9 @@
     </div>
   </div>
 </div>
+ <!-- Reminders V1: in-app reminder toast stack (script.js section 17) -->
+ <div id="reminderToastContainer" class="reminderToastContainer" aria-live="polite"></div>
+
  <!-- Pinned exact version: prevents silent auto-upgrade supply-chain risk.
       To also add SRI, run:
       curl -s https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.1/dist/umd/supabase.min.js | openssl dgst -sha384 -binary | openssl base64 -A

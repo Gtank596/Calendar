@@ -1,4 +1,8 @@
-const CACHE_NAME = "my-calendar-pwa-v18";
+// v19: Reminders V1 shipped in the app shell; also added the Supabase
+// never-cache bypass below and a notificationclick handler. Bumping the
+// version forces a clean shell re-cache on activate (local assets are
+// cache-first, so without this users could keep running the old script.js).
+const CACHE_NAME = "my-calendar-pwa-v19";
 
 const APP_SHELL = [
   "./",
@@ -37,7 +41,15 @@ self.addEventListener("fetch", event => {
 
   const url = new URL(request.url);
 
-  // Keep API requests network-first so Supabase and weather stay fresh.
+  // Supabase (auth, REST, and Edge Functions such as the receipt scanner) is
+  // network-only and NEVER cached: responses can contain per-user data and
+  // must not be served stale or persisted in the cache. Non-GET requests were
+  // already skipped above; this also excludes Supabase GETs.
+  if (url.hostname.endsWith(".supabase.co") || url.hostname.endsWith(".supabase.in")) {
+    return; // let the browser handle it directly, no respondWith, no cache
+  }
+
+  // Keep API requests network-first so weather etc. stay fresh.
   // CDN scripts are also cached after first successful load so the installed app
   // can still boot while offline.
   if (url.origin !== self.location.origin) {
@@ -81,6 +93,21 @@ self.addEventListener("fetch", event => {
       }).catch(() => cached);
 
       return cached || networkFetch;
+    })
+  );
+});
+
+// Reminders V1: clicking a reminder notification focuses an open calendar
+// window (or opens one). Display-only — this worker does NOT schedule or
+// receive push; there is no "push" handler in V1 by design.
+self.addEventListener("notificationclick", event => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(clientList => {
+      for (const client of clientList) {
+        if ("focus" in client) return client.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow("./index.html");
     })
   );
 });

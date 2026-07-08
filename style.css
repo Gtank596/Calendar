@@ -7696,3 +7696,115 @@ position: relative;
 }
 
 
+
+/* =================================================================
+   Reminders V1 — toasts + settings (script.js section 17)
+   Appended as a self-contained block: deleting this section is part
+   of the reminder-feature rollback and affects nothing else.
+   ================================================================= */
+
+/* ---- In-app reminder toast stack ---- */
+
+.reminderToastContainer{
+  position:fixed;
+  right:16px;
+  bottom:16px;
+  z-index:9999;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  max-width:min(360px, calc(100vw - 32px));
+  pointer-events:none; /* clicks pass through the empty stack area */
+}
+
+.reminderToast{
+  pointer-events:auto;
+  display:flex;
+  align-items:flex-start;
+  gap:10px;
+  padding:12px 12px 12px 14px;
+  border-radius:14px;
+  border:1px solid var(--line);
+  background:linear-gradient(180deg, rgba(32,38,70,.92), rgba(16,21,42,.92));
+  box-shadow:0 12px 30px rgba(0,0,0,.45);
+  backdrop-filter:blur(14px);
+  -webkit-backdrop-filter:blur(14px);
+  color:var(--text);
+  animation:reminderToastIn .22s ease-out;
+}
+
+@keyframes reminderToastIn{
+  from{ opacity:0; transform:translateY(10px) scale(.98); }
+  to{ opacity:1; transform:translateY(0) scale(1); }
+}
+
+.reminderToastLeaving{
+  opacity:0;
+  transform:translateY(6px);
+  transition:opacity .18s ease, transform .18s ease;
+}
+
+.reminderToastIcon{
+  font-size:18px;
+  line-height:1;
+  margin-top:2px;
+}
+
+.reminderToastBody{
+  flex:1;
+  min-width:0;
+}
+
+.reminderToastKicker{
+  font-size:10px;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-bottom:2px;
+}
+
+.reminderToastTitle{
+  font-size:14px;
+  font-weight:600;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.reminderToastMeta{
+  font-size:12px;
+  color:var(--muted);
+  margin-top:2px;
+}
+
+.reminderToastDismiss{
+  flex:none;
+  width:26px;
+  height:26px;
+  border-radius:8px;
+  border:1px solid var(--line);
+  background:var(--soft);
+  color:var(--text);
+  font-size:16px;
+  line-height:1;
+  cursor:pointer;
+}
+
+.reminderToastDismiss:hover{
+  background:rgba(255,255,255,.12);
+}
+
+@media (max-width: 760px){
+  .reminderToastContainer{
+    left:12px;
+    right:12px;
+    bottom:calc(12px + env(safe-area-inset-bottom, 0px));
+    max-width:none;
+    }
+}
+
+/* ---- Notification settings block ---- */
+
+.notifEnableBtn{
+  align-self:flex-start;
+}

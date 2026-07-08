@@ -278,6 +278,9 @@ const tripUntilRow = document.getElementById("tripUntilRow");
 const weeklyIntervalRow = document.getElementById("weeklyIntervalRow");
 const repeatInterval = document.getElementById("repeatInterval");
 
+// Reminders V1: per-event reminder dropdown in the editor (see section 17)
+const eventReminderSelect = document.getElementById("eventReminder");
+
 // Weekly multi-day selector
 const weeklyDaysRow = document.getElementById("weeklyDaysRow");
 const weekdayBtns = weeklyDaysRow ? Array.from(weeklyDaysRow.querySelectorAll(".weekdayBtn")) : [];
@@ -12065,6 +12068,18 @@ const days = Array.isArray(obj?.recurrence?.days)
   ? obj.recurrence.days.map(Number).filter(n => n >= 0 && n <= 6)
   : [];
 
+  // Reminders V1 (section 17): reminder is either null ("no reminder") or an
+  // object { offsetMinutes } describing minutes-before-start. It is stored as
+  // an object (not a bare number) so a future Web Push / server-side version
+  // can add fields like { channels: ["local","push"], pushScheduledAt } without
+  // changing the shape existing clients already understand. Old events that
+  // never had this field normalize to null — no migration needed.
+  const remRaw = obj?.reminder;
+  let reminder = null;
+  if(remRaw && typeof remRaw === "object" && Number.isFinite(Number(remRaw.offsetMinutes))){
+    reminder = { offsetMinutes: Math.max(0, Math.round(Number(remRaw.offsetMinutes))) };
+  }
+
   // Optional: background range shading ("trip" style)
   const spanMode = (obj?.span?.mode ?? "").toString().trim();
   const spanEnd = (obj?.span?.end ?? "").toString().trim();
@@ -12106,6 +12121,7 @@ categoryId: (obj?.categoryId ?? "other").toString(),
   startDate: (obj?.startDate ?? "").toString(),
   time: legacyTime,
   span,
+  reminder, // Reminders V1 — null means "no reminder" (default for old events)
   recurrence: {
       freq: ["none","daily","weekly","weeklyDays","monthly","yearly"].includes(freq) ? freq : "none",
       until,
@@ -16011,6 +16027,8 @@ if(eventPrice) eventPrice.value = "";
   if(eventColor) eventColor.value = DEFAULT_COLOR;
 
   setRepeatValue("none");
+  // Reminders V1: new events default to no reminder
+  if(eventReminderSelect) eventReminderSelect.value = "";
  setSelectedWeekdays([]); // clear weekly pick-days UI
   if(repeatUntil) repeatUntil.value = "";
   if(repeatInterval) repeatInterval.value = "1";
@@ -16060,6 +16078,16 @@ renderEventCategoryOptions();
 
   if(eventColor) eventColor.value = ev.color || DEFAULT_COLOR;
   setConnectionEditorRows(getEventConnections(ev));
+
+  // Reminders V1: reflect the stored reminder in the dropdown. Reset to "" first
+  // so an unknown/custom offset (not one of the preset options) shows as
+  // "No reminder" instead of leaving a stale selection from the previous event.
+  if(eventReminderSelect){
+    eventReminderSelect.value = "";
+    if(ev.reminder && Number.isFinite(Number(ev.reminder.offsetMinutes))){
+      eventReminderSelect.value = String(ev.reminder.offsetMinutes);
+    }
+  }
 
   // If this event is a trip band (background shading), show that in the Repeat dropdown.
   const isTrip = (ev?.span?.mode === "bg");
@@ -16139,6 +16167,12 @@ const connectionFields = getConnectionFieldsForSave(color);
   const until = (repeatUntil?.value || "").toString().trim();
   const interval = Math.max(1, parseInt(repeatInterval?.value || "1",10) || 1);
 
+  // Reminders V1: "" = no reminder, otherwise minutes before start (0 = at event time)
+  const reminderRaw = (eventReminderSelect?.value ?? "").toString().trim();
+  const reminder = reminderRaw === ""
+    ? null
+    : { offsetMinutes: Math.max(0, parseInt(reminderRaw, 10) || 0) };
+
   if(!title && !details && !startStr && !endStr && price === null) return;
 
   const baseKey = getEditDateKey();
@@ -16192,6 +16226,7 @@ categoryId,
         endTime: endStr,
         startDate: existing.startDate || selectedDateISO,
         span,
+        reminder, // Reminders V1
         recurrence: {
           ...prev,
           ...nextRecurrence,
@@ -16212,6 +16247,7 @@ categoryId,
         endTime: endStr,
         startDate: selectedDateISO,
         span,
+        reminder, // Reminders V1
         recurrence: nextRecurrence
       };
       list.push(newEv);
@@ -16231,6 +16267,7 @@ categoryId,
       endTime: endStr,
       startDate: selectedDateISO,
       span,
+      reminder, // Reminders V1
       recurrence: nextRecurrence
     };
     list.push(newEv);
@@ -17393,3 +17430,422 @@ requestAnimationFrame(updateViewSlider);
 setInterval(() => {
   if(viewMode === "day") render();
 }, 60000);
+
+// ============================================================================
+// 17. REMINDERS / NOTIFICATIONS — V1 (LOCAL ONLY)
+// ============================================================================
+// Everything reminder-related lives in this section plus five tiny hooks
+// elsewhere (eventReminderSelect DOM ref, toEvent normalization, the two form
+// populate/clear functions, and the addBtn save handler). Deleting this
+// section + those hooks + the reminder HTML/CSS is a full rollback; stored
+// events keep an inert `reminder` field that older code simply ignores.
+//
+// Design:
+// - Poll-based, not setTimeout-per-reminder. Every check recomputes what is
+//   due directly from current event data, so edits/deletes/recurrence
+//   exceptions can never leave a stale scheduled timer behind.
+// - Occurrence reminder IDs are deterministic and data-derived:
+//       v1|<masterEventId>|<occurrenceDateISO>|<startMinutes>|<offsetMinutes>
+//   A future Web Push backend can compute the exact same IDs server-side
+//   from the same event records, so the dedupe store and ID format carry
+//   over unchanged — only the delivery channel would be added.
+// - "Sent" IDs live in localStorage and are pruned after 7 days.
+// - Works only while the app is open (tab or installed PWA). Closed-browser
+//   delivery requires Web Push and is intentionally out of scope for V1.
+
+const REMINDER_SENT_KEY = "myCalendarSentReminders_v1";
+const REMINDER_CHECK_INTERVAL_MS = 20 * 1000;      // poll while app is open
+const REMINDER_LOOKBACK_MS = 30 * 60 * 1000;       // catch-up window for missed reminders
+const REMINDER_SENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // prune sent records after 7 days
+const REMINDER_MAX_TOASTS = 4;                     // cap simultaneous toasts
+
+// Human labels for the editor offsets (also used in notification bodies)
+const REMINDER_OFFSET_LABELS = {
+  0: "At time of event",
+  5: "5 minutes before",
+  15: "15 minutes before",
+  30: "30 minutes before",
+  60: "1 hour before",
+  1440: "1 day before"
+};
+
+// --- Sent-reminder store (dedupe) -------------------------------------------
+
+function getSentReminderMap(){
+  try{
+    const raw = JSON.parse(localStorage.getItem(REMINDER_SENT_KEY)) || {};
+    return (raw && typeof raw === "object") ? raw : {};
+  }catch{
+    return {};
+  }
+}
+
+function setSentReminderMap(map){
+  try{
+    localStorage.setItem(REMINDER_SENT_KEY, JSON.stringify(map || {}));
+  }catch(err){
+    // Quota problems must never break the calendar itself.
+    console.warn("Reminders: could not persist sent-reminder map:", err);
+  }
+}
+
+function pruneSentReminderMap(map, now = Date.now()){
+  const out = {};
+  let changed = false;
+  for(const id of Object.keys(map || {})){
+    const firedAt = Number(map[id]) || 0;
+    if(now - firedAt <= REMINDER_SENT_MAX_AGE_MS){
+      out[id] = firedAt;
+    }else{
+      changed = true;
+    }
+  }
+  return { map: out, changed };
+}
+
+// --- Reminder ID -------------------------------------------------------------
+
+// Deterministic occurrence ID. `|` is safe: event IDs are UUIDs or the legacy
+// base36 fallback, neither of which contains "|". startMinutes is minutes
+// since local midnight so the ID changes if the event time changes (which is
+// exactly what we want — an edited event's old reminder ID simply never
+// becomes due again).
+function buildReminderId(masterId, occDateISO, startMinutes, offsetMinutes){
+  return `v1|${masterId}|${occDateISO}|${startMinutes}|${offsetMinutes}`;
+}
+
+// --- Collecting due / upcoming reminders -------------------------------------
+
+// Scans occurrence dates around "now" and returns reminder entries. Reuses
+// getComputedEventsForDay(), which already applies recurrence rules AND
+// recurrence exceptions/deleted occurrences, so this engine automatically
+// respects series edits without duplicating that logic.
+function collectReminderEntries(now = Date.now()){
+  const entries = [];
+  if(typeof getComputedEventsForDay !== "function") return entries;
+
+  // Offsets go up to 1 day before, and the catch-up lookback reaches slightly
+  // into the past, so occurrences from yesterday through two days out cover
+  // every reminder that could be due now or become due soon.
+  const base = new Date(now);
+  base.setHours(0, 0, 0, 0);
+
+  for(let dayDelta = -1; dayDelta <= 2; dayDelta++){
+    const d = new Date(base);
+    d.setDate(d.getDate() + dayDelta);
+    const dayISO = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
+    let dayEvents = [];
+    try{
+      dayEvents = getComputedEventsForDay(dayISO) || [];
+    }catch(err){
+      console.warn("Reminders: day scan failed for", dayISO, err);
+      continue;
+    }
+
+    for(const ev of dayEvents){
+      if(!ev || !ev.reminder) continue;
+      if(ev._isSpanOccurrence) continue;          // trip shading isn't a timed event
+      if(ev.source === "budget") continue;        // budget rows never carry reminders
+      const offset = Number(ev.reminder.offsetMinutes);
+      if(!Number.isFinite(offset) || offset < 0) continue;
+
+      const startMins = parseClockToMinutes(ev.startTime || "");
+      if(startMins === null) continue;            // no start time → nothing to anchor to (V1 limitation)
+
+      const masterId = ev._masterId || ev.id;
+      if(!masterId) continue;
+      const occDateISO = ev._occursOn || dayISO;
+
+      const occStartMs = ymdToDate(occDateISO).getTime() + startMins * 60000;
+      const dueMs = occStartMs - offset * 60000;
+
+      entries.push({
+        id: buildReminderId(masterId, occDateISO, startMins, offset),
+        masterId,
+        occDateISO,
+        title: ev.title || "Untitled event",
+        startTime: ev.startTime || "",
+        offsetMinutes: offset,
+        dueMs,
+        occStartMs
+      });
+    }
+  }
+
+  return entries;
+}
+
+// --- Delivery ----------------------------------------------------------------
+
+function reminderDayLabel(occDateISO, now = new Date()){
+  const todayISOStr = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+  if(occDateISO === todayISOStr) return "Today";
+  const t = new Date(now); t.setDate(t.getDate() + 1);
+  const tomorrowISOStr = `${t.getFullYear()}-${pad2(t.getMonth() + 1)}-${pad2(t.getDate())}`;
+  if(occDateISO === tomorrowISOStr) return "Tomorrow";
+  try{
+    return ymdToDate(occDateISO).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  }catch{
+    return occDateISO;
+  }
+}
+
+function reminderBodyText(entry){
+  const day = reminderDayLabel(entry.occDateISO);
+  const when = entry.startTime ? `${entry.startTime} · ${day}` : day;
+  const offsetLabel = REMINDER_OFFSET_LABELS[entry.offsetMinutes] || `${entry.offsetMinutes} minutes before`;
+  return `${when} (${offsetLabel})`;
+}
+
+// Browser notification path. Prefers the service worker registration's
+// showNotification (required on Android/Chrome, where `new Notification()`
+// throws), falls back to the constructor, and reports success so the caller
+// can fall back to an in-app toast. Never requests permission here — that
+// only happens from the explicit settings button.
+async function deliverBrowserNotification(entry){
+  if(typeof Notification === "undefined") return false;
+  if(Notification.permission !== "granted") return false;
+
+  const title = `⏰ ${entry.title}`;
+  const options = {
+    body: reminderBodyText(entry),
+    tag: entry.id,              // OS-level dedupe: same reminder replaces itself
+    icon: "icons/icon-192.png",
+    badge: "icons/icon-192.png",
+    data: { reminderId: entry.id, occDateISO: entry.occDateISO }
+  };
+
+  try{
+    if("serviceWorker" in navigator){
+      const reg = await navigator.serviceWorker.getRegistration();
+      if(reg && typeof reg.showNotification === "function"){
+        await reg.showNotification(title, options);
+        return true;
+      }
+    }
+  }catch(err){
+    console.warn("Reminders: showNotification failed, trying constructor:", err);
+  }
+
+  try{
+    new Notification(title, options);
+    return true;
+  }catch(err){
+    console.warn("Reminders: Notification constructor failed:", err);
+    return false;
+  }
+}
+
+// In-app toast fallback (also used when permission is denied/unavailable).
+function showReminderToast(entry){
+  const container = document.getElementById("reminderToastContainer");
+  if(!container) return;
+
+  // Cap the stack so a big catch-up batch can't wallpaper the screen.
+  while(container.children.length >= REMINDER_MAX_TOASTS){
+    container.removeChild(container.firstChild);
+  }
+
+  const toast = document.createElement("div");
+  toast.className = "reminderToast";
+  toast.setAttribute("role", "status");
+
+  const icon = document.createElement("div");
+  icon.className = "reminderToastIcon";
+  icon.textContent = "⏰";
+
+  const body = document.createElement("div");
+  body.className = "reminderToastBody";
+
+  const kicker = document.createElement("div");
+  kicker.className = "reminderToastKicker";
+  kicker.textContent = "Reminder";
+
+  const title = document.createElement("div");
+  title.className = "reminderToastTitle";
+  title.textContent = entry.title;
+
+  const meta = document.createElement("div");
+  meta.className = "reminderToastMeta";
+  meta.textContent = reminderBodyText(entry);
+
+  body.appendChild(kicker);
+  body.appendChild(title);
+  body.appendChild(meta);
+
+  const dismiss = document.createElement("button");
+  dismiss.className = "reminderToastDismiss";
+  dismiss.type = "button";
+  dismiss.setAttribute("aria-label", "Dismiss reminder");
+  dismiss.textContent = "×";
+  dismiss.addEventListener("click", () => {
+    toast.classList.add("reminderToastLeaving");
+    setTimeout(() => toast.remove(), 180);
+  });
+
+  toast.appendChild(icon);
+  toast.appendChild(body);
+  toast.appendChild(dismiss);
+  container.appendChild(toast);
+}
+
+async function fireReminder(entry){
+  const shown = await deliverBrowserNotification(entry);
+  if(!shown) showReminderToast(entry);
+}
+
+// --- Engine ------------------------------------------------------------------
+
+let reminderCheckInFlight = false;
+
+async function checkRemindersNow(reason = "tick"){
+  if(reminderCheckInFlight) return; // re-entrancy guard (focus + interval can overlap)
+  reminderCheckInFlight = true;
+
+  try{
+    const now = Date.now();
+    const pruned = pruneSentReminderMap(getSentReminderMap(), now);
+    const sent = pruned.map;
+    let sentChanged = pruned.changed;
+
+    const due = collectReminderEntries(now).filter(e =>
+      e.dueMs <= now &&
+      (now - e.dueMs) <= REMINDER_LOOKBACK_MS &&
+      !sent[e.id]
+    );
+
+    // Mark as sent BEFORE displaying: if display throws, we drop one reminder
+    // rather than risk firing the same one forever. Safer failure mode.
+    for(const entry of due){
+      sent[entry.id] = now;
+      sentChanged = true;
+    }
+    if(sentChanged) setSentReminderMap(sent);
+
+    for(const entry of due){
+      try{
+        await fireReminder(entry);
+      }catch(err){
+        console.warn("Reminders: failed to display reminder", entry.id, err);
+      }
+    }
+
+    if(due.length){
+      console.info(`Reminders: fired ${due.length} (${reason})`);
+    }
+  }catch(err){
+    console.warn("Reminders: check failed:", err);
+  }finally{
+    reminderCheckInFlight = false;
+  }
+}
+
+// --- Notification permission UX (settings menu) ------------------------------
+
+function updateNotificationPermissionUI(){
+  const statusEl = document.getElementById("notifPermissionStatus");
+  const btn = document.getElementById("notifEnableBtn");
+  if(!statusEl) return;
+
+  if(typeof Notification === "undefined"){
+    statusEl.textContent = "Browser notifications: not supported here. Reminders will show as in-app popups while the calendar is open.";
+    if(btn) btn.style.display = "none";
+    return;
+  }
+
+  const p = Notification.permission;
+  if(p === "granted"){
+    statusEl.textContent = "Browser notifications: enabled ✓";
+    if(btn) btn.style.display = "none";
+  }else if(p === "denied"){
+    statusEl.textContent = "Browser notifications: blocked in your browser settings. Reminders will show as in-app popups while the calendar is open.";
+    if(btn) btn.style.display = "none";
+  }else{
+    statusEl.textContent = "Browser notifications: not enabled yet.";
+    if(btn) btn.style.display = "";
+  }
+}
+
+document.getElementById("notifEnableBtn")?.addEventListener("click", async () => {
+  try{
+    if(typeof Notification === "undefined") return;
+    await Notification.requestPermission();
+  }catch(err){
+    console.warn("Reminders: permission request failed:", err);
+  }finally{
+    updateNotificationPermissionUI();
+  }
+});
+
+// --- Wiring: load, focus, visibility, interval --------------------------------
+
+// Small startup delay lets the initial render/hydration settle before the
+// first scan; the events map itself loads synchronously from localStorage.
+setTimeout(() => {
+  updateNotificationPermissionUI();
+  checkRemindersNow("startup").catch(console.error);
+}, 1500);
+
+setInterval(() => {
+  checkRemindersNow("interval").catch(console.error);
+}, REMINDER_CHECK_INTERVAL_MS);
+
+window.addEventListener("focus", () => {
+  checkRemindersNow("focus").catch(console.error);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if(document.visibilityState === "visible"){
+    checkRemindersNow("visible").catch(console.error);
+  }
+});
+
+// --- Debug helpers (console) ---------------------------------------------------
+
+// Dump the engine's current view of the world.
+window.debugReminders = function(){
+  const now = Date.now();
+  const sent = getSentReminderMap();
+  const entries = collectReminderEntries(now).sort((a, b) => a.dueMs - b.dueMs);
+
+  console.group("Reminders debug");
+  console.log("Permission:", (typeof Notification !== "undefined") ? Notification.permission : "unsupported");
+  console.log("Sent map size:", Object.keys(sent).length);
+  console.table(entries.map(e => ({
+    id: e.id,
+    title: e.title,
+    due: new Date(e.dueMs).toLocaleString(),
+    dueInMin: Math.round((e.dueMs - now) / 60000),
+    alreadySent: !!sent[e.id]
+  })));
+  console.groupEnd();
+  return { permission: (typeof Notification !== "undefined") ? Notification.permission : "unsupported", entries, sent };
+};
+
+// Wipe the dedupe store so reminders can fire again (testing only).
+window.clearSentReminders = function(){
+  setSentReminderMap({});
+  console.info("Reminders: sent-reminder store cleared. Recently-due reminders may fire on the next check.");
+};
+
+// Display-path test that does NOT touch your event data: fires a synthetic
+// reminder through the exact same delivery code in ~60 seconds.
+window.testReminderInOneMinute = function(){
+  const at = Date.now() + 60 * 1000;
+  console.info("Reminders: test reminder scheduled for", new Date(at).toLocaleTimeString(), "(synthetic — no event data was created or modified)");
+  setTimeout(() => {
+    const nowD = new Date();
+    fireReminder({
+      id: `v1|__test__|${nowD.getFullYear()}-${pad2(nowD.getMonth()+1)}-${pad2(nowD.getDate())}|${nowD.getHours()*60+nowD.getMinutes()}|0`,
+      masterId: "__test__",
+      occDateISO: `${nowD.getFullYear()}-${pad2(nowD.getMonth()+1)}-${pad2(nowD.getDate())}`,
+      title: "Test reminder (safe to dismiss)",
+      startTime: minutesToClockString(nowD.getHours()*60 + nowD.getMinutes()),
+      offsetMinutes: 0,
+      dueMs: at,
+      occStartMs: at
+    }).catch(console.error);
+  }, 60 * 1000);
+  return "Scheduled — keep this tab open.";
+};
