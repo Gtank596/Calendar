@@ -6131,6 +6131,10 @@ function actuallyDeleteBudgetCategory(categoryId){
 
   budgetCategories = budgetCategories.filter(c => c.id !== categoryId);
 
+  // Drop learned logistic-regression weights for the removed category so the
+  // classifier can never vote for a category that no longer exists.
+  removeReceiptLogisticCategory(categoryId);
+
   saveBudgetCategories();
   saveEvents(before);
   syncStateFromLegacy();
@@ -6354,11 +6358,28 @@ const RECEIPT_NAIVE_BAYES_MIN_RECORDS = 6;
 const RECEIPT_NAIVE_BAYES_MAX_FEATURES = 40;
 const RECEIPT_NAIVE_BAYES_SCORE_SCALE = 24;
 const RECEIPT_TRAINING_DEBUG_ENABLED = false;
+
+// --- Logistic Regression (additional vote; does NOT replace memory or NB) ---
+// Versioned key: bump the suffix + LOGISTIC_MODEL_VERSION together if the
+// stored shape ever changes. Old keys are left untouched so nothing is lost.
+const RECEIPT_LOGISTIC_MODEL_KEY = "myCalendarReceiptLogisticModel_v1";
+const RECEIPT_LOGISTIC_MODEL_VERSION = 1;
+const RECEIPT_LOGISTIC_MIN_TRAINED = 6;      // same readiness bar as Naive Bayes
+const RECEIPT_LOGISTIC_MAX_FEATURES = 600;   // hard vocabulary cap (storage rail)
+const RECEIPT_LOGISTIC_MAX_INPUT_FEATURES = 40;
+const RECEIPT_LOGISTIC_SCORE_SCALE = 20;     // slightly below NB's 24: LR is a helper vote
+const RECEIPT_LOGISTIC_BASE_LEARNING_RATE = 0.35;
+const RECEIPT_LOGISTIC_L2_SHRINK = 0.0015;   // gentle decay so stale weights fade
+const RECEIPT_LOGISTIC_WEIGHT_CLAMP = 6;     // one feature can never dominate alone
+const RECEIPT_LOGISTIC_BOOTSTRAP_PASSES = 2; // warm start from existing training records
+const RECEIPT_LOGISTIC_BOOTSTRAP_RECORD_CAP = 400;
+
 let receiptScanBusy = false;
 let currentReceiptScanDraft = null;
 let merchantAliases = loadMerchantAliases();
 let receiptItemCategoryMemory = loadReceiptItemCategoryMemory();
 let receiptTrainingRecords = loadReceiptTrainingRecords();
+let receiptLogisticModel = loadReceiptLogisticModel();
 
 
 function loadMerchantAliases(){
@@ -6643,6 +6664,440 @@ function getReceiptNaiveBayesSummary(prediction = {}){
 
 
 // ---------------------------------------------------------------------------
+// Logistic Regression category classifier (online / incremental)
+//
+// This is an ADDITIONAL vote alongside the rule-based guesser, the phrase
+// memory scorer, and Naive Bayes. It never replaces them. It trains one
+// softmax SGD step per confirmed receipt, so there is no batch retraining.
+//
+// Privacy rails:
+// - Features arrive via buildReceiptTrainingFeatures(), whose phrases have
+//   already passed extractReceiptLearningPhrases() -> redactReceiptPhrase().
+// - sanitizeReceiptLogisticFeatures() re-checks every feature against
+//   RECEIPT_SENSITIVE_KEYWORDS and strips long digit runs (defense in depth).
+// - Only feature tokens + numeric weights are stored. Never raw receipt text.
+// ---------------------------------------------------------------------------
+
+function createEmptyReceiptLogisticModel(){
+  return {
+    version: RECEIPT_LOGISTIC_MODEL_VERSION,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    trainCount: 0,
+    // bias[categoryId] = number
+    bias: {},
+    // features[featureToken] = { w: { categoryId: weight }, seen, lastSeenAt }
+    features: {},
+    // classCounts[categoryId] = confirmed receipts trained for that category
+    classCounts: {}
+  };
+}
+
+function loadReceiptLogisticModel(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(RECEIPT_LOGISTIC_MODEL_KEY));
+
+    if(
+      saved &&
+      typeof saved === "object" &&
+      Number(saved.version) === RECEIPT_LOGISTIC_MODEL_VERSION &&
+      saved.features && typeof saved.features === "object" &&
+      saved.bias && typeof saved.bias === "object"
+    ){
+      return saved;
+    }
+
+    // Unknown/older version: do NOT delete the old payload (rule 6/7).
+    // Start fresh under the current version; the model can warm-start from
+    // receiptTrainingRecords, so nothing meaningful is lost.
+    return createEmptyReceiptLogisticModel();
+  }catch{
+    return createEmptyReceiptLogisticModel();
+  }
+}
+
+let receiptLogisticPersistTimer = null;
+
+function persistReceiptLogisticModel(){
+  // Debounced write keeps localStorage churn low during bootstrap replay.
+  clearTimeout(receiptLogisticPersistTimer);
+
+  receiptLogisticPersistTimer = setTimeout(() => {
+    try{
+      receiptLogisticModel.updatedAt = Date.now();
+      localStorage.setItem(
+        RECEIPT_LOGISTIC_MODEL_KEY,
+        JSON.stringify(receiptLogisticModel)
+      );
+    }catch(err){
+      // Quota or serialization problems must never break receipt scanning.
+      console.warn("Could not persist logistic model:", err);
+    }
+  }, 250);
+}
+
+function sanitizeReceiptLogisticFeatures(features = []){
+  const out = [];
+  const seen = new Set();
+
+  for(const raw of features || []){
+    let f = String(raw || "").toLowerCase().trim();
+    if(!f) continue;
+
+    // Defense in depth: even though phrases were already redacted upstream,
+    // never let card/account/loyalty style tokens or long digit runs in.
+    if(RECEIPT_SENSITIVE_KEYWORDS.test(f)) continue;
+    if(/\d{4,}/.test(f)) continue;
+    if(f.length > 60) continue;
+    if(seen.has(f)) continue;
+
+    seen.add(f);
+    out.push(f);
+
+    if(out.length >= RECEIPT_LOGISTIC_MAX_INPUT_FEATURES) break;
+  }
+
+  return out;
+}
+
+function getReceiptLogisticActiveCategories(){
+  // Only categories that still exist (handles deleted categories) and are
+  // real spending categories ("other" is never a training label).
+  return Object.keys(receiptLogisticModel.classCounts || {})
+    .filter(id => id && id !== "other" && !!getBudgetCategory(id));
+}
+
+function pruneReceiptLogisticDeletedCategories(){
+  const valid = new Set(
+    Object.keys(receiptLogisticModel.classCounts || {})
+      .filter(id => !!getBudgetCategory(id))
+  );
+
+  let changed = false;
+
+  for(const id of Object.keys(receiptLogisticModel.classCounts || {})){
+    if(!valid.has(id)){
+      delete receiptLogisticModel.classCounts[id];
+      delete receiptLogisticModel.bias[id];
+      changed = true;
+    }
+  }
+
+  if(changed){
+    for(const feat of Object.values(receiptLogisticModel.features || {})){
+      for(const id of Object.keys(feat.w || {})){
+        if(!valid.has(id)) delete feat.w[id];
+      }
+    }
+  }
+
+  return changed;
+}
+
+function removeReceiptLogisticCategory(categoryId){
+  if(!categoryId) return;
+
+  delete receiptLogisticModel.classCounts[categoryId];
+  delete receiptLogisticModel.bias[categoryId];
+
+  for(const [token, feat] of Object.entries(receiptLogisticModel.features || {})){
+    if(feat?.w) delete feat.w[categoryId];
+    if(feat?.w && !Object.keys(feat.w).length){
+      delete receiptLogisticModel.features[token];
+    }
+  }
+
+  persistReceiptLogisticModel();
+}
+
+function getReceiptLogisticFeatureImportance(feat = {}){
+  let sum = 0;
+  for(const w of Object.values(feat.w || {})) sum += Math.abs(Number(w) || 0);
+  return sum;
+}
+
+function pruneReceiptLogisticVocabulary(){
+  const entries = Object.entries(receiptLogisticModel.features || {});
+  if(entries.length <= RECEIPT_LOGISTIC_MAX_FEATURES) return;
+
+  entries.sort((a, b) => {
+    const diff =
+      getReceiptLogisticFeatureImportance(b[1]) -
+      getReceiptLogisticFeatureImportance(a[1]);
+
+    if(diff) return diff;
+    return Number(b[1]?.lastSeenAt || 0) - Number(a[1]?.lastSeenAt || 0);
+  });
+
+  receiptLogisticModel.features = Object.fromEntries(
+    entries.slice(0, RECEIPT_LOGISTIC_MAX_FEATURES)
+  );
+}
+
+function computeReceiptLogisticProbabilities(inputFeatures = [], categoryIds = []){
+  const logits = categoryIds.map(categoryId => {
+    let z = Number(receiptLogisticModel.bias?.[categoryId] || 0);
+
+    for(const feature of inputFeatures){
+      const w = receiptLogisticModel.features?.[feature]?.w?.[categoryId];
+      if(w) z += Number(w) || 0;
+    }
+
+    return { categoryId, z };
+  });
+
+  // Numerically stable softmax.
+  const maxZ = Math.max(...logits.map(row => row.z));
+  const expRows = logits.map(row => ({ ...row, e: Math.exp(row.z - maxZ) }));
+  const total = expRows.reduce((sum, row) => sum + row.e, 0) || 1;
+
+  return expRows
+    .map(row => ({
+      categoryId: row.categoryId,
+      logit: row.z,
+      probability: row.e / total
+    }))
+    .sort((a, b) => b.probability - a.probability);
+}
+
+function trainReceiptLogisticRegression(rawFeatures = [], categoryId = ""){
+  // Unknown / removed / "other" labels never train the model.
+  if(!categoryId || categoryId === "other") return false;
+  if(!getBudgetCategory(categoryId)) return false;
+
+  const inputFeatures = sanitizeReceiptLogisticFeatures(rawFeatures);
+  if(!inputFeatures.length) return false;
+
+  pruneReceiptLogisticDeletedCategories();
+
+  // Register the label so it participates in the softmax from now on.
+  receiptLogisticModel.classCounts[categoryId] =
+    Number(receiptLogisticModel.classCounts[categoryId] || 0) + 1;
+
+  if(!(categoryId in receiptLogisticModel.bias)){
+    receiptLogisticModel.bias[categoryId] = 0;
+  }
+
+  const categoryIds = getReceiptLogisticActiveCategories();
+
+  // Decaying learning rate: early receipts move fast, later ones fine-tune.
+  const t = Number(receiptLogisticModel.trainCount || 0);
+  const learningRate =
+    RECEIPT_LOGISTIC_BASE_LEARNING_RATE / (1 + t / 60);
+
+  const probabilities = categoryIds.length >= 2
+    ? computeReceiptLogisticProbabilities(inputFeatures, categoryIds)
+    : categoryIds.map(id => ({ categoryId: id, probability: id === categoryId ? 0 : 1 }));
+
+  const probById = new Map(probabilities.map(row => [row.categoryId, row.probability]));
+
+  const clamp = v => Math.max(
+    -RECEIPT_LOGISTIC_WEIGHT_CLAMP,
+    Math.min(RECEIPT_LOGISTIC_WEIGHT_CLAMP, v)
+  );
+
+  for(const id of categoryIds){
+    const target = id === categoryId ? 1 : 0;
+    const p = Number(probById.get(id) || 0);
+    const gradient = target - p; // positive pushes toward, negative away
+
+    if(Math.abs(gradient) < 1e-6) continue;
+
+    receiptLogisticModel.bias[id] = clamp(
+      Number(receiptLogisticModel.bias[id] || 0) * (1 - RECEIPT_LOGISTIC_L2_SHRINK) +
+      learningRate * gradient * 0.5 // bias moves slower than feature weights
+    );
+
+    for(const feature of inputFeatures){
+      const featureWeight = getReceiptNaiveBayesFeatureWeight(feature); // reuse merchant>phrase>word>amount ordering
+      const feat = receiptLogisticModel.features[feature] || { w: {}, seen: 0 };
+
+      const current = Number(feat.w[id] || 0);
+      const next = clamp(
+        current * (1 - RECEIPT_LOGISTIC_L2_SHRINK) +
+        learningRate * gradient * (featureWeight / 2.4) // normalized so merchant == 1.0
+      );
+
+      if(next === 0 && current === 0) continue;
+
+      feat.w[id] = next;
+      receiptLogisticModel.features[feature] = feat;
+    }
+  }
+
+  for(const feature of inputFeatures){
+    const feat = receiptLogisticModel.features[feature];
+    if(!feat) continue;
+    feat.seen = Number(feat.seen || 0) + 1;
+    feat.lastSeenAt = Date.now();
+  }
+
+  receiptLogisticModel.trainCount = t + 1;
+
+  pruneReceiptLogisticVocabulary();
+  persistReceiptLogisticModel();
+
+  return true;
+}
+
+function bootstrapReceiptLogisticModelFromTrainingRecords(){
+  // Warm start: if the LR model is empty but Naive Bayes training records
+  // already exist (e.g. new device, or first run after this upgrade), replay
+  // them so LR is useful immediately. Purely incremental afterwards.
+  if(Number(receiptLogisticModel.trainCount || 0) > 0) return false;
+
+  const usable = (receiptTrainingRecords || [])
+    .filter(r =>
+      r &&
+      r.finalCategoryId &&
+      r.finalCategoryId !== "other" &&
+      !!getBudgetCategory(r.finalCategoryId)
+    )
+    .slice(-RECEIPT_LOGISTIC_BOOTSTRAP_RECORD_CAP);
+
+  if(usable.length < 2) return false;
+
+  for(let pass = 0; pass < RECEIPT_LOGISTIC_BOOTSTRAP_PASSES; pass++){
+    for(const record of usable){
+      const featureSource =
+        Array.isArray(record.features) && record.features.length
+          ? record.features
+          : buildReceiptTrainingFeatures({
+              merchant: record.merchant || "",
+              amount: record.amount || 0,
+              phrases: record.phrases || []
+            });
+
+      trainReceiptLogisticRegression(featureSource, record.finalCategoryId);
+    }
+  }
+
+  console.log(
+    `Logistic model warm-started from ${usable.length} training records ` +
+    `(${RECEIPT_LOGISTIC_BOOTSTRAP_PASSES} passes).`
+  );
+
+  return true;
+}
+
+function predictReceiptCategoryLogisticRegression(rawFeatures = []){
+  bootstrapReceiptLogisticModelFromTrainingRecords();
+  pruneReceiptLogisticDeletedCategories();
+
+  const categoryIds = getReceiptLogisticActiveCategories();
+
+  if(
+    Number(receiptLogisticModel.trainCount || 0) < RECEIPT_LOGISTIC_MIN_TRAINED ||
+    categoryIds.length < 2
+  ){
+    return {
+      ready: false,
+      reason: `Needs at least ${RECEIPT_LOGISTIC_MIN_TRAINED} confirmed receipts and 2 categories.`
+    };
+  }
+
+  const inputFeatures = sanitizeReceiptLogisticFeatures(rawFeatures)
+    .filter(f => !!receiptLogisticModel.features?.[f]);
+
+  if(!inputFeatures.length){
+    return {
+      ready: false,
+      reason: "No known logistic features matched this receipt."
+    };
+  }
+
+  const probabilities = computeReceiptLogisticProbabilities(inputFeatures, categoryIds);
+  const best = probabilities[0];
+
+  if(!best){
+    return { ready: false, reason: "Logistic regression could not produce a winner." };
+  }
+
+  const scoreMap = new Map();
+
+  for(const row of probabilities){
+    scoreMap.set(
+      row.categoryId,
+      Math.round(row.probability * RECEIPT_LOGISTIC_SCORE_SCALE * 100) / 100
+    );
+  }
+
+  return {
+    ready: true,
+    features: inputFeatures,
+    categoryId: best.categoryId,
+    categoryName: getBudgetCategory(best.categoryId)?.name || "Category",
+    confidence: Math.round(best.probability * 100),
+    probabilities,
+    scoreMap
+  };
+}
+
+function getReceiptLogisticSummary(prediction = {}){
+  if(!prediction.ready || !Array.isArray(prediction.probabilities)) return "";
+
+  return prediction.probabilities
+    .slice(0, 3)
+    .map(row => `${getBudgetCategory(row.categoryId)?.name || row.categoryId} ${Math.round(row.probability * 100)}%`)
+    .join(", ");
+}
+
+function buildReceiptPredictionDebug({
+  finalCategoryId = "",
+  memoryScoreMap = new Map(),
+  naiveBayesPrediction = null,
+  logisticPrediction = null,
+  ruleGuess = "",
+  learnedGuess = ""
+} = {}){
+  const pick = (map, id) => Math.round(((map instanceof Map ? map.get(id) : 0) || 0) * 100) / 100;
+
+  const nbScore = naiveBayesPrediction?.ready
+    ? pick(naiveBayesPrediction.scoreMap, finalCategoryId)
+    : 0;
+
+  const lrScore = logisticPrediction?.ready
+    ? pick(logisticPrediction.scoreMap, finalCategoryId)
+    : 0;
+
+  const agreeing = [];
+  if(naiveBayesPrediction?.ready && naiveBayesPrediction.categoryId === finalCategoryId) agreeing.push("Naive Bayes");
+  if(logisticPrediction?.ready && logisticPrediction.categoryId === finalCategoryId) agreeing.push("logistic regression");
+
+  let reason;
+  if(!finalCategoryId){
+    reason = "No signal was confident enough to pick a category.";
+  }else if(!learnedGuess && ruleGuess === finalCategoryId){
+    reason = "Rule-based keyword heuristics chose this category (no learned signal yet).";
+  }else if(agreeing.length){
+    reason = `Memory scorer led and ${agreeing.join(" + ")} agreed.`;
+  }else{
+    reason = "Memory + merchant scores led; classifiers were not ready or disagreed.";
+  }
+
+  return {
+    finalCategory: getBudgetCategory(finalCategoryId)?.name || finalCategoryId || "",
+    finalCategoryId: finalCategoryId || "",
+    memoryScore: pick(memoryScoreMap, finalCategoryId),
+    naiveBayesScore: nbScore,
+    logisticRegressionScore: lrScore,
+    reason
+  };
+}
+
+function debugReceiptPrediction(){
+  // Console helper: scan a receipt, then run debugReceiptPrediction().
+  if(!currentReceiptScanDraft?.predictionDebug){
+    console.warn("Scan a receipt first, then run debugReceiptPrediction().");
+    return null;
+  }
+
+  console.table([currentReceiptScanDraft.predictionDebug]);
+  return currentReceiptScanDraft.predictionDebug;
+}
+
+
+// ---------------------------------------------------------------------------
 // Training data capture & text parsing
 // ---------------------------------------------------------------------------
 
@@ -6698,6 +7153,11 @@ naiveBayesPrediction: currentReceiptScanDraft.naiveBayesPrediction || null,
   };
 
   receiptTrainingRecords.push(record);
+
+  // Online logistic regression update: one SGD step per confirmed receipt.
+  // Uses the exact features stored in the training record, so LR and Naive
+  // Bayes always learn from identical inputs.
+  trainReceiptLogisticRegression(features, finalCategoryId);
 
   if(receiptTrainingRecords.length > RECEIPT_TRAINING_RECORD_LIMIT){
     receiptTrainingRecords = receiptTrainingRecords.slice(
@@ -8376,6 +8836,30 @@ if(naiveBayesPrediction.ready){
   };
 }
 
+// Snapshot memory+merchant scores BEFORE classifier votes so the debug
+// breakdown can report each signal separately.
+const memoryScoreSnapshot = new Map(scoreMap);
+
+const logisticPrediction =
+  predictReceiptCategoryLogisticRegression(receiptPredictionFeatures);
+
+if(logisticPrediction.ready){
+  mergeReceiptCategoryScoreMap(scoreMap, logisticPrediction.scoreMap);
+
+  currentReceiptScanDraft.logisticPrediction = {
+    categoryId: logisticPrediction.categoryId,
+    categoryName: logisticPrediction.categoryName,
+    confidence: logisticPrediction.confidence,
+    summary: getReceiptLogisticSummary(logisticPrediction),
+    features: logisticPrediction.features
+  };
+}else{
+  currentReceiptScanDraft.logisticPrediction = {
+    ready: false,
+    reason: logisticPrediction.reason || ""
+  };
+}
+
 const scoreList = Array.from(scoreMap.entries())
   .sort((a, b) => b[1] - a[1]);
 
@@ -8397,13 +8881,31 @@ const naiveBayesHelped =
   learnedGuess &&
   learnedGuess === naiveBayesPrediction.categoryId;
 
+const logisticHelped =
+  logisticPrediction.ready &&
+  learnedGuess &&
+  learnedGuess === logisticPrediction.categoryId;
+
 currentReceiptScanDraft.predictedCategoryId = finalGuess || "";
 
 currentReceiptScanDraft.predictionSource = learnedGuess
-  ? (naiveBayesHelped ? "naiveBayes+memory" : "memory")
+  ? [
+      "memory",
+      naiveBayesHelped ? "naiveBayes" : "",
+      logisticHelped ? "logistic" : ""
+    ].filter(Boolean).join("+")
   : finalGuess
     ? "rule"
     : "";
+
+currentReceiptScanDraft.predictionDebug = buildReceiptPredictionDebug({
+  finalCategoryId: finalGuess || "",
+  memoryScoreMap: memoryScoreSnapshot,
+  naiveBayesPrediction,
+  logisticPrediction,
+  ruleGuess: categoryGuess || "",
+  learnedGuess: learnedGuess || ""
+});
 
 if(finalGuess && budgetTxCategory){
   budgetTxCategory.value = finalGuess;
