@@ -2,26 +2,45 @@
 // My Digital Calendar
 // Offline calendar + budget dashboard + weather + file sync
 //
-// Organization map:
-//   01. DOM references
-//   02. Settings + preferences
-//   03. History / undo-redo
-//   04. Utility helpers
-//   05. File sync
-//   06. Weather helpers
-//   07. Navigation / section switching
-//   08. Budget dashboard + categories
-//   09. Smart Suggestions
-//   10. Drag/drop + day-view time editing
-//   11. Storage + recurrence
-//   12. Rendering: month/week/day/events
-//   13. Event editor + CRUD
-//   14. Quick add
-//   15. Quick search
-//   16. Keyboard shortcuts + init
+// Organization map (matches the numbered headers below):
+//   01.  DOM references
+//   02.  Settings + preferences
+//   03.  History / undo-redo
+//   04.  Utility constants
+//     04a. IndexedDB offline storage layer
+//     04b. Utility helpers
+//     04c. Supabase cloud sync
+//   05.  File sync (Google Drive JSON via File System Access API)
+//   06.  Weather helpers
+//   07.  Navigation / section switching
+//   08.  Budget dashboard + categories
+//     08b. Receipt OCR (privacy-first, no receipt photo storage)
+//     08c. Budget dashboard (continued) - transactions, rendering, cashflow
+//   09.  Smart Suggestions
+//   10.  Drag & drop
+//     10B. Drag ghost preview
+//   11.  Storage normalization + save pipeline
+//     11B. Recurrence engine
+//     11C. Background spans / trip shading
+//     11D. Calendar repeat dropdown
+//     11E. Trip shading UI
+//   12.  App state
+//     12B. App state store + render scheduler
+//     12C. Rendering entrypoints (month/week/day/event list)
+//   13.  Event editor + CRUD
+//   14.  Quick add
+//   15.  Quick search
+//   16.  Keyboard shortcuts
+//     16B. Init
 //
-// Note: this pass keeps execution order intact to avoid breaking globals,
-// listeners, and DOM initialization.
+// Note: sections are grouped by feature/layer, but execution order within
+// and across sections is kept intact on purpose - top-level statements here
+// (DOM lookups, event listener registrations, init calls) run once as the
+// script loads, in this exact order, and later code depends on earlier code
+// having already run. Reordering them could silently break initialization,
+// so only function declarations are ever safe to move; this pass instead
+// added clearer sub-headers and fixed one mislabeled boundary (08b/08c)
+// rather than physically relocating code.
 // ============================================================================
 
 // ============================================================================
@@ -508,7 +527,7 @@ ${
           <span
             class="budgetCategoryDot"
             style="
-              --cat-color:${escapeHtml(cat.color)};
+              --cat-color:${safeHexColor(cat.color)};
               --cat-glow:${hexToRgba(cat.color, .35)};
             "
           ></span>
@@ -751,6 +770,11 @@ const DATA_SLICE_LABELS = {
 // ============================================================================
 // IndexedDB becomes the roomy offline landscape. localStorage stays as a tiny
 // boot/cache + legacy safety net for this sweep so old data is not endangered.
+
+// ---------------------------------------------------------------------------
+// Database setup & connection
+// ---------------------------------------------------------------------------
+
 const CALENDAR_IDB_NAME = "myCalendarOfflineDB";
 const CALENDAR_IDB_VERSION = 3;
 
@@ -913,6 +937,11 @@ async function idbClearAndPutAll(db, storeName, records = []){
 
   await idbTransactionDone(tx);
 }
+
+
+// ---------------------------------------------------------------------------
+// Event records: normalize + range cache
+// ---------------------------------------------------------------------------
 
 function normalizeIndexedDbRecordId(value, fallback){
   const raw = String(value ?? "").trim();
@@ -1426,6 +1455,11 @@ function requestIndexedDbEventRangeHydration(startISO, endISO, opts = {}){
 }
 
 
+
+// ---------------------------------------------------------------------------
+// Budget transaction records: normalize + range cache
+// ---------------------------------------------------------------------------
+
 function normalizeBudgetTransactionRecord(record = {}){
   const price = Number(record.price ?? record.amount);
   const dateISO = String(record.dateISO || record.date || record.startDate || "").trim();
@@ -1722,6 +1756,11 @@ async function countIndexedDbStoreRecords(){
 
   return counts;
 }
+
+
+// ---------------------------------------------------------------------------
+// Generic slice/record conversion helpers
+// ---------------------------------------------------------------------------
 
 function budgetPlansToIndexedDbRecords(plans = {}, updatedAt = Date.now()){
   const records = [];
@@ -2087,6 +2126,11 @@ if(typeof window !== "undefined"){
   window.calendarCloudSyncDebug = getCloudSyncDebugSummary;
 }
 
+
+// ---------------------------------------------------------------------------
+// Local storage slices: read/write + legacy migration
+// ---------------------------------------------------------------------------
+
 function hasOwn(obj, key){
   return Object.prototype.hasOwnProperty.call(obj || {}, key);
 }
@@ -2340,6 +2384,11 @@ function flashBudgetButtonError(btn){
 // ============================================================================
 // Public anon keys are expected in frontend apps. Security comes from Supabase
 // Auth + Row Level Security policies, not from hiding this value.
+
+// ---------------------------------------------------------------------------
+// Config & record-key helpers
+// ---------------------------------------------------------------------------
+
 const SUPABASE_URL = "https://ddxiumutfrimgjzzbhus.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_Icp1pf88iW1t5TUnmVqb6Q_bXSRI9e_";
 const CLOUD_ROW_ID = "main";
@@ -2441,6 +2490,42 @@ function rowUpdatedAt(row){
   return row?.updated_at ? new Date(row.updated_at).getTime() : Number(row?.payload?.updatedAt || 0);
 }
 
+// ---------------------------------------------------------------------------
+// Local data ownership guard (prevents cross-account contamination on shared
+// devices). Local data written while user A was signed in must never be
+// auto-pushed into user B's account, and B's cloud data must never silently
+// merge into A's leftover local state. Manual Push/Pull remain intentional
+// overrides and claim ownership for the current account.
+// ---------------------------------------------------------------------------
+const LOCAL_DATA_OWNER_KEY = "myCalendarLocalDataOwner_v1";
+
+function getLocalDataOwner(){
+  try{ return localStorage.getItem(LOCAL_DATA_OWNER_KEY) || ""; }catch{ return ""; }
+}
+
+function setLocalDataOwner(userId = ""){
+  try{
+    if(userId) localStorage.setItem(LOCAL_DATA_OWNER_KEY, String(userId));
+    else localStorage.removeItem(LOCAL_DATA_OWNER_KEY);
+  }catch{}
+}
+
+// True when this device's local data belongs to a *different* signed-in user.
+// A blank owner means "unclaimed" (fresh device or pre-patch data) and is
+// adopted by the current account on first successful sync.
+function cloudIdentityMismatch(){
+  if(!cloudUser) return false;
+  const owner = getLocalDataOwner();
+  return !!owner && owner !== cloudUser.id;
+}
+
+function warnCloudIdentityMismatch(){
+  setCloudStatus(
+    "Cloud: This device holds data from a different account. Auto-sync is paused. " +
+    "Use Push to upload this device's data to the current account, or Pull to replace it with this account's cloud data."
+  );
+}
+
 function getCloudLastSyncAt(){
   return Math.max(0, Number(localStorage.getItem(CLOUD_LAST_SYNC_KEY) || 0) || 0);
 }
@@ -2532,6 +2617,11 @@ function getCloudStoreForSlice(slice){
     default: return slice;
   }
 }
+
+
+// ---------------------------------------------------------------------------
+// Record ops: build, queue, dequeue
+// ---------------------------------------------------------------------------
 
 function makeCloudRecordOp(slice, store, recordId, data, updatedAt, deleted = false){
   const safeSlice = normalizeSliceList(slice)[0];
@@ -2879,6 +2969,11 @@ async function countQueuedCloudRecordOps(){
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Merging cloud rows into local payload
+// ---------------------------------------------------------------------------
+
 function mergeCloudRecordOpsIntoPayload(ops = [], base = {}){
   const latest = new Map();
 
@@ -3180,6 +3275,7 @@ function applyCloudRecordOpsToPayload(ops = [], basePayload = {}){
 
     if(slice === "merchantAliases"){
       merged.merchantAliases = merged.merchantAliases || {};
+      if(!isSafeMapKey(op.recordId)) continue;
       if(op.deleted) delete merged.merchantAliases[op.recordId];
       else merged.merchantAliases[op.recordId] = op.data?.value ?? op.data;
       continue;
@@ -3372,6 +3468,11 @@ function buildCloudStateFromRows(data = [], opts = {}){
 
   return buildFullSavePayload(merged);
 }
+
+// ---------------------------------------------------------------------------
+// Reading rows from Supabase
+// ---------------------------------------------------------------------------
+
 async function readAllCloudRowsForUser(){
   if(!supabaseClient || !cloudUser) return [];
 
@@ -3522,6 +3623,11 @@ function getCloudSyncLabel(){
   return `Cloud: Signed in as ${cloudUser.email || "user"}`;
 }
 
+
+// ---------------------------------------------------------------------------
+// Account modal UI
+// ---------------------------------------------------------------------------
+
 function openAccountModal(){
   accountModal?.classList.remove("hidden");
   setTimeout(() => {
@@ -3617,6 +3723,11 @@ function updateCloudUI(){
 
   setCloudStatus(getCloudSyncLabel());
 }
+
+
+// ---------------------------------------------------------------------------
+// Auth + sync orchestration (login, push, pull)
+// ---------------------------------------------------------------------------
 
 async function initCloudSync(){
   if(!cloudConfigured()){
@@ -3812,6 +3923,11 @@ async function writeCloudStateNow(slices = null){
     return true;
   }
 
+  if(cloudIdentityMismatch()){
+    warnCloudIdentityMismatch();
+    return false;
+  }
+
   const { error } = await supabaseClient
     .from(CLOUD_TABLE)
     .upsert(rows, { onConflict: "id" });
@@ -3822,6 +3938,7 @@ async function writeCloudStateNow(slices = null){
     return false;
   }
 
+  setLocalDataOwner(cloudUser.id);
   await clearQueuedCloudRecordOps(ops);
   updateKnownCloudKeysFromOps(ops);
   clearCloudPending();
@@ -3841,6 +3958,10 @@ function cloudWriteDebounced(slices = null){
   updateCloudUI();
 
   if(!cloudUser) return;
+  if(cloudIdentityMismatch()){
+    warnCloudIdentityMismatch();
+    return;
+  }
 
   clearTimeout(cloudWriteTimer);
   cloudWriteTimer = setTimeout(() => {
@@ -3851,6 +3972,14 @@ function cloudWriteDebounced(slices = null){
 async function tryFlushPendingCloudSync(reason = "sync"){
   if(cloudFlushInProgress) return false;
   if(!supabaseClient || !cloudUser){
+    updateCloudUI();
+    return false;
+  }
+
+  // Never auto-sync another account's local data. Manual Push/Pull bypass
+  // this by claiming ownership first (see pushLocalToCloud / Pull handler).
+  if(cloudIdentityMismatch()){
+    warnCloudIdentityMismatch();
     updateCloudUI();
     return false;
   }
@@ -3891,8 +4020,129 @@ async function tryFlushPendingCloudSync(reason = "sync"){
   }
 }
 
+// ---------------------------------------------------------------------------
+// Local snapshot backups (data-loss safety net for Push / forced Pull).
+// Uses its OWN IndexedDB database so the app's main DB schema/version is
+// untouched. Keeps the last 5 snapshots. Restore from DevTools console:
+//   await listLocalSnapshots()          // see ids + reasons
+//   await restoreLocalSnapshot()        // restore most recent
+//   await restoreLocalSnapshot(<id>)    // restore a specific one
+// ---------------------------------------------------------------------------
+const SNAPSHOT_DB_NAME = "myCalendarBackups_v1";
+const SNAPSHOT_STORE = "snapshots";
+const SNAPSHOT_KEEP = 5;
+
+function openSnapshotDb(){
+  return new Promise((resolve, reject) => {
+    if(typeof indexedDB === "undefined") return resolve(null);
+    const req = indexedDB.open(SNAPSHOT_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if(!db.objectStoreNames.contains(SNAPSHOT_STORE)){
+        db.createObjectStore(SNAPSHOT_STORE, { keyPath: "id" });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveLocalSnapshot(reason = "manual"){
+  try{
+    const db = await openSnapshotDb();
+    if(!db) return false;
+
+    const snapshot = {
+      id: Date.now(),
+      reason: String(reason || "manual"),
+      savedAt: new Date().toISOString(),
+      payload: buildFullSavePayload(getLocalPayload())
+    };
+
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(SNAPSHOT_STORE, "readwrite");
+      const store = tx.objectStore(SNAPSHOT_STORE);
+      store.put(snapshot);
+
+      // Prune oldest beyond SNAPSHOT_KEEP.
+      const keysReq = store.getAllKeys();
+      keysReq.onsuccess = () => {
+        const keys = (keysReq.result || []).sort((a, b) => a - b);
+        while(keys.length > SNAPSHOT_KEEP){
+          store.delete(keys.shift());
+        }
+      };
+
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+
+    db.close();
+    return true;
+  }catch(err){
+    console.warn("Could not save local snapshot; continuing without it.", err);
+    return false;
+  }
+}
+
+async function listLocalSnapshots(){
+  try{
+    const db = await openSnapshotDb();
+    if(!db) return [];
+    const rows = await new Promise((resolve, reject) => {
+      const tx = db.transaction(SNAPSHOT_STORE, "readonly");
+      const req = tx.objectStore(SNAPSHOT_STORE).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+    return rows
+      .sort((a, b) => b.id - a.id)
+      .map(r => ({ id: r.id, savedAt: r.savedAt, reason: r.reason }));
+  }catch(err){
+    console.warn("Could not list snapshots.", err);
+    return [];
+  }
+}
+
+async function restoreLocalSnapshot(id = null){
+  const db = await openSnapshotDb();
+  if(!db) throw new Error("IndexedDB unavailable");
+
+  const rows = await new Promise((resolve, reject) => {
+    const tx = db.transaction(SNAPSHOT_STORE, "readonly");
+    const req = tx.objectStore(SNAPSHOT_STORE).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+
+  const target = id
+    ? rows.find(r => r.id === Number(id))
+    : rows.sort((a, b) => b.id - a.id)[0];
+
+  if(!target) throw new Error("No snapshot found");
+
+  applyFullSavePayload(target.payload);
+  setCloudStatus(`Restored local snapshot from ${target.savedAt} (${target.reason}). Review, then Push if you want the cloud to match.`);
+  return { id: target.id, savedAt: target.savedAt, reason: target.reason };
+}
+
+// Expose for manual recovery from the browser console.
+window.listLocalSnapshots = listLocalSnapshots;
+window.restoreLocalSnapshot = restoreLocalSnapshot;
+
 async function pullCloudIfNewer(opts = {}){
   const forceFull = !!opts.forceFull;
+
+  // Automatic pulls must not merge another account's cloud data into a
+  // different account's local state. A manual (forceFull) Pull is an
+  // intentional "cloud wins" action and claims ownership below.
+  if(!forceFull && cloudIdentityMismatch()){
+    warnCloudIdentityMismatch();
+    return;
+  }
+
   const preferDelta = opts.preferDelta !== false && !forceFull;
   const local = getLocalPayload();
   const cloud = await readCloudState({
@@ -3954,6 +4204,7 @@ async function pullCloudIfNewer(opts = {}){
     }
 
     applyFullSavePayload(patch);
+    if(cloudUser) setLocalDataOwner(cloudUser.id);
     setCloudReadDebugSummary({
       ...cloudSyncLastReadSummary,
       appliedSlices: slicesToPull
@@ -3974,6 +4225,8 @@ async function pullCloudIfNewer(opts = {}){
 }
 
 async function pushLocalToCloud(){
+  await saveLocalSnapshot("before manual push");
+  if(cloudUser) setLocalDataOwner(cloudUser.id);
   markCloudPending("manual push", DATA_SLICE_NAMES);
   await writeCloudStateNow(DATA_SLICE_NAMES);
 }
@@ -4001,7 +4254,15 @@ cloudSignupBtn?.addEventListener("click", () => signupCloud().catch(console.erro
 cloudLoginBtn?.addEventListener("click", () => loginCloud().catch(console.error));
 cloudLogoutBtn?.addEventListener("click", () => logoutCloud().catch(console.error));
 cloudPushBtn?.addEventListener("click", () => pushLocalToCloud().catch(console.error));
-cloudPullBtn?.addEventListener("click", () => pullCloudIfNewer({ forceFull:true }).catch(console.error));
+cloudPullBtn?.addEventListener("click", async () => {
+  try{
+    await saveLocalSnapshot("before manual pull");
+    if(cloudUser) setLocalDataOwner(cloudUser.id);
+    await pullCloudIfNewer({ forceFull:true });
+  }catch(err){
+    console.error(err);
+  }
+});
 
 cloudPasswordInput?.addEventListener("keydown", (e) => {
   if(e.key === "Enter"){
@@ -4422,6 +4683,13 @@ function startRemotePolling(){
   }, 4000); // every 4s
 }
 
+// Reject object keys that could reassign an object's prototype when data
+// arrives from cloud sync or OCR-derived text ("__proto__", etc).
+const UNSAFE_MAP_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+function isSafeMapKey(key){
+  return typeof key === "string" && key.length > 0 && !UNSAFE_MAP_KEYS.has(key);
+}
+
 function escapeHtml(s){
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({
     "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
@@ -4688,7 +4956,9 @@ async function getWeatherForDay(dayISO){
     label,
     high: Math.round(daily.temperature_2m_max?.[idx]),
     low: Math.round(daily.temperature_2m_min?.[idx]),
-    precip: daily.precipitation_probability_max?.[idx] ?? null,
+    precip: Number.isFinite(Number(daily.precipitation_probability_max?.[idx]))
+      ? Number(daily.precipitation_probability_max[idx])
+      : null,
     location: getWeatherLocation().label
   };
 }
@@ -4723,7 +4993,7 @@ async function getHourlyWeatherForDay(dayISO){
     items.push({
       hour,
       temp: Math.round(temp),
-      precip: precip ?? 0,
+      precip: Number.isFinite(Number(precip)) ? Number(precip) : 0,
       icon,
       label
     });
@@ -4999,6 +5269,11 @@ function hexToRgba(hex, a){
   return `rgba(${r},${g},${b},${a})`;
 }
 function cryptoId(){
+  // Prefer a cryptographically random, non-guessable ID. The old
+  // timestamp+Math.random format remains as a fallback for very old browsers.
+  if(typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"){
+    return crypto.randomUUID();
+  }
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2,10)}`;
 }
 
@@ -5674,7 +5949,7 @@ function renderBudgetCategoryHub(){
           <span
             class="budgetCategoryDot"
             style="
-              --cat-color:${escapeHtml(cat.color || "#7a5aff")};
+              --cat-color:${safeHexColor(cat.color, "#7a5aff")};
               --cat-glow:${hexToRgba(cat.color || "#7a5aff", .35)};
             "
           ></span>
@@ -5726,7 +6001,7 @@ function renderBudgetCategoryManager(){
           <span
             class="budgetCategoryDot"
             style="
-              --cat-color:${escapeHtml(cat.color || "#7a5aff")};
+              --cat-color:${safeHexColor(cat.color, "#7a5aff")};
               --cat-glow:${hexToRgba(cat.color || "#7a5aff", .35)};
             "
           ></span>
@@ -5939,7 +6214,7 @@ budgetCatDDButton?.style.setProperty(
   <span
     class="budgetCategoryDot"
     style="
-      --cat-color:${escapeHtml(currentCat.color || "#7a5aff")};
+      --cat-color:${safeHexColor(currentCat.color, "#7a5aff")};
       --cat-glow:${hexToRgba(currentCat.color || "#7a5aff", .35)};
     "
   ></span>
@@ -5957,7 +6232,7 @@ budgetCatDDButton?.style.setProperty(
     <span
       class="budgetCategoryDot"
       style="
-        --cat-color:${escapeHtml(cat.color || "#7a5aff")};
+        --cat-color:${safeHexColor(cat.color, "#7a5aff")};
         --cat-glow:${hexToRgba(cat.color || "#7a5aff", .35)};
       "
     ></span>
@@ -5994,7 +6269,7 @@ function renderEventCategoryOptions(){
       <span
         class="budgetCategoryDot"
         style="
-          --cat-color:${escapeHtml(cat.color || "#7a5aff")};
+          --cat-color:${safeHexColor(cat.color, "#7a5aff")};
           --cat-glow:${hexToRgba(cat.color || "#7a5aff", .35)};
         "
       ></span>
@@ -6122,6 +6397,11 @@ function persistReceiptTrainingRecords(){
   setLocalPayload({ updatedAt: Date.now(), receiptTrainingRecords });
   cloudWriteDebounced(["receiptTrainingRecords"]);
 }
+
+
+// ---------------------------------------------------------------------------
+// Naive Bayes category classifier
+// ---------------------------------------------------------------------------
 
 function buildReceiptTrainingFeatures({ merchant = "", amount = 0, phrases = [] } = {}){
   const features = [];
@@ -6360,6 +6640,11 @@ function getReceiptNaiveBayesSummary(prediction = {}){
     .map(row => `${row.categoryName} ${Math.round(row.probability * 100)}%`)
     .join(", ");
 }
+
+
+// ---------------------------------------------------------------------------
+// Training data capture & text parsing
+// ---------------------------------------------------------------------------
 
 function saveReceiptTrainingRecordFromDraft(finalTransaction = {}){
   if(!currentReceiptScanDraft) return;
@@ -6900,6 +7185,19 @@ function buildReceiptTrainingDebugRows(rawText = ""){
   return rows;
 }
 
+// Strip payment-card, loyalty, account, and other identifying fragments from a
+// receipt line before it is stored in learning memory or synced to the cloud.
+// Returns "" when the whole phrase should be dropped.
+const RECEIPT_SENSITIVE_KEYWORDS = /\b(visa|mastercard|master\s*card|amex|american\s*express|discover|debit|credit|card|acct|account|member(ship)?|loyalty|rewards?|rx|auth(orization)?|approval|approv(ed)?|ref(erence)?|invoice|trans(action)?\s*(id|no|num)|terminal|cashier|register)\b/i;
+function redactReceiptPhrase(phrase = ""){
+  let text = String(phrase || "");
+  if(RECEIPT_SENSITIVE_KEYWORDS.test(text)) return "";
+  // Long digit runs (4+) are card fragments, phone numbers, SKUs, or account
+  // numbers — never useful category signal. Remove them, keep the words.
+  text = text.replace(/\d{4,}/g, " ").replace(/\s{2,}/g, " ").trim();
+  return text.length >= 3 ? text : "";
+}
+
 function extractReceiptLearningPhrases(rawText = ""){
   const seen = new Set();
   const phrases = [];
@@ -6932,10 +7230,13 @@ function extractReceiptLearningPhrases(rawText = ""){
     }
 
     if(!result.keep) continue;
-    if(seen.has(result.phrase)) continue;
 
-    seen.add(result.phrase);
-    phrases.push(result.phrase);
+    const redactedPhrase = redactReceiptPhrase(result.phrase);
+    if(!redactedPhrase) continue;
+    if(seen.has(redactedPhrase)) continue;
+
+    seen.add(redactedPhrase);
+    phrases.push(redactedPhrase);
     afterFirstKept = true;
 
     if(phrases.length >= 40) break;
@@ -7010,6 +7311,11 @@ function debugReceiptTrainingExtraction(rawText = currentReceiptScanDraft?.rawTe
   console.table(rows);
   return rows;
 }
+
+
+// ---------------------------------------------------------------------------
+// Category memory scoring & cleanup
+// ---------------------------------------------------------------------------
 
 function getReceiptMemoryCategoryScores(text = ""){
   const lower = String(text || "").toLowerCase();
@@ -7230,7 +7536,7 @@ function learnReceiptMerchantCategoryWeights(
   if(!cat) return;
 
   const key = normalizeMerchantKey(merchant);
-  if(!key) return;
+  if(!key || !isSafeMapKey(key)) return;
 
   const predictionWasCorrect =
     predictedCategoryId && predictedCategoryId === categoryId;
@@ -7401,6 +7707,11 @@ markReceiptPredictionOutcome(
 cleanupReceiptLearningMemory();
 }
 
+
+// ---------------------------------------------------------------------------
+// Merchant name normalization & aliases
+// ---------------------------------------------------------------------------
+
 function normalizeMerchantKey(name = ""){
   return String(name || "")
     .toLowerCase()
@@ -7461,7 +7772,7 @@ function saveMerchantAlias(rawName, cleanName){
   const key = normalizeMerchantKey(rawName);
   const normalized = String(cleanName || "").trim();
 
-  if(!key || !normalized || normalized.length < 2) return;
+  if(!key || !isSafeMapKey(key) || !normalized || normalized.length < 2) return;
 
   const existing = merchantAliases[key] || {};
 
@@ -7509,6 +7820,11 @@ function normalizeMerchantName(rawName = ""){
   return titleCaseMerchantName(raw);
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Scan UI status + image capture/compression
+// ---------------------------------------------------------------------------
 
 function setReceiptScanStatus(message = "", type = "info"){
   if(!budgetReceiptScanStatus) return;
@@ -7579,6 +7895,11 @@ async function compressReceiptImage(file){
     mimeType: "image/jpeg"
   };
 }
+
+
+// ---------------------------------------------------------------------------
+// Parsing OCR results (date/title/amount/category)
+// ---------------------------------------------------------------------------
 
 function normalizeReceiptDate(value){
   if(!value) return "";
@@ -8122,6 +8443,11 @@ setReceiptScanStatus(
 );
 }
 
+
+// ---------------------------------------------------------------------------
+// Scan pipeline entrypoint
+// ---------------------------------------------------------------------------
+
 async function scanReceiptFile(file){
   if(!file || receiptScanBusy) return;
 
@@ -8194,6 +8520,15 @@ budgetReceiptScanInput?.addEventListener("change", () => {
   const file = budgetReceiptScanInput.files?.[0];
   scanReceiptFile(file);
 });
+
+
+// ---------------------------------------------------------------------------
+// 08c. BUDGET DASHBOARD (CONTINUED) — TRANSACTIONS, RENDERING & CASHFLOW
+// This picks back up general budget-dashboard code (not receipt-OCR
+// specific); it landed here because it was added right after the OCR
+// feature without a new top-level header. Grouped here for clarity;
+// left in place since it runs top-to-bottom with everything above it.
+// ---------------------------------------------------------------------------
 
 function addBudgetTransaction(){
   if(budgetTxEditState){
@@ -12173,6 +12508,11 @@ function render(){
   return renderMonthView();
 }
 
+
+// ---------------------------------------------------------------------------
+// Month view rendering
+// ---------------------------------------------------------------------------
+
 function renderMonthView(){
   if(!grid) return;
   grid.innerHTML = "";
@@ -12467,6 +12807,11 @@ requestAnimationFrame(() => alignDowToGrid());
 } // ← closes render()
 
 
+
+// ---------------------------------------------------------------------------
+// Week connections: data model, editor UI & rail
+// ---------------------------------------------------------------------------
+
 function normalizeConnectionGroupId(value = ""){
   return String(value || "")
     .trim()
@@ -12745,7 +13090,7 @@ function renderSelectedConnectionEditorHtml(selected = null){
     <div
       class="weekConnectionGlobalEdit"
       data-group-id="${escapeHtml(safeSelected.id)}"
-      style="--connection-color:${escapeHtml(safeSelected.color || DEFAULT_COLOR)}"
+      style="--connection-color:${safeHexColor(safeSelected.color, DEFAULT_COLOR)}"
     >
       <div class="weekConnectionGlobalEditTop">
         <span class="weekConnectionBannerDot"></span>
@@ -13141,7 +13486,7 @@ function renderConnectionChipsHtml(groupMeta = collectWeekConnectionGroupMeta(),
         class="weekConnectionChip ${selectedConnectionGroupId === group.id ? "active" : ""}"
         type="button"
         data-group-id="${escapeHtml(group.id)}"
-        style="--connection-color:${escapeHtml(group.color || DEFAULT_COLOR)}"
+        style="--connection-color:${safeHexColor(group.color, DEFAULT_COLOR)}"
         title="Highlight ${escapeHtml(group.name || group.id)}"
       >
         <span class="weekConnectionBannerDot"></span>
@@ -13366,6 +13711,11 @@ function renderWeekConnectionHighlights(){
 
   setWeekConnectionBanner(selected ? groupMeta.get(selected) : null);
 }
+
+
+// ---------------------------------------------------------------------------
+// Week connections: line routing, geometry & render
+// ---------------------------------------------------------------------------
 
 function getWeekConnectorLocalRect(el, parentRect){
   const rect = el.getBoundingClientRect();
@@ -14591,6 +14941,11 @@ window.visualViewport?.addEventListener("resize", () => {
   queueWeekConnectionsRenderIfGeometryChanged();
 });
 
+
+// ---------------------------------------------------------------------------
+// Week view rendering
+// ---------------------------------------------------------------------------
+
 function renderWeekView(){
   grid.innerHTML = "";
   grid.classList.add("weekViewGrid");
@@ -14780,6 +15135,11 @@ function getDayTimelineLayout(){
     ? { laneLeft: 58, laneRight: 10, gutter: 4 }
     : { laneLeft: 78, laneRight: 12, gutter: 5 };
 }
+
+
+// ---------------------------------------------------------------------------
+// Day view rendering
+// ---------------------------------------------------------------------------
 
 function renderDayView(){
   const now = new Date();
@@ -15016,6 +15376,11 @@ pill.addEventListener("dblclick", (e) => {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Event list + live now-line
+// ---------------------------------------------------------------------------
+
 function renderEventList(){
   if(!eventsList) return;
 
@@ -15050,7 +15415,7 @@ function renderEventList(){
 
     const stripe = document.createElement("div");
     stripe.className = "eventStripe";
-    stripe.style.background = (ev.color || DEFAULT_COLOR);
+    stripe.style.background = safeHexColor(ev.color, DEFAULT_COLOR);
     item.appendChild(stripe);
 
     const pad = document.createElement("div");
@@ -16372,7 +16737,7 @@ function renderQuickSearchResults(query){
 
     const swatch = document.createElement("div");
     swatch.className = "qsSwatch";
-    if(e.color) swatch.style.background = e.color;
+    if(e.color) swatch.style.background = safeHexColor(e.color, DEFAULT_COLOR);
 
     row.appendChild(swatch);
     row.appendChild(left);

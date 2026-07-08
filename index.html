@@ -846,15 +846,13 @@
     </div>
   </div>
 </div>
- <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+ <!-- Pinned exact version: prevents silent auto-upgrade supply-chain risk.
+      To also add SRI, run:
+      curl -s https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.1/dist/umd/supabase.min.js | openssl dgst -sha384 -binary | openssl base64 -A
+      then add: integrity="sha384-<output>" crossorigin="anonymous" -->
+ <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.1/dist/umd/supabase.min.js"></script>
  <script src="script.js"></script>
- <script>
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      navigator.serviceWorker.register("service-worker.js")
-        .catch(err => console.warn("Service worker registration failed:", err));
-    });
-  }
- </script>
+ <!-- Service worker registration moved to script.js (it was registered twice).
+      Keeping index.html free of inline scripts allows a strict CSP later. -->
 </body>
 </html>

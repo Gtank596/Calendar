@@ -1,0 +1,15 @@
+# Security headers — Netlify "_headers" format.
+# Vercel: translate into vercel.json "headers"; Cloudflare Pages: this file works as-is.
+#
+# NOTE: script-src has no 'unsafe-inline' — this works because the inline
+# service-worker registration was removed from index.html in this patch.
+# If you self-host supabase.min.js later, remove cdn.jsdelivr.net from script-src.
+
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://ddxiumutfrimgjzzbhus.supabase.co wss://ddxiumutfrimgjzzbhus.supabase.co https://api.open-meteo.com; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; worker-src 'self'; manifest-src 'self'
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: geolocation=(), camera=(self), microphone=()
+  Cross-Origin-Opener-Policy: same-origin
+  X-Frame-Options: DENY
