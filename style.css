@@ -7808,3 +7808,15 @@ position: relative;
 .notifEnableBtn{
   align-self:flex-start;
 }
+
+/* ============================================================================
+   WEB PUSH V2 (script.js section 18) — settings block styling.
+   Reuses the existing .settingBlock / .settingHint / .tiny.notifEnableBtn
+   look so the mobile layout stays clean; only the error state is new.
+   ============================================================================ */
+#pushSettingBlock .settingHint.pushStatusErr{
+  color: #d05555;
+}
+#pushSettingBlock #pushToggleBtn{
+  margin-top: 4px;
+}

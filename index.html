@@ -135,6 +135,21 @@
   <div class="settingHint">Reminders fire while the calendar is open (tab or installed app). If notifications are blocked or unsupported, reminders appear as in-app popups instead.</div>
 </div>
 
+<!-- Web Push V2: closed-app reminders via Supabase (script.js section 18).
+     Sits directly under the local-reminders block; local V1 stays the
+     precise while-open channel, push adds closed-app delivery. -->
+<div class="settingBlock" id="pushSettingBlock">
+  <div class="settingBlockTop">
+    <span>Push reminders (app closed)</span>
+  </div>
+
+  <div id="pushStatusText" class="settingHint">Push reminders: checking…</div>
+
+  <button id="pushToggleBtn" class="tiny notifEnableBtn" type="button" style="display:none">Enable push reminders</button>
+
+  <div class="settingHint">Delivers reminders even when the calendar is closed. Requires a cloud account sign-in. Checked every 5 minutes, so push may arrive up to a few minutes after the exact reminder time — local reminders remain exact while the app is open.</div>
+</div>
+
 <div class="settingsDivider"></div>
 
 <label class="settingRow">

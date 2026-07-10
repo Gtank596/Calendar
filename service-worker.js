@@ -1,8 +1,15 @@
+// v20: Web Push V2 — added the "push" event handler below (closed-app
+// reminders delivered by the send-due-reminders Supabase Edge Function).
+// Bumping the version forces a clean shell re-cache on activate so clients
+// pick up the new script.js (which contains the push subscription UI).
+// Caching behavior is otherwise UNCHANGED: Supabase (auth/REST/Edge
+// Functions) remains strictly network-only and is never cached.
+//
 // v19: Reminders V1 shipped in the app shell; also added the Supabase
 // never-cache bypass below and a notificationclick handler. Bumping the
 // version forces a clean shell re-cache on activate (local assets are
 // cache-first, so without this users could keep running the old script.js).
-const CACHE_NAME = "my-calendar-pwa-v19";
+const CACHE_NAME = "my-calendar-pwa-v20";
 
 const APP_SHELL = [
   "./",
@@ -97,9 +104,50 @@ self.addEventListener("fetch", event => {
   );
 });
 
+// ============================================================================
+// WEB PUSH V2: receive server-sent reminders while the app is CLOSED.
+// The Supabase Edge Function `send-due-reminders` sends a small encrypted
+// payload (title, when-text, reminder/event/occurrence IDs — never full event
+// notes). We display it here.
+//
+// Dedupe with local Reminders V1: the notification `tag` is the SAME
+// deterministic reminder ID V1 uses (v1|eventId|occDate|startMinutes|offset),
+// so if the app happens to be open and V1 also fires, the OS collapses the
+// two notifications into one instead of showing duplicates.
+// ============================================================================
+self.addEventListener("push", event => {
+  // Defensive parse: a malformed payload must never throw inside the handler.
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch (err) {
+    payload = {};
+  }
+
+  const title = payload.title ? `⏰ ${payload.title}` : "⏰ Reminder";
+  const options = {
+    body: payload.body || "",
+    // Same tag => OS-level dedupe against local Reminders V1 (see note above).
+    tag: payload.reminderId || undefined,
+    icon: "icons/icon-192.png",
+    badge: "icons/icon-192.png",
+    // Same data shape V1 uses, so the existing notificationclick handler and
+    // any future click-routing work identically for both delivery channels.
+    data: {
+      reminderId: payload.reminderId || "",
+      occDateISO: payload.occDate || "",
+      eventId: payload.eventId || ""
+    }
+  };
+
+  // Browsers require a user-visible notification for every push received
+  // with userVisibleOnly:true — always call showNotification.
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
 // Reminders V1: clicking a reminder notification focuses an open calendar
-// window (or opens one). Display-only — this worker does NOT schedule or
-// receive push; there is no "push" handler in V1 by design.
+// window (or opens one). Display-only for LOCAL reminders — Web Push V2
+// notifications (handler above) reuse this same click behavior.
 self.addEventListener("notificationclick", event => {
   event.notification.close();
   event.waitUntil(

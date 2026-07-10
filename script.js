@@ -12186,6 +12186,12 @@ function saveEvents(previousEventsSnapshot = null, opts = {}){
   syncWriteDebounced();
   cloudWriteDebounced();
   updateHistoryUI();
+
+  // Web Push V2 (section 18): any event change (create/edit/delete/undo/redo,
+  // reminder toggles, recurrence exception edits) queues a debounced
+  // reconcile of the server-side reminder_schedules table. Guarded so this
+  // line is inert if section 18 is ever removed (full V2 rollback).
+  if(typeof queueReminderScheduleSync === "function") queueReminderScheduleSync("saveEvents");
 }
 
 // ============================================================================
@@ -17848,4 +17854,519 @@ window.testReminderInOneMinute = function(){
     }).catch(console.error);
   }, 60 * 1000);
   return "Scheduled — keep this tab open.";
+};
+
+
+// ============================================================================
+// 18. WEB PUSH — V2 (SUPABASE-BACKED, CLOSED-APP REMINDERS)
+// ============================================================================
+// Everything Web-Push-related lives in this section plus THREE tiny hooks
+// elsewhere:
+//   1. One guarded call at the end of saveEvents() → queueReminderScheduleSync
+//   2. The push settings block in index.html (#pushSettingBlock)
+//   3. The "push" handler + v20 bump in service-worker.js
+// Deleting this section + those hooks is a full V2 rollback. Reminders V1
+// (section 17) is completely untouched and keeps working as the precise
+// while-app-is-open channel; V2 only ADDS closed-app delivery.
+//
+// Architecture (server-rolled schedule model — NOT a 7-day client queue):
+// - reminder_schedules holds ONE row per reminder-enabled event, keyed
+//   (user_id, event_id), with a single next_reminder_at timestamp.
+// - A single Supabase Cron job (every 5 min) invokes ONE Edge Function
+//   (send-due-reminders) that batch-processes due rows for ALL users.
+// - After sending, the Edge Function itself advances recurring rows to the
+//   next occurrence (using recurrence logic ported from recurrenceMatches in
+//   section 11B) — so push keeps working even if the user never opens the app.
+// - The client's only jobs: manage the push subscription, and reconcile
+//   reminder_schedules whenever event data changes (debounced, fingerprinted
+//   so unchanged data costs zero network calls — friendly to the Free tier).
+//
+// Reminder IDs: the server rebuilds the exact V1 deterministic ID
+//   v1|eventId|occurrenceDateISO|startMinutes|offsetMinutes
+// and uses it as the notification tag, so local V1 and push V2 dedupe against
+// each other at the OS level when the app happens to be open.
+//
+// Privacy: schedules store title (truncated), times, and recurrence shape —
+// never event details/notes. Push payloads carry the same minimum.
+
+// --- Config -------------------------------------------------------------------
+
+// PASTE the PUBLIC VAPID key here (from `npx web-push generate-vapid-keys`).
+// Public keys are expected in frontend code — the PRIVATE key must only ever
+// live in Supabase Edge Function secrets (see README-WEBPUSH-V2.md).
+const PUSH_VAPID_PUBLIC_KEY = "BAp8nLpQCPWAwL09UbvILh09hVDixZB4y7blISsocUj6OL-6nsebE7Kr0bgGHH9qbQhy24ZEUC-_IOP262ldOxQ";
+
+const PUSH_ENABLED_KEY = "myCalendarPushEnabled_v1";        // user intent flag
+const PUSH_SYNC_FINGERPRINT_KEY = "myCalendarPushScheduleFp_v1"; // skip no-op syncs
+const PUSH_SCHEDULE_HORIZON_DAYS = 400;   // how far ahead the client looks for a first occurrence
+const PUSH_SYNC_DEBOUNCE_MS = 4000;       // coalesce bursts of edits into one sync
+const PUSH_TITLE_MAX_LEN = 80;            // stored/pushed titles are truncated
+
+const PUSH_SUBSCRIPTIONS_TABLE = "push_subscriptions";
+const REMINDER_SCHEDULES_TABLE = "reminder_schedules";
+
+// --- Small helpers -------------------------------------------------------------
+
+function pushConfigured(){
+  return !!PUSH_VAPID_PUBLIC_KEY && !PUSH_VAPID_PUBLIC_KEY.includes("PASTE_");
+}
+
+function pushSupported(){
+  return ("serviceWorker" in navigator) &&
+         ("PushManager" in window) &&
+         (typeof Notification !== "undefined");
+}
+
+function getPushIntent(){
+  try{ return localStorage.getItem(PUSH_ENABLED_KEY) === "1"; }catch{ return false; }
+}
+
+function setPushIntent(on){
+  try{ localStorage.setItem(PUSH_ENABLED_KEY, on ? "1" : "0"); }catch{}
+}
+
+// Standard conversion for PushManager.subscribe applicationServerKey.
+function urlBase64ToUint8Array(base64String){
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const output = new Uint8Array(raw.length);
+  for(let i = 0; i < raw.length; i++) output[i] = raw.charCodeAt(i);
+  return output;
+}
+
+async function getCurrentPushSubscription(){
+  try{
+    if(!("serviceWorker" in navigator)) return null;
+    const reg = await navigator.serviceWorker.getRegistration();
+    if(!reg || !reg.pushManager) return null;
+    return await reg.pushManager.getSubscription();
+  }catch(err){
+    console.warn("Push: could not read subscription:", err);
+    return null;
+  }
+}
+
+// --- Building schedule rows from local event data -------------------------------
+
+// Which events carry a server-side reminder schedule. Mirrors the V1 filter in
+// collectReminderEntries (section 17): budget rows never remind, and events
+// without a parseable start time cannot be anchored.
+function collectPushReminderMasters(){
+  if(typeof collectLegacyAndCachedDirectEvents !== "function") return [];
+  return collectLegacyAndCachedDirectEvents().filter(ev => {
+    if(!ev || !ev.id || !ev.startDate) return false;
+    if(ev.source === "budget") return false;
+    if(!ev.reminder || !Number.isFinite(Number(ev.reminder.offsetMinutes))) return false;
+    return parseClockToMinutes(ev.startTime || "") !== null;
+  });
+}
+
+// Earliest FUTURE reminder time for an event, in local ms — the same local
+// wall-clock math V1 uses (ymdToDate = local midnight), which is correct here
+// because this code runs in the user's own timezone. The Edge Function does
+// the timezone-aware version of this for subsequent occurrences.
+function computePushNextReminderMs(ev, nowMs){
+  const startMins = parseClockToMinutes(ev.startTime || "");
+  if(startMins === null) return null;
+  const offset = Math.max(0, Math.round(Number(ev.reminder.offsetMinutes)));
+  const freq = ev.recurrence?.freq || "none";
+  const exceptions = Array.isArray(ev.recurrence?.exceptions) ? ev.recurrence.exceptions : [];
+  const isOneTime = (freq === "none");
+
+  // One-time events: single candidate, no scan (works at any distance).
+  if(isOneTime){
+    if(exceptions.includes(ev.startDate)) return null;
+    const dueMs = ymdToDate(ev.startDate).getTime() + startMins * 60000 - offset * 60000;
+    return dueMs > nowMs ? dueMs : null;
+  }
+
+  // Recurring: scan forward day by day, reusing recurrenceMatches (section
+  // 11B) so client and calendar agree exactly on which days occur. The
+  // startDate occurrence itself is included (recurrenceMatches covers it for
+  // daily; the explicit check covers the other freqs, matching how V1 sees
+  // the direct event on its own start date).
+  const until = (ev.recurrence?.until || "").toString().trim();
+  const base = new Date(nowMs);
+  base.setHours(0, 0, 0, 0);
+
+  for(let delta = 0; delta <= PUSH_SCHEDULE_HORIZON_DAYS; delta++){
+    const d = new Date(base);
+    d.setDate(d.getDate() + delta);
+    const iso = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    if(until && iso > until && iso !== ev.startDate) break;
+    if(exceptions.includes(iso)) continue;
+    const matches = (iso === ev.startDate) || recurrenceMatches(ev, iso);
+    if(!matches) continue;
+    const dueMs = ymdToDate(iso).getTime() + startMins * 60000 - offset * 60000;
+    if(dueMs > nowMs) return dueMs;
+  }
+  return null;
+}
+
+// Snapshot of what reminder_schedules should contain for this user right now.
+function buildReminderScheduleRows(){
+  if(!cloudUser) return [];
+  const nowMs = Date.now();
+  const rows = [];
+
+  for(const ev of collectPushReminderMasters()){
+    const nextMs = computePushNextReminderMs(ev, nowMs);
+    if(nextMs === null) continue; // past one-time / expired series → no active row
+
+    const r = ev.recurrence || {};
+    rows.push({
+      user_id: cloudUser.id,
+      event_id: String(ev.id),   // existing app event ID, unchanged (hard rule #3)
+      status: "active",
+      next_reminder_at: new Date(nextMs).toISOString(),
+      title: (ev.title || "Untitled event").slice(0, PUSH_TITLE_MAX_LEN),
+      start_date: ev.startDate,
+      start_minutes: parseClockToMinutes(ev.startTime || ""),
+      offset_minutes: Math.max(0, Math.round(Number(ev.reminder.offsetMinutes))),
+      timezone: (Intl.DateTimeFormat().resolvedOptions().timeZone) || "UTC",
+      recurrence: {
+        freq: r.freq || "none",
+        interval: Math.max(1, parseInt(r.interval || "1", 10) || 1),
+        until: (r.until || "").toString(),
+        days: Array.isArray(r.days) ? r.days.map(Number).filter(n => n >= 0 && n <= 6) : [],
+        exceptions: Array.isArray(r.exceptions) ? r.exceptions.map(String) : []
+      },
+      updated_at: new Date().toISOString()
+    });
+  }
+
+  rows.sort((a, b) => a.event_id.localeCompare(b.event_id));
+  return rows;
+}
+
+// Fingerprint (minus volatile updated_at) so unchanged data costs zero
+// network requests — important on the Free tier.
+function reminderScheduleFingerprint(rows){
+  try{
+    return JSON.stringify(rows.map(r => {
+      const { updated_at, ...rest } = r;
+      return rest;
+    }));
+  }catch{
+    return String(Date.now()); // fail open: worst case we sync once extra
+  }
+}
+
+// --- Schedule sync (debounced reconcile) -----------------------------------------
+
+let pushSyncTimer = null;
+let pushSyncInFlight = false;
+let pushSyncQueuedAgain = false;
+
+// Called from saveEvents() (see hook there), auth changes, startup, and after
+// enabling push. Cheap no-op unless signed in AND push intent is on.
+function queueReminderScheduleSync(reason){
+  if(!pushConfigured()) return;
+  if(!cloudUser || !getPushIntent()) return;
+
+  clearTimeout(pushSyncTimer);
+  pushSyncTimer = setTimeout(() => {
+    runReminderScheduleSync(reason).catch(err => {
+      console.warn("Push: schedule sync failed:", err);
+    });
+  }, PUSH_SYNC_DEBOUNCE_MS);
+}
+
+async function runReminderScheduleSync(reason){
+  if(!supabaseClient || !cloudUser || !getPushIntent()) return;
+
+  if(pushSyncInFlight){
+    pushSyncQueuedAgain = true; // run once more after the current pass
+    return;
+  }
+  pushSyncInFlight = true;
+
+  try{
+    const rows = buildReminderScheduleRows();
+    const fp = reminderScheduleFingerprint(rows);
+    let lastFp = "";
+    try{ lastFp = localStorage.getItem(PUSH_SYNC_FINGERPRINT_KEY) || ""; }catch{}
+    if(fp === lastFp){
+      return; // nothing changed since the last successful sync
+    }
+
+    // 1) Upsert every currently-active schedule (PK: user_id + event_id).
+    if(rows.length){
+      const { error } = await supabaseClient
+        .from(REMINDER_SCHEDULES_TABLE)
+        .upsert(rows, { onConflict: "user_id,event_id" });
+      if(error) throw error;
+    }
+
+    // 2) Disable rows for events that no longer have an active reminder
+    //    (deleted event, reminder removed, series ended). Disabled — not
+    //    deleted — keeps rollback realistic; a daily cleanup purges old rows.
+    const { data: remote, error: readErr } = await supabaseClient
+      .from(REMINDER_SCHEDULES_TABLE)
+      .select("event_id")
+      .eq("user_id", cloudUser.id)
+      .eq("status", "active");
+    if(readErr) throw readErr;
+
+    const activeIds = new Set(rows.map(r => r.event_id));
+    const stale = (remote || []).map(r => r.event_id).filter(id => !activeIds.has(id));
+    if(stale.length){
+      const { error: disErr } = await supabaseClient
+        .from(REMINDER_SCHEDULES_TABLE)
+        .update({ status: "disabled", next_reminder_at: null, updated_at: new Date().toISOString() })
+        .eq("user_id", cloudUser.id)
+        .in("event_id", stale);
+      if(disErr) throw disErr;
+    }
+
+    try{ localStorage.setItem(PUSH_SYNC_FINGERPRINT_KEY, fp); }catch{}
+    console.info(`Push: synced ${rows.length} reminder schedule(s), disabled ${stale.length} (${reason})`);
+  }finally{
+    pushSyncInFlight = false;
+    if(pushSyncQueuedAgain){
+      pushSyncQueuedAgain = false;
+      queueReminderScheduleSync("follow-up");
+    }
+  }
+}
+
+function clearPushSyncFingerprint(){
+  try{ localStorage.removeItem(PUSH_SYNC_FINGERPRINT_KEY); }catch{}
+}
+
+// --- Subscription management -----------------------------------------------------
+
+async function saveSubscriptionToSupabase(sub){
+  const json = sub.toJSON ? sub.toJSON() : {};
+  if(!json.endpoint || !json.keys?.p256dh || !json.keys?.auth){
+    throw new Error("Push subscription is missing endpoint/keys");
+  }
+  const { error } = await supabaseClient
+    .from(PUSH_SUBSCRIPTIONS_TABLE)
+    .upsert({
+      user_id: cloudUser.id,
+      endpoint: json.endpoint,
+      p256dh: json.keys.p256dh,
+      auth: json.keys.auth,
+      enabled: true,
+      last_seen_at: new Date().toISOString()
+    }, { onConflict: "user_id,endpoint" });
+  if(error) throw error;
+}
+
+async function enablePush(){
+  if(!pushSupported()){ updatePushUI("unsupported"); return; }
+  if(!pushConfigured()){ updatePushUI("unconfigured"); return; }
+  if(!supabaseClient || !cloudUser){ updatePushUI("signedout"); return; }
+
+  updatePushUI("working");
+  try{
+    // Reuses the existing V1 permission UX — same permission powers both.
+    const perm = await Notification.requestPermission();
+    updateNotificationPermissionUI?.();
+    if(perm !== "granted"){ updatePushUI(); return; }
+
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if(!sub){
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(PUSH_VAPID_PUBLIC_KEY)
+      });
+    }
+
+    await saveSubscriptionToSupabase(sub);
+    setPushIntent(true);
+    clearPushSyncFingerprint();           // force a full schedule reconcile
+    queueReminderScheduleSync("push enabled");
+    updatePushUI();
+  }catch(err){
+    console.warn("Push: enable failed:", err);
+    updatePushUI("error", err?.message || String(err));
+  }
+}
+
+async function disablePush(){
+  updatePushUI("working");
+  try{
+    const sub = await getCurrentPushSubscription();
+    const endpoint = sub?.toJSON?.()?.endpoint || sub?.endpoint || null;
+
+    if(sub){
+      try{ await sub.unsubscribe(); }
+      catch(err){ console.warn("Push: unsubscribe failed (continuing):", err); }
+    }
+
+    if(supabaseClient && cloudUser){
+      if(endpoint){
+        await supabaseClient
+          .from(PUSH_SUBSCRIPTIONS_TABLE)
+          .update({ enabled: false, last_seen_at: new Date().toISOString() })
+          .eq("user_id", cloudUser.id)
+          .eq("endpoint", endpoint);
+      }
+      // Pause server-side schedules so the cron does zero work for this user.
+      // Re-enabling push rebuilds them from local data (fingerprint cleared).
+      await supabaseClient
+        .from(REMINDER_SCHEDULES_TABLE)
+        .update({ status: "disabled", next_reminder_at: null, updated_at: new Date().toISOString() })
+        .eq("user_id", cloudUser.id)
+        .eq("status", "active");
+    }
+
+    setPushIntent(false);
+    clearPushSyncFingerprint();
+    updatePushUI();
+  }catch(err){
+    console.warn("Push: disable failed:", err);
+    updatePushUI("error", err?.message || String(err));
+  }
+}
+
+// If the browser silently dropped the subscription (storage cleared, endpoint
+// rotated), quietly re-subscribe on startup when the user already opted in
+// and permission is still granted. Keeps push alive WITHOUT requiring any
+// weekly app-opening ritual — the server rolls schedules forward on its own.
+async function refreshPushSubscriptionIfNeeded(){
+  try{
+    if(!pushSupported() || !pushConfigured()) return;
+    if(!getPushIntent() || !supabaseClient || !cloudUser) return;
+    if(Notification.permission !== "granted") return;
+
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if(!sub){
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(PUSH_VAPID_PUBLIC_KEY)
+      });
+    }
+    await saveSubscriptionToSupabase(sub); // also bumps last_seen_at
+  }catch(err){
+    console.warn("Push: subscription refresh failed:", err);
+  }
+}
+
+// --- Settings UI -----------------------------------------------------------------
+
+// States shown: unsupported / not configured / signed out / not enabled /
+// permission denied / enabled / working / subscription error.
+function updatePushUI(forcedState, detail){
+  const statusEl = document.getElementById("pushStatusText");
+  const btn = document.getElementById("pushToggleBtn");
+  if(!statusEl) return;
+
+  const setBtn = (label, show) => {
+    if(!btn) return;
+    btn.textContent = label;
+    btn.style.display = show ? "" : "none";
+    btn.disabled = false;
+  };
+
+  if(forcedState === "working"){
+    statusEl.textContent = "Push reminders: working…";
+    if(btn) btn.disabled = true;
+    return;
+  }
+  if(forcedState === "error"){
+    statusEl.textContent = "Push reminders: subscription error" + (detail ? ` — ${detail}` : "");
+    statusEl.classList.add("pushStatusErr");
+    setBtn("Try again", true);
+    return;
+  }
+  statusEl.classList.remove("pushStatusErr");
+
+  if(!pushSupported() || forcedState === "unsupported"){
+    statusEl.textContent = "Push reminders: not supported in this browser. Local reminders still work while the app is open. (iPhone/iPad: install the app to your Home Screen first — iOS 16.4+.)";
+    setBtn("", false);
+    return;
+  }
+  if(!pushConfigured() || forcedState === "unconfigured"){
+    statusEl.textContent = "Push reminders: not configured yet (missing VAPID public key in script.js).";
+    setBtn("", false);
+    return;
+  }
+  if(!cloudUser || forcedState === "signedout"){
+    statusEl.textContent = "Push reminders: sign in to your cloud account to enable.";
+    setBtn("", false);
+    return;
+  }
+  if(typeof Notification !== "undefined" && Notification.permission === "denied"){
+    statusEl.textContent = "Push reminders: notifications are blocked in your browser settings.";
+    setBtn("", false);
+    return;
+  }
+  if(getPushIntent()){
+    statusEl.textContent = "Push reminders: enabled ✓ (delivered even when the app is closed, checked every 5 minutes)";
+    setBtn("Disable push reminders", true);
+    return;
+  }
+  statusEl.textContent = "Push reminders: not enabled.";
+  setBtn("Enable push reminders", true);
+}
+
+document.getElementById("pushToggleBtn")?.addEventListener("click", () => {
+  if(getPushIntent()) disablePush().catch(console.error);
+  else enablePush().catch(console.error);
+});
+
+// --- Wiring: startup + auth changes ----------------------------------------------
+
+// supabaseClient is created asynchronously by initCloudSync(); poll briefly
+// until it exists, then attach our own auth listener (purely additive — does
+// not touch the sync layer's listener).
+(function attachPushAuthHook(){
+  let tries = 0;
+  const t = setInterval(() => {
+    tries++;
+    if(supabaseClient){
+      clearInterval(t);
+      try{
+        supabaseClient.auth.onAuthStateChange(() => {
+          updatePushUI();
+          clearPushSyncFingerprint(); // user may have changed → resync fresh
+          queueReminderScheduleSync("auth change");
+        });
+      }catch(err){
+        console.warn("Push: could not attach auth listener:", err);
+      }
+    }else if(tries > 40){
+      clearInterval(t); // cloud sync not configured — push UI shows signed-out
+    }
+  }, 1500);
+})();
+
+// Startup: small delay lets initCloudSync restore the session first.
+setTimeout(() => {
+  updatePushUI();
+  refreshPushSubscriptionIfNeeded().catch(console.error);
+  queueReminderScheduleSync("startup");
+}, 3000);
+
+// --- Debug helpers (console) -------------------------------------------------------
+
+window.debugPush = async function(){
+  const sub = await getCurrentPushSubscription();
+  const rows = buildReminderScheduleRows();
+  console.group("Web Push V2 debug");
+  console.log("Supported:", pushSupported(), "| Configured:", pushConfigured());
+  console.log("Signed in:", !!cloudUser, "| Intent:", getPushIntent());
+  console.log("Permission:", (typeof Notification !== "undefined") ? Notification.permission : "unsupported");
+  console.log("Subscription endpoint:", sub?.endpoint || "(none)");
+  console.table(rows.map(r => ({
+    event_id: r.event_id,
+    title: r.title,
+    next: new Date(r.next_reminder_at).toLocaleString(),
+    freq: r.recurrence.freq,
+    tz: r.timezone
+  })));
+  console.groupEnd();
+  return { supported: pushSupported(), configured: pushConfigured(), intent: getPushIntent(), subscription: sub, rows };
+};
+
+window.forcePushScheduleSync = function(){
+  clearPushSyncFingerprint();
+  queueReminderScheduleSync("manual");
+  return "Sync queued (debounced " + PUSH_SYNC_DEBOUNCE_MS + "ms).";
 };
