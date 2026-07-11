@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
-  <title>My Digital Calendar</title>
+  <title>Vanguard Calendar</title>
   <meta name="theme-color" content="#181a33" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="My Calendar" />
+  <meta name="apple-mobile-web-app-title" content="Vanguard" />
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="favicon.ico" sizes="any" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32x32.png" />
@@ -803,6 +803,63 @@
             </div>
           </div>
 
+      <!-- ===== Shared Calendars V1 (read-only overlay) ===== -->
+      <div id="sharedCalendarsPanel" class="sharedCalendarsPanel">
+        <div class="sharedCalendarsHeader">
+          <div class="budgetDrawerKicker">Shared calendars</div>
+          <h4>Share &amp; view read-only calendars</h4>
+        </div>
+
+        <div id="sharedCalendarsSignedOutHint" class="hint">
+          Sign in to share your calendar or see calendars shared with you.
+        </div>
+
+        <div id="sharedCalendarsBody">
+          <div class="sharedShareRow">
+            <input
+              id="shareEmailInput"
+              class="input cloudEmailInput"
+              type="email"
+              autocomplete="off"
+              placeholder="friend@example.com"
+              aria-label="Email to share your calendar with"
+            />
+            <button id="shareCalendarBtn" class="cloudPrimaryAction" type="button">Share</button>
+          </div>
+          <div id="shareCalendarStatus" class="sharedShareStatus" aria-live="polite"></div>
+
+          <div class="sharedListTitle">People you've shared with</div>
+          <div id="outgoingSharesList" class="sharedList"></div>
+
+          <div class="sharedListTitle">Shared with you</div>
+          <div id="incomingSharesList" class="sharedList"></div>
+
+          <div class="cloudSyncHint">
+            Shared calendars are read-only. Recipients can see your event titles,
+            times and notes — never prices, budget data or reminders.
+          </div>
+        </div>
+      </div>
+
+  </div>
+</div>
+
+<!-- ===== Shared Calendars V1: read-only event details ===== -->
+<div id="sharedEventModal" class="sharedEventModal hidden">
+  <div class="sharedEventModalCard">
+    <div id="sharedEventModalStripe" class="sharedEventModalStripe" aria-hidden="true"></div>
+
+    <div class="sharedEventModalHeader">
+      <div class="sharedEventBadge">Shared calendar · read-only</div>
+      <button id="sharedEventModalCloseBtn" class="navBtn navBtnIcon" type="button" aria-label="Close shared event details">×</button>
+    </div>
+
+    <h3 id="sharedEventModalTitle"></h3>
+    <div id="sharedEventModalDate" class="sharedEventModalMeta"></div>
+    <div id="sharedEventModalTime" class="sharedEventModalMeta"></div>
+    <div id="sharedEventModalRecurrence" class="sharedEventModalMeta"></div>
+    <p id="sharedEventModalDetails" class="sharedEventModalDetails"></p>
+    <div id="sharedEventModalOwner" class="sharedEventModalOwner"></div>
   </div>
 </div>
   <div id="syncGate" class="syncGate hidden">

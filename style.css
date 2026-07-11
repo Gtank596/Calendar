@@ -7820,3 +7820,286 @@ position: relative;
 #pushSettingBlock #pushToggleBtn{
   margin-top: 4px;
 }
+
+/* ============================================================================
+   SHARED CALENDARS V1 (script.js section 19) — read-only overlay styling.
+   ROLLBACK: delete everything from this banner to the end of the file.
+   ============================================================================ */
+
+/* ---- Shared event pills (month / week / day views) ---- */
+/* Distinct but calm: dashed border, slightly muted fill, striped left edge. */
+.eventPill.sharedEventPill{
+  border-style: dashed;
+  opacity: .92;
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(255,255,255,.05) 0px,
+    rgba(255,255,255,.05) 3px,
+    transparent 3px,
+    transparent 8px
+  );
+  cursor: pointer;
+}
+
+.eventPill.sharedEventPill .pillTitle::before{
+  content: "⇄ ";
+  opacity: .7;
+  font-size: .85em;
+}
+
+/* Day view shared blocks: no grab cursor since drag/resize are disabled */
+.dayViewDay .eventPill.sharedEventPill{
+  cursor: default;
+}
+
+/* ---- Event list (right panel) ---- */
+.eventItem.sharedEventItem{
+  opacity: .95;
+}
+
+.eventItem.sharedEventItem .eventStripe{
+  background-image: repeating-linear-gradient(
+    180deg,
+    rgba(255,255,255,.35) 0 4px,
+    transparent 4px 8px
+  );
+}
+
+.sharedEventChip{
+  margin-top: 4px;
+  font-size: 11px;
+  opacity: .75;
+  border: 1px dashed rgba(255,255,255,.35);
+  border-radius: 999px;
+  padding: 1px 8px;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Quick search shared marker ---- */
+.qsItem.qsShared .qsSwatch{
+  border: 1px dashed rgba(255,255,255,.55);
+}
+
+/* ---- Account modal: sharing panel ---- */
+.sharedCalendarsPanel{
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 14px;
+  background: rgba(255,255,255,.03);
+}
+
+.sharedCalendarsHeader h4{
+  margin: 2px 0 10px;
+  font-size: 15px;
+}
+
+.sharedShareRow{
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.sharedShareRow .input{
+  flex: 1;
+  min-width: 0;
+}
+
+.sharedShareStatus{
+  margin-top: 6px;
+  font-size: 12px;
+  opacity: .85;
+  min-height: 14px;
+}
+
+.sharedShareStatus.isError{
+  color: #d05555;
+  opacity: 1;
+}
+
+.sharedListTitle{
+  margin: 14px 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  opacity: .65;
+}
+
+.sharedList{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sharedListRow{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 10px;
+  background: rgba(255,255,255,.03);
+}
+
+.sharedListLabel{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.sharedRevokeBtn{
+  flex: none;
+}
+
+/* ---- Visibility toggle (incoming shares) ---- */
+.sharedToggle{
+  position: relative;
+  display: inline-block;
+  width: 38px;
+  height: 22px;
+  flex: none;
+  cursor: pointer;
+}
+
+.sharedToggle input{
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+
+.sharedToggleKnob{
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: rgba(255,255,255,.14);
+  transition: background .15s ease;
+  pointer-events: none;
+}
+
+.sharedToggleKnob::after{
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(255,255,255,.85);
+  transition: transform .15s ease;
+}
+
+.sharedToggle input:checked + .sharedToggleKnob{
+  background: rgba(122,90,255,.75);
+}
+
+.sharedToggle input:checked + .sharedToggleKnob::after{
+  transform: translateX(16px);
+}
+
+/* ---- Read-only shared event details modal ---- */
+.sharedEventModal{
+  position: fixed;
+  inset: 0;
+  z-index: 260;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(8,8,14,.6);
+  backdrop-filter: blur(3px);
+}
+
+.sharedEventModal.hidden{
+  display: none;
+}
+
+.sharedEventModalCard{
+  position: relative;
+  width: min(420px, 100%);
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 16px;
+  background: rgba(24,24,34,.97);
+  padding: 16px 16px 14px 20px;
+  box-shadow: 0 18px 60px rgba(0,0,0,.5);
+  overflow: hidden;
+}
+
+.sharedEventModalStripe{
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+}
+
+.sharedEventModalHeader{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.sharedEventBadge{
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  opacity: .7;
+  border: 1px dashed rgba(255,255,255,.35);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+
+.sharedEventModalCard h3{
+  margin: 4px 0 8px;
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+.sharedEventModalMeta{
+  font-size: 13px;
+  opacity: .85;
+  margin: 2px 0;
+}
+
+.sharedEventModalDetails{
+  margin: 10px 0 0;
+  font-size: 13px;
+  opacity: .9;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.sharedEventModalOwner{
+  margin-top: 12px;
+  font-size: 12px;
+  opacity: .65;
+}
+
+/* ---- Mobile ---- */
+@media (max-width: 760px){
+  .eventPill.sharedEventPill .pillTitle::before{
+    content: "";  /* keep compact pills uncluttered; dashed border still marks shared */
+  }
+
+  .sharedShareRow{
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .sharedEventModalCard{
+    width: 100%;
+  }
+}

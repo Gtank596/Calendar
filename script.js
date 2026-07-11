@@ -11873,8 +11873,14 @@ function getSegmentDisplayTime(ev){
 function getDayViewSegments(dayISO){
   const segments = [];
 
+  // Shared Calendars V1: read-only overlay events join the day timeline.
+  const sharedTodays = (typeof getSharedCalendarEventsForDay === "function")
+    ? getSharedCalendarEventsForDay(dayISO)
+    : [];
+
   const todays = sortByTimeThenTitle(
-    getComputedEventsForDay(dayISO).filter(ev => !(ev?.span?.mode === "bg"))
+    [...getComputedEventsForDay(dayISO), ...sharedTodays]
+      .filter(ev => !(ev?.span?.mode === "bg"))
   );
 
   for(const ev of todays){
@@ -11904,7 +11910,11 @@ function getDayViewSegments(dayISO){
   }
 
   const yesterdayISO = prevDayISO(dayISO);
-  const yesterdays = getComputedEventsForDay(yesterdayISO).filter(ev => !(ev?.span?.mode === "bg"));
+  const sharedYesterdays = (typeof getSharedCalendarEventsForDay === "function")
+    ? getSharedCalendarEventsForDay(yesterdayISO)
+    : [];
+  const yesterdays = [...getComputedEventsForDay(yesterdayISO), ...sharedYesterdays]
+    .filter(ev => !(ev?.span?.mode === "bg"));
 
   for(const ev of yesterdays){
     const span = getEventSpanInfo(ev);
@@ -12294,7 +12304,19 @@ function getComputedEventsForDay(iso){
 }
 
 function getCalendarEventsForDay(iso){
-  return getComputedEventsForDay(iso).filter(ev => ev.source !== "budget");
+  const own = getComputedEventsForDay(iso).filter(ev => ev.source !== "budget");
+
+  // Shared Calendars V1 (section 19): read-only overlay events from other
+  // users. This function is ONLY used by rendering paths (month/week views,
+  // event list) — never by sync, reminders, drop handlers or budget code, so
+  // shared events can never leak into local storage or the cloud writer.
+  // Guarded so this stays inert if section 19 is ever removed (rollback).
+  if(typeof getSharedCalendarEventsForDay === "function"){
+    const shared = getSharedCalendarEventsForDay(iso);
+    if(shared.length) return [...own, ...shared];
+  }
+
+  return own;
 }
 
 // ============================================================================
@@ -13222,9 +13244,18 @@ if(shouldDimPastEvents() && isPastDayISO(cellISO)){
   pill.classList.add("pastEventDim");
 }
 
-      pill.draggable = true;
+      // Shared Calendars V1: shared events are read-only — distinct look,
+      // no drag, no drop, no editing.
+      if(ev._shared){
+        pill.classList.add("sharedEventPill");
+        pill.title = `Shared from ${ev._sharedOwnerEmail || "another user"}`;
+      }
 
-      if(ev._isOccurrence && ev._masterId){
+      pill.draggable = !ev._shared;
+
+      if(ev._shared){
+        // read-only: no drag handlers at all
+      } else if(ev._isOccurrence && ev._masterId){
         pill.addEventListener("dragstart", (e) => {
           const data = buildDragPayload({
             kind: "occurrence",
@@ -13274,6 +13305,10 @@ if(shouldDimPastEvents() && isPastDayISO(cellISO)){
 
 pill.addEventListener("click", (e) => {
   e.stopPropagation();
+  if(ev._shared){
+    openSharedEventDetails(ev, cellISO);
+    return;
+  }
   openEventInEditor(ev, cellISO);
 });
 
@@ -15589,6 +15624,13 @@ function renderWeekView(){
       const pill = document.createElement("span");
       pill.className = "eventPill weekEventPill";
 
+      // Shared Calendars V1: read-only overlay pill (shared events carry no
+      // connection data, so the connection rail below never engages).
+      if(ev._shared){
+        pill.classList.add("sharedEventPill");
+        pill.title = `Shared from ${ev._sharedOwnerEmail || "another user"}`;
+      }
+
       const pillConnections = getEventConnections(ev);
       if(pillConnections.length){
         const primaryConnection = pillConnections[0];
@@ -15617,6 +15659,11 @@ function renderWeekView(){
 
       pill.addEventListener("click", (e) => {
   e.stopPropagation();
+
+  if(ev._shared){
+    openSharedEventDetails(ev, cellISO);
+    return;
+  }
 
   const groupId = getEventPrimaryConnectionGroupId(ev);
   if(groupId && selectedConnectionGroupId !== groupId){
@@ -15809,10 +15856,16 @@ for(const item of railLabels){
     const pill = document.createElement("span");
     pill.className = "eventPill";
 
+    // Shared Calendars V1: read-only — no resize handles, no drag.
+    if(ev._shared){
+      pill.classList.add("sharedEventPill");
+      pill.title = `Shared from ${ev._sharedOwnerEmail || "another user"}`;
+    }
+
     const t = getSegmentDisplayTime(ev);
     const title = ev.title || "(Untitled)";
-    const showTopResize = !ev._isCarryoverSegment;
-    const showBottomResize = !ev._overnight || !!ev._isCarryoverSegment;
+    const showTopResize = !ev._isCarryoverSegment && !ev._shared;
+    const showBottomResize = (!ev._overnight || !!ev._isCarryoverSegment) && !ev._shared;
 
     pill.innerHTML = `
       ${showTopResize ? `<div class="resizeHandle resizeHandleTop" data-edge="top"></div>` : ""}
@@ -15846,6 +15899,13 @@ for(const item of railLabels){
     pill.addEventListener("click", (e) => {
   e.stopPropagation();
 
+  // Shared Calendars V1: never route shared events into the editor or the
+  // form-populate path — read-only details only.
+  if(ev._shared){
+    openSharedEventDetails(ev, dayISO);
+    return;
+  }
+
   const isMobileDayPill =
     isMobileViewport() &&
     viewMode === "day" &&
@@ -15864,6 +15924,11 @@ for(const item of railLabels){
 
 pill.addEventListener("dblclick", (e) => {
   e.stopPropagation();
+
+  if(ev._shared){
+    openSharedEventDetails(ev, dayISO);
+    return;
+  }
 
   if(
     isMobileViewport() &&
@@ -15885,7 +15950,7 @@ pill.addEventListener("dblclick", (e) => {
       beginDayTimeResize(e, ev, ev._segmentBaseDate || dayISO, pill, dayEl, "bottom");
     });
 
-    if(!ev._isCarryoverSegment){
+    if(!ev._isCarryoverSegment && !ev._shared){
       pill.addEventListener("pointerdown", (e) => {
         if(e.target.closest(".resizeHandle")) return;
         beginDayTimeDrag(e, ev, ev._segmentBaseDate || dayISO, pill, dayEl);
@@ -15934,7 +15999,12 @@ function renderEventList(){
     const item = document.createElement("div");
     item.className = "eventItem";
 
-    const isActive = (ev.id === selectedEventId) || (ev._masterId && ev._masterId === selectedEventId);
+    // Shared Calendars V1: mark shared entries and keep them out of the
+    // active/selected editing state.
+    if(ev._shared) item.classList.add("sharedEventItem");
+
+    const isActive = !ev._shared &&
+      ((ev.id === selectedEventId) || (ev._masterId && ev._masterId === selectedEventId));
     if(isActive) item.classList.add("active");
 
     const stripe = document.createElement("div");
@@ -15967,7 +16037,19 @@ function renderEventList(){
     pad.appendChild(top);
     if(ev.details) pad.appendChild(details);
 
+    // Shared Calendars V1: small "Shared" chip with the owner's email.
+    if(ev._shared){
+      const chip = document.createElement("div");
+      chip.className = "sharedEventChip";
+      chip.textContent = `Shared from ${ev._sharedOwnerEmail || "another user"}`;
+      pad.appendChild(chip);
+    }
+
     item.addEventListener("click", () => {
+  if(ev._shared){
+    openSharedEventDetails(ev, selectedDateISO);
+    return;
+  }
   openEventInEditor(ev, selectedDateISO);
 });
 
@@ -17228,6 +17310,15 @@ function getAllEventsFlat(){
       out.push({ iso, title, notes, time, color: ev.color || "" });
     }
   }
+
+  // Shared Calendars V1: include visible shared events (masters at their
+  // start date) so search finds them; clicking opens read-only details.
+  if(typeof getVisibleSharedEventsFlat === "function"){
+    for(const entry of getVisibleSharedEventsFlat()){
+      out.push(entry);
+    }
+  }
+
   // Newest first by date
   out.sort((a,b) => (a.iso < b.iso ? 1 : a.iso > b.iso ? -1 : 0));
   return out;
@@ -17275,7 +17366,8 @@ function renderQuickSearchResults(query){
 
     const meta = document.createElement("div");
     meta.className = "qsMeta";
-    meta.textContent = `${e.iso}${e.time ? " • " + e.time : ""}`;
+    meta.textContent = `${e.iso}${e.time ? " • " + e.time : ""}${e.shared ? " • Shared from " + (e.ownerEmail || "another user") : ""}`;
+    if(e.shared) row.classList.add("qsShared");
 
     left.appendChild(title);
     left.appendChild(meta);
@@ -17298,6 +17390,11 @@ function renderQuickSearchResults(query){
       view = new Date(d.getFullYear(), d.getMonth(), 1);
       selectDate(e.iso);
       closeQuickSearch();
+
+      // Shared Calendars V1: shared results open the read-only detail card.
+      if(e.shared && e._sharedEvent && typeof openSharedEventDetails === "function"){
+        openSharedEventDetails(e._sharedEvent, e.iso);
+      }
     });
 
     quickSearchResults.appendChild(row);
@@ -18369,4 +18466,568 @@ window.forcePushScheduleSync = function(){
   clearPushSyncFingerprint();
   queueReminderScheduleSync("manual");
   return "Sync queued (debounced " + PUSH_SYNC_DEBOUNCE_MS + "ms).";
+};
+
+// ============================================================================
+// 19. SHARED CALENDARS — V1 (READ-ONLY OVERLAY)
+// ============================================================================
+// Another user can share their calendar with me (by email). Their events are
+// fetched through ONE sanitized Supabase RPC (get_shared_calendar_events) and
+// held in a separate in-memory structure. They are rendered as read-only
+// pills in month/week/day views, the event list, and quick search.
+//
+// Invariants (Hard Rules):
+//   * Shared events NEVER enter `events`, localStorage, IndexedDB, undo/redo,
+//     or any cloud write path. They exist only in `sharedCalendarState` below.
+//   * Recipients have no write path: the SQL layer exposes a read-only,
+//     field-whitelisted feed (no price / reminders / budget / receipts).
+//   * Everything in this section is additive. FULL ROLLBACK: delete section
+//     19, the small `_shared` guards in render code (all tagged
+//     "Shared Calendars V1"), the #sharedCalendarsPanel / #sharedEventModal
+//     HTML, and the section-19 CSS. Personal data is untouched either way.
+// ----------------------------------------------------------------------------
+
+// NOTE: `var` (not const) on purpose. The app's initial render() runs BEFORE
+// this section's top-level code executes, and the render path calls the
+// hoisted getSharedCalendarEventsForDay(). With var, the state is simply
+// undefined at that moment (guarded below) instead of a TDZ ReferenceError.
+var SHARED_CAL_HIDDEN_KEY = "mySharedCalendarsHidden_v1";
+var SHARED_CAL_REFRESH_MS = 10 * 60 * 1000; // periodic re-fetch while signed in
+
+var sharedCalendarState = {
+  incoming: [],        // active calendar_shares rows addressed to me
+  outgoing: [],        // my outgoing shares (pending/active)
+  byOwner: {},         // ownerId -> { ownerEmail, direct: {iso:[ev]}, masters: [ev] }
+  lastFetchAt: 0,
+  lastError: ""
+};
+
+// --- Per-device visibility toggles (localStorage only; nothing synced) ------
+
+function getHiddenSharedOwnerIds(){
+  try{
+    const raw = JSON.parse(localStorage.getItem(SHARED_CAL_HIDDEN_KEY));
+    return Array.isArray(raw) ? raw.map(String) : [];
+  }catch{
+    return [];
+  }
+}
+
+function setSharedOwnerHidden(ownerId, hidden){
+  const id = String(ownerId || "");
+  if(!id) return;
+  const set = new Set(getHiddenSharedOwnerIds());
+  if(hidden) set.add(id); else set.delete(id);
+  try{
+    localStorage.setItem(SHARED_CAL_HIDDEN_KEY, JSON.stringify([...set]));
+  }catch{}
+  render();
+  renderEventList();
+  renderSharedCalendarPanels();
+}
+
+function isSharedOwnerHidden(ownerId){
+  return getHiddenSharedOwnerIds().includes(String(ownerId || ""));
+}
+
+// --- Sanitizing / normalizing shared event records ---------------------------
+// The SQL feed already whitelists fields; this repeats the whitelist client-
+// side (defense in depth) and stamps the read-only flags the renderers use.
+
+function sanitizeSharedEvent(raw, ownerId, ownerEmail){
+  const base = toEvent(raw || {});
+  const startDate = String(raw?.startDate || raw?.dateISO || base.startDate || "").trim();
+  if(!startDate) return null;
+
+  return {
+    id: `shared:${ownerId}:${base.id}`,
+    title: base.title,
+    details: base.details,
+    startDate,
+    startTime: base.startTime,
+    endTime: base.endTime,
+    time: base.time,
+    color: base.color,
+    categoryId: base.categoryId,
+    recurrence: base.recurrence,
+    source: "calendar",
+    // Hard-stripped: nothing budget/reminder/connection-shaped survives.
+    price: null,
+    reminder: null,
+    span: null,
+    connections: [],
+    connectionGroupId: "",
+    connectionGroupName: "",
+    connectionGroupIds: [],
+    _shared: true,
+    _sharedOwnerId: String(ownerId || ""),
+    _sharedOwnerEmail: String(ownerEmail || "")
+  };
+}
+
+// --- Day expansion (mirrors getComputedEventsForDay, shared-only) -----------
+
+function getSharedCalendarEventsForDay(iso){
+  const out = [];
+  if(!iso) return out;
+  if(!sharedCalendarState || !sharedCalendarState.byOwner) return out; // pre-init render
+
+  for(const ownerId of Object.keys(sharedCalendarState.byOwner)){
+    if(isSharedOwnerHidden(ownerId)) continue;
+    const bucket = sharedCalendarState.byOwner[ownerId];
+    if(!bucket) continue;
+
+    const direct = bucket.direct[iso];
+    if(Array.isArray(direct)) out.push(...direct);
+
+    for(const m of bucket.masters){
+      if(m.startDate === iso) continue;                 // master shown as direct
+      if(!recurrenceMatches(m, iso)) continue;          // existing recurrence engine
+      const ex = m.recurrence?.exceptions;
+      if(Array.isArray(ex) && ex.includes(iso)) continue;
+
+      out.push({
+        ...m,
+        id: `${m.id}@shared@${iso}`,
+        _sharedOccurrence: true,
+        _sharedOccursOn: iso
+      });
+    }
+  }
+
+  return out;
+}
+
+// Flat list for quick search: direct events + recurring masters (at start date).
+function getVisibleSharedEventsFlat(){
+  const out = [];
+  if(!sharedCalendarState || !sharedCalendarState.byOwner) return out; // pre-init
+
+  for(const ownerId of Object.keys(sharedCalendarState.byOwner)){
+    if(isSharedOwnerHidden(ownerId)) continue;
+    const bucket = sharedCalendarState.byOwner[ownerId];
+    if(!bucket) continue;
+
+    for(const iso of Object.keys(bucket.direct)){
+      for(const ev of bucket.direct[iso]){
+        out.push({
+          iso,
+          title: (ev.title || "").trim(),
+          notes: (ev.details || "").toString(),
+          time: formatTimeRange(ev.startTime, ev.endTime),
+          color: ev.color || "",
+          shared: true,
+          ownerEmail: bucket.ownerEmail,
+          _sharedEvent: ev
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
+// --- Fetching ----------------------------------------------------------------
+
+async function fetchIncomingShares(){
+  const { data, error } = await supabaseClient
+    .from("calendar_shares")
+    .select("id, owner_user_id, owner_email, recipient_email, recipient_user_id, status, created_at")
+    .eq("status", "active");
+
+  if(error) throw error;
+
+  const myEmail = (cloudUser?.email || "").toLowerCase();
+  return (data || []).filter(row =>
+    row.owner_user_id !== cloudUser.id &&
+    (row.recipient_user_id === cloudUser.id ||
+     (row.recipient_email || "").toLowerCase() === myEmail)
+  );
+}
+
+async function fetchOutgoingShares(){
+  const { data, error } = await supabaseClient
+    .from("calendar_shares")
+    .select("id, owner_user_id, recipient_email, status, created_at")
+    .eq("owner_user_id", cloudUser.id)
+    .neq("status", "revoked")
+    .order("created_at", { ascending: true });
+
+  if(error) throw error;
+  return data || [];
+}
+
+async function fetchSharedOwnerEvents(ownerId){
+  const { data, error } = await supabaseClient
+    .rpc("get_shared_calendar_events", { p_owner_id: ownerId });
+
+  if(error) throw error;
+  return Array.isArray(data) ? data : [];
+}
+
+async function refreshSharedCalendars(reason = "manual"){
+  if(!supabaseClient || !cloudUser){
+    // Signed out: drop the overlay entirely (never persisted anywhere).
+    sharedCalendarState.incoming = [];
+    sharedCalendarState.outgoing = [];
+    sharedCalendarState.byOwner = {};
+    render();
+    renderEventList();
+    renderSharedCalendarPanels();
+    return sharedCalendarState;
+  }
+
+  try{
+    const [incoming, outgoing] = await Promise.all([
+      fetchIncomingShares(),
+      fetchOutgoingShares()
+    ]);
+
+    const byOwner = {};
+    for(const share of incoming){
+      const ownerId = share.owner_user_id;
+      const ownerEmail = share.owner_email || "another user";
+      try{
+        const rawEvents = await fetchSharedOwnerEvents(ownerId);
+        const direct = {};
+        const masters = [];
+
+        for(const raw of rawEvents){
+          const ev = sanitizeSharedEvent(raw, ownerId, ownerEmail);
+          if(!ev) continue;
+          (direct[ev.startDate] ||= []).push(ev);
+          if((ev.recurrence?.freq || "none") !== "none") masters.push(ev);
+        }
+
+        byOwner[ownerId] = { ownerEmail, direct, masters };
+      }catch(err){
+        console.warn("Shared calendars: could not load events from", ownerEmail, err);
+        byOwner[ownerId] = { ownerEmail, direct: {}, masters: [], error: String(err?.message || err) };
+      }
+    }
+
+    sharedCalendarState.incoming = incoming;
+    sharedCalendarState.outgoing = outgoing;
+    sharedCalendarState.byOwner = byOwner;
+    sharedCalendarState.lastFetchAt = Date.now();
+    sharedCalendarState.lastError = "";
+  }catch(err){
+    // Fetch failure (offline etc.): keep whatever overlay we had; personal
+    // calendar is unaffected either way.
+    sharedCalendarState.lastError = String(err?.message || err);
+    console.warn("Shared calendars: refresh failed (" + reason + "):", err);
+  }
+
+  render();
+  renderEventList();
+  renderSharedCalendarPanels();
+  return sharedCalendarState;
+}
+
+// --- Sharing actions (owner side) --------------------------------------------
+
+function setShareStatusText(text, isError = false){
+  const el = document.getElementById("shareCalendarStatus");
+  if(!el) return;
+  el.textContent = text || "";
+  el.classList.toggle("isError", !!isError);
+}
+
+async function shareCalendarWithEmail(emailRaw){
+  const email = String(emailRaw || "").trim().toLowerCase();
+
+  if(!supabaseClient || !cloudUser){
+    setShareStatusText("Sign in to share your calendar.", true);
+    return;
+  }
+  if(!email || !email.includes("@")){
+    setShareStatusText("Enter a valid email address.", true);
+    return;
+  }
+  if(email === (cloudUser.email || "").toLowerCase()){
+    setShareStatusText("That's your own email.", true);
+    return;
+  }
+
+  setShareStatusText("Sharing…");
+
+  // Re-activate a previously revoked share if one exists, else insert.
+  const { data: existing, error: findErr } = await supabaseClient
+    .from("calendar_shares")
+    .select("id, status")
+    .eq("owner_user_id", cloudUser.id)
+    .eq("recipient_email", email)
+    .maybeSingle();
+
+  if(findErr){
+    setShareStatusText("Could not share: " + findErr.message, true);
+    return;
+  }
+
+  let error = null;
+  if(existing){
+    ({ error } = await supabaseClient
+      .from("calendar_shares")
+      .update({ status: "active" })
+      .eq("id", existing.id));
+  } else {
+    ({ error } = await supabaseClient
+      .from("calendar_shares")
+      .insert({ recipient_email: email, status: "active" }));
+  }
+
+  if(error){
+    setShareStatusText("Could not share: " + error.message, true);
+    return;
+  }
+
+  setShareStatusText(`Shared with ${email}. They'll see your calendar as read-only.`);
+  const input = document.getElementById("shareEmailInput");
+  if(input) input.value = "";
+  await refreshSharedCalendars("share created");
+}
+
+async function revokeCalendarShare(shareId){
+  if(!supabaseClient || !cloudUser) return;
+
+  const { error } = await supabaseClient
+    .from("calendar_shares")
+    .update({ status: "revoked" })
+    .eq("id", shareId);
+
+  if(error){
+    setShareStatusText("Could not revoke: " + error.message, true);
+    return;
+  }
+
+  setShareStatusText("Share revoked.");
+  await refreshSharedCalendars("share revoked");
+}
+
+// --- Account modal UI ---------------------------------------------------------
+
+function renderSharedCalendarPanels(){
+  const panel = document.getElementById("sharedCalendarsPanel");
+  if(!panel) return;
+
+  const signedIn = !!cloudUser;
+  panel.classList.toggle("isSignedOut", !signedIn);
+
+  const gate = document.getElementById("sharedCalendarsSignedOutHint");
+  if(gate) gate.style.display = signedIn ? "none" : "";
+
+  const body = document.getElementById("sharedCalendarsBody");
+  if(body) body.style.display = signedIn ? "" : "none";
+
+  // Outgoing: people I've shared with
+  const outList = document.getElementById("outgoingSharesList");
+  if(outList){
+    outList.innerHTML = "";
+    if(!sharedCalendarState.outgoing.length){
+      outList.innerHTML = `<div class="hint">You haven't shared your calendar with anyone.</div>`;
+    }
+    for(const share of sharedCalendarState.outgoing){
+      const row = document.createElement("div");
+      row.className = "sharedListRow";
+
+      const label = document.createElement("div");
+      label.className = "sharedListLabel";
+      label.textContent = share.recipient_email;
+
+      const revoke = document.createElement("button");
+      revoke.type = "button";
+      revoke.className = "tiny sharedRevokeBtn";
+      revoke.textContent = "Revoke";
+      revoke.addEventListener("click", () => {
+        if(confirm(`Stop sharing your calendar with ${share.recipient_email}?`)){
+          revokeCalendarShare(share.id).catch(console.error);
+        }
+      });
+
+      row.appendChild(label);
+      row.appendChild(revoke);
+      outList.appendChild(row);
+    }
+  }
+
+  // Incoming: calendars shared with me (with per-device visibility toggles)
+  const inList = document.getElementById("incomingSharesList");
+  if(inList){
+    inList.innerHTML = "";
+    if(!sharedCalendarState.incoming.length){
+      inList.innerHTML = `<div class="hint">No calendars have been shared with you.</div>`;
+    }
+    for(const share of sharedCalendarState.incoming){
+      const ownerId = share.owner_user_id;
+      const ownerEmail = share.owner_email || "another user";
+      const hidden = isSharedOwnerHidden(ownerId);
+
+      const row = document.createElement("div");
+      row.className = "sharedListRow";
+
+      const label = document.createElement("div");
+      label.className = "sharedListLabel";
+      label.textContent = ownerEmail;
+
+      const toggle = document.createElement("label");
+      toggle.className = "sharedToggle";
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !hidden;
+      cb.addEventListener("change", () => {
+        setSharedOwnerHidden(ownerId, !cb.checked);
+      });
+
+      const knob = document.createElement("span");
+      knob.className = "sharedToggleKnob";
+
+      toggle.appendChild(cb);
+      toggle.appendChild(knob);
+
+      row.appendChild(label);
+      row.appendChild(toggle);
+      inList.appendChild(row);
+    }
+  }
+}
+
+// --- Read-only detail modal ----------------------------------------------------
+
+function openSharedEventDetails(ev, iso){
+  const modal = document.getElementById("sharedEventModal");
+  if(!modal || !ev) return;
+
+  const set = (id, text) => {
+    const el = document.getElementById(id);
+    if(el) el.textContent = text || "";
+  };
+
+  set("sharedEventModalTitle", ev.title || "(Untitled)");
+  set("sharedEventModalDate", fmtPrettyISO(ev._sharedOccursOn || iso || ev.startDate || ""));
+  set("sharedEventModalTime", formatTimeRange(ev.startTime, ev.endTime) || "All day");
+  set("sharedEventModalOwner", `Shared from ${ev._sharedOwnerEmail || "another user"}`);
+
+  const detailsEl = document.getElementById("sharedEventModalDetails");
+  if(detailsEl){
+    detailsEl.textContent = ev.details || "";
+    detailsEl.style.display = ev.details ? "" : "none";
+  }
+
+  const recurEl = document.getElementById("sharedEventModalRecurrence");
+  if(recurEl){
+    const freq = ev.recurrence?.freq || "none";
+    recurEl.textContent = freq !== "none" ? `Repeats: ${freq}` : "";
+    recurEl.style.display = freq !== "none" ? "" : "none";
+  }
+
+  const stripe = document.getElementById("sharedEventModalStripe");
+  if(stripe) stripe.style.background = safeHexColor(ev.color, DEFAULT_COLOR);
+
+  modal.classList.remove("hidden");
+}
+
+function closeSharedEventDetails(){
+  document.getElementById("sharedEventModal")?.classList.add("hidden");
+}
+
+document.getElementById("sharedEventModalCloseBtn")
+  ?.addEventListener("click", closeSharedEventDetails);
+
+document.getElementById("sharedEventModal")?.addEventListener("click", (e) => {
+  if(e.target === document.getElementById("sharedEventModal")) closeSharedEventDetails();
+});
+
+document.addEventListener("keydown", (e) => {
+  if(e.key === "Escape" && !document.getElementById("sharedEventModal")?.classList.contains("hidden")){
+    closeSharedEventDetails();
+  }
+});
+
+// --- Wiring: share form, startup, auth changes, periodic refresh ---------------
+
+document.getElementById("shareCalendarBtn")?.addEventListener("click", () => {
+  shareCalendarWithEmail(document.getElementById("shareEmailInput")?.value).catch(err => {
+    setShareStatusText("Could not share: " + (err?.message || err), true);
+  });
+});
+
+document.getElementById("shareEmailInput")?.addEventListener("keydown", (e) => {
+  if(e.key === "Enter"){
+    e.preventDefault();
+    document.getElementById("shareCalendarBtn")?.click();
+  }
+});
+
+// Refresh share lists whenever the account modal opens (additive listener,
+// runs alongside the existing openAccountModal handler).
+document.getElementById("accountBtn")?.addEventListener("click", () => {
+  if(cloudUser) refreshSharedCalendars("account modal opened").catch(console.error);
+  else renderSharedCalendarPanels();
+});
+
+// supabaseClient is created asynchronously by initCloudSync(); poll briefly
+// until it exists, then attach our own auth listener (same additive pattern
+// as Web Push section 18 — the sync layer's listener is untouched).
+(function attachSharedCalendarsAuthHook(){
+  let tries = 0;
+  const t = setInterval(() => {
+    tries++;
+    if(supabaseClient){
+      clearInterval(t);
+      try{
+        supabaseClient.auth.onAuthStateChange(() => {
+          refreshSharedCalendars("auth change").catch(console.error);
+        });
+      }catch(err){
+        console.warn("Shared calendars: could not attach auth listener:", err);
+      }
+    }else if(tries > 40){
+      clearInterval(t); // cloud sync not configured — feature stays dormant
+    }
+  }, 1500);
+})();
+
+// Startup: small delay lets initCloudSync restore the session first.
+setTimeout(() => {
+  refreshSharedCalendars("startup").catch(console.error);
+}, 3500);
+
+// Periodic refresh while signed in (shared calendars are pull-only in V1).
+setInterval(() => {
+  if(cloudUser && !document.hidden){
+    refreshSharedCalendars("periodic").catch(console.error);
+  }
+}, SHARED_CAL_REFRESH_MS);
+
+// --- Debug helpers (console) ----------------------------------------------------
+
+window.refreshSharedCalendars = function(){
+  refreshSharedCalendars("manual (console)").catch(console.error);
+  return "Refreshing shared calendars…";
+};
+
+window.debugSharedCalendars = function(){
+  const owners = Object.keys(sharedCalendarState.byOwner);
+  console.group("Shared Calendars V1 debug");
+  console.log("Signed in:", !!cloudUser, cloudUser?.email || "");
+  console.log("Last fetch:", sharedCalendarState.lastFetchAt
+    ? new Date(sharedCalendarState.lastFetchAt).toLocaleString() : "(never)");
+  console.log("Last error:", sharedCalendarState.lastError || "(none)");
+  console.log("Hidden owner ids:", getHiddenSharedOwnerIds());
+  console.table(sharedCalendarState.outgoing.map(s => ({
+    kind: "outgoing", to: s.recipient_email, status: s.status
+  })));
+  console.table(sharedCalendarState.incoming.map(s => ({
+    kind: "incoming", from: s.owner_email, status: s.status,
+    hidden: isSharedOwnerHidden(s.owner_user_id)
+  })));
+  for(const ownerId of owners){
+    const b = sharedCalendarState.byOwner[ownerId];
+    const count = Object.values(b.direct).reduce((n, l) => n + l.length, 0);
+    console.log(`Owner ${b.ownerEmail}: ${count} events (${b.masters.length} recurring)`,
+      b.error ? `ERROR: ${b.error}` : "");
+  }
+  console.groupEnd();
+  return sharedCalendarState;
 };
