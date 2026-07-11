@@ -10768,10 +10768,13 @@ function analyzePatternsRaw(){
     if (!Array.isArray(list)) continue;
 
     for (const ev of list) {
-      if (ev._isOccurrence) continue;
-      if ((ev.recurrence?.freq || "none") !== "none") continue;
+  if (ev._isOccurrence) continue;
+  if ((ev.recurrence?.freq || "none") !== "none") continue;
 
-      const dt = ymdToDate(dayKey);
+  // Smart Suggestions should learn calendar habits, not budget transactions.
+  if (ev.source === "budget" || ev.details === "Added from Budget") continue;
+
+  const dt = ymdToDate(dayKey);
       const dow = dt.getDay();
       const title = (ev.title || "").trim();
       if (!title) continue;
@@ -18665,7 +18668,7 @@ async function fetchSharedOwnerEvents(ownerId){
   return Array.isArray(data) ? data : [];
 }
 
-async function refreshSharedCalendars(reason = "manual"){
+async function refreshSharedCalendarsCore(reason = "manual"){
   if(!supabaseClient || !cloudUser){
     // Signed out: drop the overlay entirely (never persisted anywhere).
     sharedCalendarState.incoming = [];
@@ -18784,7 +18787,7 @@ async function shareCalendarWithEmail(emailRaw){
   setShareStatusText(`Shared with ${email}. They'll see your calendar as read-only.`);
   const input = document.getElementById("shareEmailInput");
   if(input) input.value = "";
-  await refreshSharedCalendars("share created");
+  await refreshSharedCalendarsCore("share created");
 }
 
 async function revokeCalendarShare(shareId){
@@ -18801,7 +18804,7 @@ async function revokeCalendarShare(shareId){
   }
 
   setShareStatusText("Share revoked.");
-  await refreshSharedCalendars("share revoked");
+  await refreshSharedCalendarsCore("share revoked");
 }
 
 // --- Account modal UI ---------------------------------------------------------
@@ -18962,7 +18965,7 @@ document.getElementById("shareEmailInput")?.addEventListener("keydown", (e) => {
 // Refresh share lists whenever the account modal opens (additive listener,
 // runs alongside the existing openAccountModal handler).
 document.getElementById("accountBtn")?.addEventListener("click", () => {
-  if(cloudUser) refreshSharedCalendars("account modal opened").catch(console.error);
+  if(cloudUser) refreshSharedCalendarsCore("account modal opened").catch(console.error);
   else renderSharedCalendarPanels();
 });
 
@@ -18977,7 +18980,7 @@ document.getElementById("accountBtn")?.addEventListener("click", () => {
       clearInterval(t);
       try{
         supabaseClient.auth.onAuthStateChange(() => {
-          refreshSharedCalendars("auth change").catch(console.error);
+          refreshSharedCalendarsCore("auth change").catch(console.error);
         });
       }catch(err){
         console.warn("Shared calendars: could not attach auth listener:", err);
@@ -18990,20 +18993,20 @@ document.getElementById("accountBtn")?.addEventListener("click", () => {
 
 // Startup: small delay lets initCloudSync restore the session first.
 setTimeout(() => {
-  refreshSharedCalendars("startup").catch(console.error);
+  refreshSharedCalendarsCore("startup").catch(console.error);
 }, 3500);
 
 // Periodic refresh while signed in (shared calendars are pull-only in V1).
 setInterval(() => {
   if(cloudUser && !document.hidden){
-    refreshSharedCalendars("periodic").catch(console.error);
+    refreshSharedCalendarsCore("periodic").catch(console.error);
   }
 }, SHARED_CAL_REFRESH_MS);
 
 // --- Debug helpers (console) ----------------------------------------------------
 
 window.refreshSharedCalendars = function(){
-  refreshSharedCalendars("manual (console)").catch(console.error);
+  refreshSharedCalendarsCore("manual (console)").catch(console.error);
   return "Refreshing shared calendars…";
 };
 
