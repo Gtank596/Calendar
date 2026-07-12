@@ -19232,6 +19232,7 @@ var sharedV2State = {
   probed: false,
   available: false,        // tables reachable?
   personalCalendarId: "",
+  personalCalendarError: "",
   calendars: [],           // calendars I own or am a member of
   roles: {},               // calendarId -> 'owner' | 'editor' | 'viewer'
   members: {},             // calendarId -> member rows (owner list UI)
@@ -19429,9 +19430,37 @@ async function probeSharedV2Available(){
   return sharedV2State.available;
 }
 
+// Calendar-creation hotfix: prefer the SECURITY DEFINER RPC (immune to RLS
+// insert-policy/trigger drift — the source of the 42501 errors). The direct
+// select/insert below remains as a fallback for databases that only ran the
+// original V2 SQL and not the hotfix.
+function isMissingRpcError(err){
+  const msg = String(err?.message || err || "").toLowerCase();
+  const code = String(err?.code || "");
+  return code === "PGRST202" || code === "42883" ||
+         msg.includes("could not find the function") ||
+         msg.includes("function") && msg.includes("does not exist") ||
+         msg.includes("schema cache");
+}
+
 async function ensurePersonalCalendar(){
   if(sharedV2State.personalCalendarId) return sharedV2State.personalCalendarId;
 
+  // Path 1: the hotfix RPC — atomic find-or-create, server-side identity.
+  try{
+    const { data, error } = await supabaseClient.rpc("ensure_personal_calendar");
+    if(error) throw error;
+    if(data){
+      sharedV2State.personalCalendarId = data;
+      sharedV2State.personalCalendarError = "";
+      return data;
+    }
+  }catch(err){
+    if(!isMissingRpcError(err)) throw err;
+    // RPC not installed — fall through to the direct table path.
+  }
+
+  // Path 2 (fallback): direct select/insert with explicit owner fields.
   const { data, error } = await supabaseClient
     .from("calendars")
     .select("id")
@@ -19442,6 +19471,7 @@ async function ensurePersonalCalendar(){
 
   if(data?.id){
     sharedV2State.personalCalendarId = data.id;
+    sharedV2State.personalCalendarError = "";
     return data.id;
   }
 
@@ -19458,6 +19488,7 @@ async function ensurePersonalCalendar(){
   if(insErr) throw insErr;
 
   sharedV2State.personalCalendarId = created.id;
+  sharedV2State.personalCalendarError = "";
   return created.id;
 }
 
@@ -19481,7 +19512,16 @@ async function refreshSharedCalendarV2Core(reason = "manual"){
     if(!sharedV2State.probed) await probeSharedV2Available();
     if(!sharedV2State.available){ renderSharedV2Panel(); return sharedV2State; }
 
-    await ensurePersonalCalendar();
+    // Non-fatal: a personal-calendar creation failure (e.g. the 42501 RLS
+    // hotfix not applied yet) must not abort the whole refresh — calendars,
+    // invites and shared events below don't depend on it. Only the V3 mirror
+    // needs it, and the mirror simply skips until this succeeds.
+    try{
+      await ensurePersonalCalendar();
+    }catch(err){
+      sharedV2State.personalCalendarError = String(err?.message || err);
+      console.warn("Shared Calendars V2: personal mirror calendar unavailable (continuing without it):", err);
+    }
 
     // Calendars I can see = mine + memberships (RLS does the filtering).
     const { data: cals, error: calErr } = await supabaseClient
@@ -19984,7 +20024,10 @@ function renderSharedV2Panel(){
   if(statusEl){
     statusEl.textContent =
       `Editing: ${sharedEditingEnabled() ? "ON" : "off"} · Realtime: ${sharedRealtimeEnabled() ? "ON" : "off"}` +
-      ` · Mirror: ${sharedV2State.mirror.lastRunAt ? "synced " + new Date(sharedV2State.mirror.lastRunAt).toLocaleTimeString() : "not yet run"}`;
+      ` · Mirror: ${sharedV2State.mirror.lastRunAt ? "synced " + new Date(sharedV2State.mirror.lastRunAt).toLocaleTimeString() : "not yet run"}` +
+      (sharedV2State.personalCalendarError && !sharedV2State.personalCalendarId
+        ? ` · ⚠ mirror calendar unavailable — run shared-calendars-v2-hotfix2.sql (${sharedV2State.personalCalendarError})`
+        : "");
   }
   if(bodyEl) bodyEl.style.display = "";
 
@@ -20215,15 +20258,28 @@ document.getElementById("sharedV2CreateBtn")?.addEventListener("click", async ()
   if(!name){ showSharedToast("Give the calendar a name."); return; }
   if(!supabaseClient || !cloudUser){ showSharedToast("Sign in first."); return; }
 
-  const { error } = await supabaseClient
-    .from("calendars")
-    .insert({
-      owner_user_id: cloudUser.id,
-      owner_email: (cloudUser.email || "").toLowerCase(),
-      name,
-      kind: "shared"
-    });
-  if(error){ showSharedToast("Create failed: " + error.message); return; }
+  // Calendar-creation hotfix: RPC first (identity from JWT, immune to RLS
+  // insert-policy drift), direct insert as fallback for pre-hotfix databases.
+  let createErr = null;
+  try{
+    const { error } = await supabaseClient.rpc("create_shared_calendar", { p_name: name });
+    if(error) throw error;
+  }catch(err){
+    if(isMissingRpcError(err)){
+      const { error } = await supabaseClient
+        .from("calendars")
+        .insert({
+          owner_user_id: cloudUser.id,
+          owner_email: (cloudUser.email || "").toLowerCase(),
+          name,
+          kind: "shared"
+        });
+      createErr = error || null;
+    }else{
+      createErr = err;
+    }
+  }
+  if(createErr){ showSharedToast("Create failed: " + (createErr.message || createErr)); return; }
   if(input) input.value = "";
   showSharedToast(`Created "${name}".`);
   await refreshSharedCalendarV2Core("calendar created");
@@ -20305,12 +20361,98 @@ window.toggleSharedRealtimeDebug = function(){
   return `SHARED_REALTIME is now ${next.toUpperCase()} on this device (localStorage override).`;
 };
 
+// Probes each V2 server dependency and reports OK / MISSING / DENIED, so a
+// broken deploy is diagnosable in one command instead of console archaeology.
+// Read-only except ensure_personal_calendar (which find-or-creates your own
+// mirror calendar — the thing that was failing).
+window.diagnoseSharedV2Setup = async function(){
+  if(!supabaseClient || !cloudUser) return "Sign in first.";
+  const rows = [];
+  const note = (piece, status, detail = "") => rows.push({ piece, status, detail });
+
+  const probeTable = async (table) => {
+    try{
+      const { error } = await supabaseClient.from(table).select("id").limit(1);
+      if(error) throw error;
+      note(`table: ${table}`, "OK");
+    }catch(err){
+      note(`table: ${table}`,
+        isMissingTableError(err) ? "MISSING" : "DENIED/ERROR",
+        String(err?.message || err));
+    }
+  };
+
+  for(const t of ["calendars", "calendar_members", "calendar_invites", "calendar_events"]){
+    await probeTable(t);
+  }
+
+  // ensure_personal_calendar: the definitive creation path.
+  try{
+    const { data, error } = await supabaseClient.rpc("ensure_personal_calendar");
+    if(error) throw error;
+    note("rpc: ensure_personal_calendar", "OK", `id ${data}`);
+    sharedV2State.personalCalendarId = data || sharedV2State.personalCalendarId;
+    sharedV2State.personalCalendarError = "";
+  }catch(err){
+    note("rpc: ensure_personal_calendar",
+      isMissingRpcError(err) ? "MISSING (run shared-calendars-v2-hotfix2.sql)" : "ERROR",
+      String(err?.message || err));
+  }
+
+  // create_shared_calendar: probe WITHOUT creating anything — an empty name
+  // must be rejected by the function itself; that rejection proves it exists.
+  try{
+    const { error } = await supabaseClient.rpc("create_shared_calendar", { p_name: "" });
+    if(error) throw error;
+    note("rpc: create_shared_calendar", "UNEXPECTED", "empty name was accepted");
+  }catch(err){
+    if(isMissingRpcError(err)){
+      note("rpc: create_shared_calendar", "MISSING (run shared-calendars-v2-hotfix2.sql)");
+    }else if(String(err?.message || "").toLowerCase().includes("name is required")){
+      note("rpc: create_shared_calendar", "OK", "rejected empty name as designed");
+    }else{
+      note("rpc: create_shared_calendar", "ERROR", String(err?.message || err));
+    }
+  }
+
+  // direct INSERT policy path (the one that was returning 42501): dry-probe by
+  // checking the personal calendar is selectable — if ensure RPC succeeded and
+  // this select works, RLS select policies + calendar_role are healthy.
+  try{
+    const { data, error } = await supabaseClient
+      .from("calendars").select("id, kind").eq("owner_user_id", cloudUser.id);
+    if(error) throw error;
+    note("select own calendars (RLS + calendar_role)", "OK", `${(data || []).length} rows`);
+  }catch(err){
+    note("select own calendars (RLS + calendar_role)", "ERROR", String(err?.message || err));
+  }
+
+  for(const fn of ["accept_calendar_invite", "decline_calendar_invite"]){
+    try{
+      const { error } = await supabaseClient.rpc(fn, { p_invite_id: "00000000-0000-0000-0000-000000000000" });
+      if(error) throw error;
+      note(`rpc: ${fn}`, "UNEXPECTED", "phantom invite accepted");
+    }catch(err){
+      note(`rpc: ${fn}`,
+        isMissingRpcError(err) ? "MISSING" : "OK",
+        isMissingRpcError(err) ? "" : "exists (rejected phantom invite as designed)");
+    }
+  }
+
+  console.table(rows);
+  const bad = rows.filter(r => r.status !== "OK");
+  return bad.length
+    ? `${bad.length} problem(s) found — see table above. Fix-all: run shared-calendars-v2-hotfix2.sql.`
+    : "All Shared Calendars V2 server pieces are healthy.";
+};
+
 window.debugSharedCalendarV2 = function(){
   console.group("Shared Calendars V2-V5 debug");
   console.log("Signed in:", !!cloudUser, cloudUser?.email || "");
   console.log("Tables available:", sharedV2State.available, "(probed:", sharedV2State.probed + ")");
   console.log("Flags — editing:", sharedEditingEnabled(), "| realtime:", sharedRealtimeEnabled());
   console.log("Personal mirror calendar:", sharedV2State.personalCalendarId || "(none)");
+  console.log("Personal calendar error:", sharedV2State.personalCalendarError || "(none)");
   console.log("Mirror:", sharedV2State.mirror);
   console.log("Realtime channel:", !!sharedV2State.realtimeChannel,
     sharedV2State.realtimeCalendarsKey || "");
