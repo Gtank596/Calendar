@@ -19456,7 +19456,7 @@ async function ensurePersonalCalendar(){
   return created.id;
 }
 
-async function refreshSharedCalendarV2(reason = "manual"){
+async function refreshSharedCalendarV2Core(reason = "manual"){
   if(!supabaseClient || !cloudUser){
     sharedV2State.calendars = [];
     sharedV2State.roles = {};
@@ -19728,7 +19728,7 @@ function showSharedToast(text){
 
 function handleSharedV2Conflict(context){
   showSharedToast(`Someone changed that ${context} first — refreshed instead of overwriting.`);
-  refreshSharedCalendarV2("conflict").catch(console.error);
+  refreshSharedCalendarV2Core("conflict").catch(console.error);
 }
 
 async function moveSharedV2EventToDate(payload, targetISO){
@@ -19753,7 +19753,7 @@ async function moveSharedV2EventToDate(payload, targetISO){
     handleSharedV2Conflict("event");
     return;
   }
-  await refreshSharedCalendarV2("event moved");
+  await refreshSharedCalendarV2Core("event moved");
 }
 
 async function deleteSharedV2Event(ev){
@@ -19776,7 +19776,7 @@ async function deleteSharedV2Event(ev){
     return;
   }
   showSharedToast("Shared event deleted.");
-  await refreshSharedCalendarV2("event deleted");
+  await refreshSharedCalendarV2Core("event deleted");
 }
 
 // ---- Shared event editor modal (separate from the personal event form) ----
@@ -19902,7 +19902,7 @@ async function saveSharedV2EventFromEditor(){
 
     closeSharedV2Editor();
     showSharedToast(ev ? "Shared event updated." : "Shared event created.");
-    await refreshSharedCalendarV2(ev ? "event edited" : "event created");
+    await refreshSharedCalendarV2Core(ev ? "event edited" : "event created");
   }catch(err){
     say("Save failed: " + (err?.message || err));
   }
@@ -19945,7 +19945,7 @@ function ensureSharedV2Realtime(){
         clearTimeout(sharedV2RealtimeRefreshTimer);
         sharedV2RealtimeRefreshTimer = setTimeout(() => {
           showSharedToast("Shared calendar updated");
-          refreshSharedCalendarV2("realtime").catch(console.error);
+          refreshSharedCalendarV2Core("realtime").catch(console.error);
         }, 400);
       }
     );
@@ -20010,7 +20010,7 @@ function renderSharedV2Panel(){
           const { error } = await supabaseClient.rpc("accept_calendar_invite", { p_invite_id: inv.id });
           if(error) throw error;
           showSharedToast("Invite accepted.");
-          await refreshSharedCalendarV2("invite accepted");
+          await refreshSharedCalendarV2Core("invite accepted");
         }catch(err){ showSharedToast("Accept failed: " + (err?.message || err)); }
       });
 
@@ -20022,7 +20022,7 @@ function renderSharedV2Panel(){
         try{
           const { error } = await supabaseClient.rpc("decline_calendar_invite", { p_invite_id: inv.id });
           if(error) throw error;
-          await refreshSharedCalendarV2("invite declined");
+          await refreshSharedCalendarV2Core("invite declined");
         }catch(err){ showSharedToast("Decline failed: " + (err?.message || err)); }
       });
 
@@ -20117,7 +20117,7 @@ function renderSharedV2Panel(){
             const { error } = await supabaseClient
               .from("calendar_members").delete().eq("id", m.id);
             if(error){ showSharedToast("Remove failed: " + error.message); return; }
-            await refreshSharedCalendarV2("member removed");
+            await refreshSharedCalendarV2Core("member removed");
           });
 
           mRow.appendChild(mLabel);
@@ -20153,7 +20153,7 @@ function renderSharedV2Panel(){
           if(error){ showSharedToast("Invite failed: " + error.message); return; }
           email.value = "";
           showSharedToast(`Invited ${addr}.`);
-          await refreshSharedCalendarV2("invite sent");
+          await refreshSharedCalendarV2Core("invite sent");
         });
 
         inviteRow.appendChild(email);
@@ -20192,7 +20192,7 @@ function renderSharedV2Panel(){
           .update({ status: "revoked" })
           .eq("id", inv.id);
         if(error){ showSharedToast("Revoke failed: " + error.message); return; }
-        await refreshSharedCalendarV2("invite revoked");
+        await refreshSharedCalendarV2Core("invite revoked");
       });
 
       row.appendChild(label);
@@ -20216,7 +20216,7 @@ document.getElementById("sharedV2CreateBtn")?.addEventListener("click", async ()
   if(error){ showSharedToast("Create failed: " + error.message); return; }
   if(input) input.value = "";
   showSharedToast(`Created "${name}".`);
-  await refreshSharedCalendarV2("calendar created");
+  await refreshSharedCalendarV2Core("calendar created");
 });
 
 document.getElementById("sharedV2EditorSaveBtn")
@@ -20229,7 +20229,7 @@ document.getElementById("sharedV2EditorModal")?.addEventListener("click", (e) =>
 
 // Refresh when the account modal opens (additive alongside V1's listener).
 document.getElementById("accountBtn")?.addEventListener("click", () => {
-  if(cloudUser) refreshSharedCalendarV2("account modal opened").catch(console.error);
+  if(cloudUser) refreshSharedCalendarV2Core("account modal opened").catch(console.error);
   else renderSharedV2Panel();
 });
 
@@ -20243,7 +20243,7 @@ document.getElementById("accountBtn")?.addEventListener("click", () => {
       clearInterval(t);
       try{
         supabaseClient.auth.onAuthStateChange(() => {
-          refreshSharedCalendarV2("auth change").catch(console.error);
+          refreshSharedCalendarV2Core("auth change").catch(console.error);
         });
       }catch(err){
         console.warn("Shared Calendars V2: could not attach auth listener:", err);
@@ -20255,19 +20255,19 @@ document.getElementById("accountBtn")?.addEventListener("click", () => {
 })();
 
 setTimeout(() => {
-  refreshSharedCalendarV2("startup").catch(console.error);
+  refreshSharedCalendarV2Core("startup").catch(console.error);
 }, 4500);
 
 setInterval(() => {
   if(cloudUser && !document.hidden){
-    refreshSharedCalendarV2("periodic").catch(console.error);
+    refreshSharedCalendarV2Core("periodic").catch(console.error);
   }
 }, SHARED_V2_REFRESH_MS);
 
 // --- Debug helpers (console) ---------------------------------------------------------
 
 window.refreshSharedCalendarV2 = function(){
-  refreshSharedCalendarV2("manual (console)").catch(console.error);
+  refreshSharedCalendarV2Core("manual (console)").catch(console.error);
   return "Refreshing shared calendars V2…";
 };
 
@@ -20350,6 +20350,32 @@ var lastAccountClearAt = 0;          // dedupes back-to-back clears (logout fire
                                      // both the button path and SIGNED_OUT)
 var lastAuthHandledUserId = null;    // dedupes SIGNED_IN / TOKEN_REFRESHED bursts
 var accountSwitchInProgress = false;
+var lastLoginPullMode = "";          // audit trail for testAccountSwitchSafety()
+
+// Set after every successful account-scoped clear. Its presence means "this
+// device's local state is a privacy-clear BASELINE, not somebody's data" —
+// so the next login must LOAD FROM CLOUD (forced full pull), never adopt the
+// baseline upward. Consumed (removed) by the first login that honors it.
+// Deliberately NOT in getAccountScopedLocalStorageKeys(): it must survive the
+// clear that creates it.
+var ACCOUNT_CLEARED_BASELINE_KEY = "myCalendarAccountClearedBaseline_v1";
+
+function hasClearedBaselineMarker(){
+  try{ return !!localStorage.getItem(ACCOUNT_CLEARED_BASELINE_KEY); }catch{ return false; }
+}
+
+function setClearedBaselineMarker(reason = ""){
+  try{
+    localStorage.setItem(ACCOUNT_CLEARED_BASELINE_KEY, JSON.stringify({
+      at: Date.now(),
+      reason: String(reason || "")
+    }));
+  }catch{}
+}
+
+function consumeClearedBaselineMarker(){
+  try{ localStorage.removeItem(ACCOUNT_CLEARED_BASELINE_KEY); }catch{}
+}
 
 function noteAuthSignedOutHandled(){
   lastAuthHandledUserId = null;
@@ -20495,6 +20521,17 @@ async function clearAccountScopedLocalState(reason = "account change"){
 
   // 7. Refresh account UI.
   updateCloudUI();
+
+  // 8. Mark this state as a privacy-clear BASELINE and re-scrub the pending
+  //    flag. The re-scrub matters: applyFullSavePayload's render block
+  //    (setActiveSection/setBudgetViewMode) can re-mark trivial slices as
+  //    cloud-pending, and at the next login that stale pending flag hijacks
+  //    pullCloudIfNewer's "safe to write" branch so events never pull. A
+  //    baseline has nothing worth pushing — pending must stay empty.
+  try{ localStorage.removeItem(CLOUD_PENDING_KEY); }catch{}
+  try{ localStorage.removeItem(CLOUD_LAST_SYNC_KEY); }catch{}
+  setClearedBaselineMarker(reason);
+
   console.info(`Account privacy: account-scoped local state cleared (${reason}).`);
   return true;
 }
@@ -20515,6 +20552,33 @@ async function handleAccountSignedOut(source = "sign out"){
   setCloudStatus("Cloud: Logged out — local account data cleared from this device view");
 }
 
+// True only when the device holds real PERSONAL data worth adopting: events,
+// people, households, or budget plans with content, and a local updatedAt
+// newer than the privacy-clear baseline stamp (updatedAt <= 1 == baseline).
+// Shared-calendar overlays (V1 sharedCalendarState / V2 sharedV2State) are
+// separate in-memory structures outside getLocalPayload() and can NEVER make
+// a device look like it has personal data.
+function localHasMeaningfulPersonalData(){
+  try{
+    const local = getLocalPayload();
+    if(Number(local?.updatedAt || 0) <= 1) return false;   // privacy-clear baseline
+
+    const eventCount = Object.values(local?.events || {}).reduce(
+      (n, l) => n + (Array.isArray(l) ? l.length : 0), 0);
+    if(eventCount > 0) return true;
+    if(Array.isArray(local?.people) && local.people.length) return true;
+    if(Array.isArray(local?.households) && local.households.length) return true;
+
+    const plans = local?.budgetPlans;
+    if(plans && typeof plans === "object" && Object.keys(plans).length) return true;
+
+    return false;
+  }catch{
+    // If local state is unreadable there is nothing safe to adopt.
+    return false;
+  }
+}
+
 async function handleAuthUserChange(user, source = "auth", opts = {}){
   if(!user) return "no-user";
   if(accountSwitchInProgress) return "busy";
@@ -20528,15 +20592,70 @@ async function handleAuthUserChange(user, source = "auth", opts = {}){
   if(owner && owner === user.id){
     await tryFlushPendingCloudSync(source);
     if(opts.pullSameOwner) await pullCloudIfNewer({ preferDelta: true });
+    lastLoginPullMode = "same-owner";
     return "same-owner";
   }
 
-  // Case 2: unclaimed device (fresh install or offline-first usage before the
-  // first ever login) — keep the existing adoption semantics: local data may
-  // sync up to this first account.
+  // Case 2: no owner claim. This splits three ways — and the order matters.
+  //
+  // Case 2a: the device state is a privacy-clear BASELINE (marker present).
+  // "After privacy clear, the next login is not adopt-local-data; it is
+  // load-this-account-from-cloud." Never flush (nothing here is this user's),
+  // never delta: forced FULL pull, immune to pending flags and to any stale
+  // last-sync stamp. Owner is claimed even when the account has no cloud rows
+  // (the empty defaults simply remain and now belong to this account).
+  if(!owner && hasClearedBaselineMarker()){
+    accountSwitchInProgress = true;
+    try{
+      // Edge guard: if someone created events OFFLINE after the clear (still
+      // signed out), those are about to be replaced by this account's cloud.
+      // The key rule says load-from-cloud wins — but snapshot first so the
+      // offline work is recoverable via the snapshot tools.
+      if(localHasMeaningfulPersonalData()){
+        await saveLocalSnapshot("before cleared-baseline force pull");
+      }
+      setCloudStatus("Cloud: Loading this account's data...");
+      await pullCloudIfNewer({ forceFull: true });
+      setLocalDataOwner(user.id);
+      consumeClearedBaselineMarker();
+      lastLoginPullMode = "cleared-baseline-full-pull";
+      updateCloudUI();
+      if(typeof refreshSharedCalendarsCore === "function") refreshSharedCalendarsCore("baseline login").catch(console.error);
+      if(typeof refreshSharedCalendarV2Core === "function") refreshSharedCalendarV2Core("baseline login").catch(console.error);
+    }finally{
+      accountSwitchInProgress = false;
+    }
+    return "cleared-baseline-full-pull";
+  }
+
+  // Case 2b: no owner, no marker, but local state looks empty/default anyway
+  // (pre-marker clears, cleared browser storage, or a fresh install). There is
+  // nothing meaningful to adopt, so prefer load-from-cloud over adoption —
+  // adoption of emptiness can only mask this account's cloud data. NOTE:
+  // shared-calendar overlays (V1/V2) live outside getLocalPayload(), so a
+  // device that only ever rendered someone else's shared events still counts
+  // as empty here.
+  if(!owner && !localHasMeaningfulPersonalData()){
+    accountSwitchInProgress = true;
+    try{
+      setCloudStatus("Cloud: Loading this account's data...");
+      await pullCloudIfNewer({ forceFull: true });
+      setLocalDataOwner(user.id);
+      lastLoginPullMode = "empty-baseline-full-pull";
+      updateCloudUI();
+    }finally{
+      accountSwitchInProgress = false;
+    }
+    return "empty-baseline-full-pull";
+  }
+
+  // Case 2c: TRUE offline-first adoption — no owner, no baseline marker, and
+  // real local data created before the first ever login. Unchanged semantics:
+  // this data may sync up to the first account that signs in.
   if(!owner){
     await tryFlushPendingCloudSync(source);
     if(opts.pullSameOwner) await pullCloudIfNewer({ preferDelta: true });
+    lastLoginPullMode = "adopted";
     return "adopted";
   }
 
@@ -20557,11 +20676,12 @@ async function handleAuthUserChange(user, source = "auth", opts = {}){
     setCloudStatus(`Cloud: Switched to ${user.email || "account"} — loaded this account's cloud data`);
 
     // Let the shared-calendar layers rebuild for the new identity.
-    if(typeof refreshSharedCalendars === "function") refreshSharedCalendars("account switch").catch(console.error);
-    if(typeof refreshSharedCalendarV2 === "function") refreshSharedCalendarV2("account switch").catch(console.error);
+    if(typeof refreshSharedCalendarsCore === "function") refreshSharedCalendarsCore("account switch").catch(console.error);
+    if(typeof refreshSharedCalendarV2Core === "function") refreshSharedCalendarV2Core("account switch").catch(console.error);
   }finally{
     accountSwitchInProgress = false;
   }
+  lastLoginPullMode = "switched";
   return "switched";
 }
 
@@ -20569,16 +20689,35 @@ async function handleAuthUserChange(user, source = "auth", opts = {}){
 
 window.debugAccountLocalOwner = function(){
   const owner = getLocalDataOwner();
+  const local = getLocalPayload();
+  const eventCount = Object.values(local?.events || {}).reduce(
+    (n, l) => n + (Array.isArray(l) ? l.length : 0), 0);
+  let baseline = null;
+  try{ baseline = JSON.parse(localStorage.getItem(ACCOUNT_CLEARED_BASELINE_KEY)); }catch{}
+
   console.group("Account privacy debug");
   console.log("Local data owner:", owner || "(unclaimed)");
   console.log("Signed-in user:", cloudUser ? `${cloudUser.email} (${cloudUser.id})` : "(none)");
   console.log("Identity mismatch:", cloudIdentityMismatch());
+  console.log("Cleared-baseline marker:", baseline
+    ? `SET (${baseline.reason || "?"} @ ${new Date(baseline.at || 0).toLocaleString()})`
+    : "(none)");
+  console.log("Local payload updatedAt:", Number(local?.updatedAt || 0),
+    Number(local?.updatedAt || 0) <= 1 ? "(privacy-clear baseline)" : "");
+  console.log("Local events count:", eventCount);
+  console.log("Meaningful personal data:", localHasMeaningfulPersonalData());
+  console.log("cloudLastSyncAt:", getCloudLastSyncAt() || "(never)",
+    getCloudLastSyncAt() ? new Date(getCloudLastSyncAt()).toLocaleString() : "");
+  console.log("Last login pull mode:", lastLoginPullMode || "(none this session)");
   console.log("Pending cloud flag:", localStorage.getItem(CLOUD_PENDING_KEY) || "(none)");
   console.log("Known records key present:", !!localStorage.getItem(CLOUD_KNOWN_RECORDS_KEY));
-  console.log("Last sync at:", getCloudLastSyncAt() || "(never)");
   console.log("Last account clear:", lastAccountClearAt ? new Date(lastAccountClearAt).toLocaleString() : "(never this session)");
   console.groupEnd();
-  return { owner, user: cloudUser?.id || null, mismatch: cloudIdentityMismatch() };
+  return {
+    owner, user: cloudUser?.id || null, mismatch: cloudIdentityMismatch(),
+    clearedBaseline: !!baseline, localUpdatedAt: Number(local?.updatedAt || 0),
+    eventCount, cloudLastSyncAt: getCloudLastSyncAt(), lastLoginPullMode
+  };
 };
 
 // Manual "make this device forget the account view" — same path logout uses.
@@ -20632,11 +20771,24 @@ window.testAccountSwitchSafety = async function(){
     check("V2 shared overlay cleared", v2Cals === 0, `${v2Cals} calendars`);
     check("mirror index cleared",
       typeof MIRROR_INDEX_KEY === "undefined" || !localStorage.getItem(MIRROR_INDEX_KEY));
+    check("cleared-baseline marker set for next login", hasClearedBaselineMarker(),
+      "next sign-in will force a full cloud pull instead of adopting");
   }else{
     check("owner matches signed-in user", getLocalDataOwner() === cloudUser.id,
       `owner=${getLocalDataOwner() || "(unclaimed)"} user=${cloudUser.id}`);
     check("no cross-account mismatch", !cloudIdentityMismatch());
+    check("cleared-baseline marker consumed", !hasClearedBaselineMarker(),
+      "a set marker after login means the force-pull path was skipped");
+    if(lastLoginPullMode){
+      const fullModes = ["cleared-baseline-full-pull", "empty-baseline-full-pull", "switched"];
+      const cameFromClear = lastLoginPullMode !== "same-owner" && lastLoginPullMode !== "adopted";
+      check("post-clear login used a forced FULL pull",
+        !cameFromClear || fullModes.includes(lastLoginPullMode),
+        `mode=${lastLoginPullMode}`);
+      report.push(`INFO — last login pull mode: ${lastLoginPullMode}`);
+    }
     report.push(`INFO — ${eventCount} events in memory, ${idbEvents} in IndexedDB, ${idbQueue} queued ops (all should belong to ${cloudUser.email}).`);
+    report.push("INFO — A→logout→B(shared overlay)→logout→A drill: after the final login, this audit should show mode cleared-baseline-full-pull and A's events in memory WITHOUT pressing Pull.");
   }
 
   console.group("testAccountSwitchSafety()");
