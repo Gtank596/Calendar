@@ -841,6 +841,46 @@
         </div>
       </div>
 
+      <!-- ===== Shared Calendars V2-V5 (invites, roles, editable calendars) ===== -->
+      <div id="sharedCalendarsV2Panel" class="sharedCalendarsPanel">
+        <div class="sharedCalendarsHeader">
+          <div class="budgetDrawerKicker">Shared calendars V2 · beta</div>
+          <h4>Invites, roles &amp; collaborative calendars</h4>
+        </div>
+
+        <div id="sharedV2StatusLine" class="hint"></div>
+
+        <div id="sharedV2Body" style="display:none">
+          <div class="sharedListTitle">Invites for you</div>
+          <div id="sharedV2IncomingInvites" class="sharedList"></div>
+
+          <div class="sharedListTitle">Your calendars</div>
+          <div id="sharedV2CalendarList" class="sharedList"></div>
+
+          <div class="sharedV2InviteRow sharedV2CreateRow">
+            <input
+              id="sharedV2NewName"
+              class="input cloudEmailInput"
+              type="text"
+              autocomplete="off"
+              placeholder="New shared calendar name"
+              aria-label="New shared calendar name"
+            />
+            <button id="sharedV2CreateBtn" class="tiny" type="button">Create</button>
+          </div>
+
+          <div class="sharedListTitle">Pending invites you sent</div>
+          <div id="sharedV2OutgoingInvites" class="sharedList"></div>
+
+          <div class="cloudSyncHint">
+            Your personal calendar stays local-first — it is mirrored one-way into
+            the shared system and can only ever be shared read-only. Editable
+            calendars are separate, and editing stays off until you enable the
+            feature flag.
+          </div>
+        </div>
+      </div>
+
   </div>
 </div>
 
@@ -859,7 +899,83 @@
     <div id="sharedEventModalTime" class="sharedEventModalMeta"></div>
     <div id="sharedEventModalRecurrence" class="sharedEventModalMeta"></div>
     <p id="sharedEventModalDetails" class="sharedEventModalDetails"></p>
+    <div id="sharedEventModalV2Meta" class="sharedEventModalMeta sharedEventModalV2Meta" style="display:none"></div>
     <div id="sharedEventModalOwner" class="sharedEventModalOwner"></div>
+
+    <!-- Shared Calendars V2-V5: shown only for editable shared calendars
+         when the SHARED_EDITING flag is on and my role allows it. -->
+    <div class="sharedEventModalActions">
+      <button id="sharedEventModalEditBtn" class="tiny" type="button" style="display:none">Edit</button>
+      <button id="sharedEventModalDeleteBtn" class="tiny sharedRevokeBtn" type="button" style="display:none">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Shared Calendars V2-V5: shared event editor (separate from the
+     personal event form — never touches personal event storage) ===== -->
+<div id="sharedV2EditorModal" class="sharedEventModal hidden">
+  <div class="sharedEventModalCard sharedV2EditorCard">
+    <div class="sharedEventModalHeader">
+      <div class="sharedEventBadge" id="sharedV2EditorHeading">Shared event</div>
+      <button id="sharedV2EditorCancelBtn" class="navBtn navBtnIcon" type="button" aria-label="Close shared event editor">×</button>
+    </div>
+
+    <div id="sharedV2EditorCalName" class="sharedEventModalMeta"></div>
+
+    <label class="sharedV2Field">
+      <span>Title</span>
+      <input id="sharedV2Title" class="input" type="text" autocomplete="off" />
+    </label>
+
+    <div class="sharedV2FieldRow">
+      <label class="sharedV2Field">
+        <span>Date</span>
+        <input id="sharedV2Date" class="input" type="date" />
+      </label>
+      <label class="sharedV2Field">
+        <span>Color</span>
+        <input id="sharedV2Color" class="input sharedV2ColorInput" type="color" />
+      </label>
+    </div>
+
+    <div class="sharedV2FieldRow">
+      <label class="sharedV2Field">
+        <span>Start</span>
+        <input id="sharedV2Start" class="input" type="time" />
+      </label>
+      <label class="sharedV2Field">
+        <span>End</span>
+        <input id="sharedV2End" class="input" type="time" />
+      </label>
+    </div>
+
+    <div class="sharedV2FieldRow">
+      <label class="sharedV2Field">
+        <span>Repeats</span>
+        <select id="sharedV2Freq" class="input">
+          <option value="none">Never</option>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+          <option value="yearly">Yearly</option>
+        </select>
+      </label>
+      <label class="sharedV2Field">
+        <span>Until</span>
+        <input id="sharedV2Until" class="input" type="date" />
+      </label>
+    </div>
+
+    <label class="sharedV2Field">
+      <span>Details</span>
+      <textarea id="sharedV2Details" class="input sharedV2Details" rows="3"></textarea>
+    </label>
+
+    <div id="sharedV2EditorStatus" class="sharedShareStatus" aria-live="polite"></div>
+
+    <div class="sharedEventModalActions">
+      <button id="sharedV2EditorSaveBtn" class="cloudPrimaryAction" type="button">Save</button>
+    </div>
   </div>
 </div>
   <div id="syncGate" class="syncGate hidden">

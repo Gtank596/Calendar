@@ -1,3 +1,9 @@
+// v22: Shared Calendars V2-V5 — no caching behavior change at all; version
+// bump only, so installed clients re-cache the app shell and pick up the new
+// script.js/index.html/style.css (V2 invites, mirror layer, flagged editing
+// and realtime). Supabase remains strictly network-only and is never cached,
+// which already covers all new V2-V5 tables, RPCs, and realtime traffic.
+//
 // v20: Web Push V2 — added the "push" event handler below (closed-app
 // reminders delivered by the send-due-reminders Supabase Edge Function).
 // Bumping the version forces a clean shell re-cache on activate so clients
@@ -9,7 +15,7 @@
 // never-cache bypass below and a notificationclick handler. Bumping the
 // version forces a clean shell re-cache on activate (local assets are
 // cache-first, so without this users could keep running the old script.js).
-const CACHE_NAME = "my-calendar-pwa-v21";
+const CACHE_NAME = "my-calendar-pwa-v22";
 
 const APP_SHELL = [
   "./",

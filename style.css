@@ -8103,3 +8103,174 @@ position: relative;
     width: 100%;
   }
 }
+
+/* ============================================================================
+   SHARED CALENDARS V2-V5 (script.js section 20) — invites, roles, editing,
+   realtime toast. ROLLBACK: delete from this banner to the end of the file.
+   ============================================================================ */
+
+/* ---- Editable shared pills get a subtle solid edge on the dashed base ---- */
+.eventPill.sharedEventPill.sharedEditablePill{
+  border-style: solid;
+  border-width: 1px;
+  cursor: grab;
+}
+
+/* ---- V2 panel bits (reuses V1 .sharedCalendarsPanel base look) ---- */
+.sharedV2CalCard{
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 12px;
+  background: rgba(255,255,255,.03);
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.sharedV2CalHead{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sharedRoleBadge{
+  flex: none;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  border-radius: 999px;
+  padding: 2px 8px;
+  border: 1px solid rgba(255,255,255,.25);
+  opacity: .85;
+}
+
+.sharedRoleBadge.role-owner{  border-color: rgba(122,90,255,.8); }
+.sharedRoleBadge.role-editor{ border-color: rgba(90,200,140,.8); }
+.sharedRoleBadge.role-viewer{ border-style: dashed; }
+
+.sharedV2InnerRow{
+  background: rgba(255,255,255,.02);
+}
+
+.sharedV2RowActions{
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.sharedV2InviteRow{
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.sharedV2InviteRow .input{
+  flex: 1;
+  min-width: 0;
+}
+
+.sharedV2RoleSelect{
+  flex: none;
+  width: auto;
+}
+
+.sharedV2CreateRow{
+  margin-top: 10px;
+}
+
+.sharedV2AddEventBtn{
+  align-self: flex-start;
+}
+
+/* ---- Shared event modal action row (V2 Edit/Delete) ---- */
+.sharedEventModalActions{
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.sharedEventModalActions:empty{
+  display: none;
+}
+
+.sharedEventModalV2Meta{
+  margin-top: 8px;
+  opacity: .7;
+}
+
+/* ---- Shared V2 event editor ---- */
+.sharedV2EditorCard{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sharedV2Field{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.sharedV2Field > span{
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  opacity: .6;
+}
+
+.sharedV2FieldRow{
+  display: flex;
+  gap: 8px;
+}
+
+.sharedV2ColorInput{
+  padding: 2px;
+  height: 34px;
+}
+
+.sharedV2Details{
+  resize: vertical;
+}
+
+/* ---- Realtime / action toast ---- */
+#sharedToast{
+  position: fixed;
+  left: 50%;
+  bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%) translateY(12px);
+  z-index: 300;
+  background: rgba(24,24,34,.97);
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 13px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease;
+  max-width: min(92vw, 420px);
+  text-align: center;
+}
+
+#sharedToast.visible{
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ---- Mobile ---- */
+@media (max-width: 760px){
+  .sharedV2FieldRow{
+    flex-direction: column;
+    gap: 8px;
+  }
+  .sharedV2InviteRow{
+    flex-wrap: wrap;
+  }
+  .sharedV2InviteRow .input{
+    flex-basis: 100%;
+  }
+}

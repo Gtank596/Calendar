@@ -11171,6 +11171,17 @@ function handleDropOnDay(targetISO, payload, opts = {}){
   if(!payload || !targetISO) return;
   const duplicate = !!opts.duplicate;
 
+  // Shared Calendars V2-V5 (section 20): drops of shared editable events are
+  // routed to the row-per-event mover and NEVER touch personal event storage,
+  // undo/redo, or cloud sync. Guarded for rollback.
+  if(payload.kind === "sharedV2Event"){
+    if(typeof moveSharedV2EventToDate === "function"){
+      clearGhost?.();
+      moveSharedV2EventToDate(payload, targetISO).catch(console.error);
+    }
+    return;
+  }
+
   const finish = () => {
     editBaseDateISO = null;
     selectedEventId = null;
@@ -12205,6 +12216,12 @@ function saveEvents(previousEventsSnapshot = null, opts = {}){
   // reconcile of the server-side reminder_schedules table. Guarded so this
   // line is inert if section 18 is ever removed (full V2 rollback).
   if(typeof queueReminderScheduleSync === "function") queueReminderScheduleSync("saveEvents");
+
+  // Shared Calendars V2-V5 (section 20): queue a debounced one-way mirror of
+  // own events into the row-per-event calendar_events table. Fire-and-forget:
+  // a mirror failure can never affect the personal save above. Guarded so
+  // this line is inert if section 20 is ever removed (full rollback).
+  if(typeof queueCalendarMirrorSync === "function") queueCalendarMirrorSync("saveEvents");
 }
 
 // ============================================================================
@@ -13249,15 +13266,39 @@ if(shouldDimPastEvents() && isPastDayISO(cellISO)){
 
       // Shared Calendars V1: shared events are read-only — distinct look,
       // no drag, no drop, no editing.
+      // Shared Calendars V2-V5: events in editable shared calendars become
+      // draggable when SHARED_EDITING is enabled AND my role allows it.
+      const sharedDraggable =
+        !!ev._shared &&
+        !ev._sharedOccurrence &&
+        typeof canEditSharedV2Event === "function" &&
+        canEditSharedV2Event(ev);
+
       if(ev._shared){
         pill.classList.add("sharedEventPill");
         pill.title = `Shared from ${ev._sharedOwnerEmail || "another user"}`;
+        if(sharedDraggable) pill.classList.add("sharedEditablePill");
       }
 
-      pill.draggable = !ev._shared;
+      pill.draggable = !ev._shared || sharedDraggable;
 
       if(ev._shared){
-        // read-only: no drag handlers at all
+        if(sharedDraggable){
+          pill.addEventListener("dragstart", (e) => {
+            const data = buildDragPayload({
+              kind: "sharedV2Event",
+              v2Id: ev._v2Id,
+              calendarId: ev._calendarId,
+              version: ev._version,
+              sourceISO: cellISO
+            });
+            e.dataTransfer.setData(DRAG_MIME, data);
+            e.dataTransfer.setData("text/plain", data);
+            e.dataTransfer.effectAllowed = "move";
+            setCustomDragImage(e, pill, false);
+          });
+        }
+        // otherwise read-only: no drag handlers at all
       } else if(ev._isOccurrence && ev._masterId){
         pill.addEventListener("dragstart", (e) => {
           const data = buildDragPayload({
@@ -18598,6 +18639,12 @@ function getSharedCalendarEventsForDay(iso){
     }
   }
 
+  // Shared Calendars V2-V5 (section 20): append the row-per-event overlay
+  // (other users' mirrors + collaborative calendars). Guarded for rollback.
+  if(typeof getSharedV2EventsForDay === "function"){
+    out.push(...getSharedV2EventsForDay(iso));
+  }
+
   return out;
 }
 
@@ -18625,6 +18672,11 @@ function getVisibleSharedEventsFlat(){
         });
       }
     }
+  }
+
+  // Shared Calendars V2-V5 (section 20): include V2 overlay events in search.
+  if(typeof getVisibleSharedV2EventsFlat === "function"){
+    out.push(...getVisibleSharedV2EventsFlat());
   }
 
   return out;
@@ -18927,6 +18979,46 @@ function openSharedEventDetails(ev, iso){
   const stripe = document.getElementById("sharedEventModalStripe");
   if(stripe) stripe.style.background = safeHexColor(ev.color, DEFAULT_COLOR);
 
+  // Shared Calendars V2-V5 (section 20): calendar/role line + role-gated
+  // action buttons. Everything stays hidden for V1 events and for viewers.
+  const v2Meta = document.getElementById("sharedEventModalV2Meta");
+  const editBtn = document.getElementById("sharedEventModalEditBtn");
+  const delBtn = document.getElementById("sharedEventModalDeleteBtn");
+  const canEdit = typeof canEditSharedV2Event === "function" && canEditSharedV2Event(ev);
+
+  if(v2Meta){
+    if(ev._sharedV2){
+      const roleNote = canEdit
+        ? ""
+        : (ev._role === "editor" || ev._role === "owner")
+          ? " · editing disabled (flag off)"
+          : " · read-only";
+      v2Meta.textContent =
+        `${ev._calendarName || "Shared calendar"} · your role: ${ev._role || "viewer"}${roleNote}`;
+      v2Meta.style.display = "";
+    } else {
+      v2Meta.style.display = "none";
+    }
+  }
+
+  if(editBtn){
+    editBtn.style.display = canEdit ? "" : "none";
+    editBtn.onclick = canEdit ? () => {
+      closeSharedEventDetails();
+      openSharedV2Editor(ev._calendarId, ev);
+    } : null;
+  }
+
+  if(delBtn){
+    delBtn.style.display = canEdit ? "" : "none";
+    delBtn.onclick = canEdit ? () => {
+      if(confirm(`Delete "${ev.title || "this event"}" from the shared calendar?`)){
+        closeSharedEventDetails();
+        deleteSharedV2Event(ev).catch(console.error);
+      }
+    } : null;
+  }
+
   modal.classList.remove("hidden");
 }
 
@@ -19033,4 +19125,1158 @@ window.debugSharedCalendars = function(){
   }
   console.groupEnd();
   return sharedCalendarState;
+};
+
+// ============================================================================
+// 20. SHARED CALENDARS V2-V5 — invites, row-per-event mirror, editing, realtime
+// ============================================================================
+// Staged foundation on the new Supabase tables (shared-calendars-v2.sql):
+//   V2  invite / accept / decline / revoke, roles (owner/editor/viewer)
+//   V3  one-way MIRROR of my own events into calendar_events (row-per-event).
+//       The existing events slice + cloud sync REMAIN the source of truth.
+//   V4  editing of events in kind='shared' calendars, behind a feature flag.
+//   V5  realtime updates + optimistic-version conflict prevention, behind a
+//       feature flag.
+//
+// Invariants (Hard Rules):
+//   * The mirror is strictly one-way (personal events -> calendar_events).
+//     Nothing here ever writes into `events`, localStorage event storage,
+//     IndexedDB, undo/redo, reminders, Web Push, budget, or cloud sync.
+//   * Mirror failures are swallowed after logging: personal saves always
+//     complete first (the hook in saveEvents is fire-and-forget).
+//   * V2 overlay events are flagged _shared (reusing every V1 read-only
+//     guard) plus _sharedV2 (+role metadata). Editing paths exist ONLY for
+//     kind='shared' calendars, only via canEditSharedV2Event().
+//   * If the V2 tables/RPCs are missing, everything here goes dormant after
+//     one console notice — V1 and the personal calendar work unchanged.
+//   * FULL ROLLBACK: delete this section, the six hooks tagged
+//     "Shared Calendars V2-V5" (saveEvents, getSharedCalendarEventsForDay,
+//     getVisibleSharedEventsFlat, month pill drag, handleDropOnDay,
+//     openSharedEventDetails), the #sharedCalendarsV2Panel /
+//     #sharedV2EditorModal HTML + the V2 buttons in #sharedEventModal, and
+//     the section-20 CSS. Optionally run the SQL rollback block.
+// ----------------------------------------------------------------------------
+
+// --- Feature flags (V4/V5) ---------------------------------------------------
+// Defaults are OFF. Flip either by editing these two lines, or per-device via
+// toggleSharedEditingDebug() / toggleSharedRealtimeDebug() in the console
+// (localStorage override wins; remove with the same toggle).
+var SHARED_EDITING_ENABLED = false;
+var SHARED_REALTIME_ENABLED = false;
+
+var SHARED_V2_EDIT_FLAG_KEY = "mySharedEditingFlag_v1";
+var SHARED_V2_RT_FLAG_KEY   = "mySharedRealtimeFlag_v1";
+var SHARED_V2_HIDDEN_KEY    = "mySharedV2HiddenCalendars_v1";
+var MIRROR_INDEX_KEY        = "myCalendarMirrorIndex_v1";
+var SHARED_V2_REFRESH_MS    = 10 * 60 * 1000;
+
+function sharedEditingEnabled(){
+  try{
+    const o = localStorage.getItem(SHARED_V2_EDIT_FLAG_KEY);
+    if(o === "on") return true;
+    if(o === "off") return false;
+  }catch{}
+  return !!SHARED_EDITING_ENABLED;
+}
+
+function sharedRealtimeEnabled(){
+  try{
+    const o = localStorage.getItem(SHARED_V2_RT_FLAG_KEY);
+    if(o === "on") return true;
+    if(o === "off") return false;
+  }catch{}
+  return !!SHARED_REALTIME_ENABLED;
+}
+
+// --- State (var + guards: initial render may run before this executes) -------
+var sharedV2State = {
+  probed: false,
+  available: false,        // tables reachable?
+  personalCalendarId: "",
+  calendars: [],           // calendars I own or am a member of
+  roles: {},               // calendarId -> 'owner' | 'editor' | 'viewer'
+  members: {},             // calendarId -> member rows (owner list UI)
+  invitesIncoming: [],
+  invitesOutgoing: [],
+  eventsByCalendar: {},    // calendarId -> { direct:{iso:[ev]}, masters:[ev] }
+  realtimeChannel: null,
+  realtimeCalendarsKey: "",
+  lastFetchAt: 0,
+  lastError: "",
+  mirror: { lastRunAt: 0, lastUpserts: 0, lastDeletes: 0, lastError: "" }
+};
+
+// --- Per-device visibility toggles for V2 calendars ---------------------------
+
+function getHiddenSharedV2CalendarIds(){
+  try{
+    const raw = JSON.parse(localStorage.getItem(SHARED_V2_HIDDEN_KEY));
+    return Array.isArray(raw) ? raw.map(String) : [];
+  }catch{
+    return [];
+  }
+}
+
+function setSharedV2CalendarHidden(calendarId, hidden){
+  const id = String(calendarId || "");
+  if(!id) return;
+  const set = new Set(getHiddenSharedV2CalendarIds());
+  if(hidden) set.add(id); else set.delete(id);
+  try{ localStorage.setItem(SHARED_V2_HIDDEN_KEY, JSON.stringify([...set])); }catch{}
+  render();
+  renderEventList();
+  renderSharedV2Panel();
+}
+
+function isSharedV2CalendarHidden(calendarId){
+  return getHiddenSharedV2CalendarIds().includes(String(calendarId || ""));
+}
+
+// --- Overlay event shape -------------------------------------------------------
+// Same read-only contract as V1 (_shared: true => every existing guard holds),
+// plus V2 metadata used by the role-gated editing paths.
+
+function sanitizeSharedV2Event(row, cal){
+  if(!row || row.deleted_at) return null;
+  const startDate = String(row.start_date || "").trim();
+  if(!startDate) return null;
+
+  const base = toEvent({
+    id: row.source_event_id || row.id,
+    title: row.title,
+    details: row.details,
+    startDate,
+    startTime: row.start_time,
+    endTime: row.end_time,
+    color: row.color,
+    categoryId: row.category_id,
+    recurrence: row.recurrence
+  });
+
+  return {
+    id: `sharedv2:${cal.id}:${row.id}`,
+    title: base.title,
+    details: base.details,
+    startDate,
+    startTime: base.startTime,
+    endTime: base.endTime,
+    time: base.time,
+    color: base.color,
+    categoryId: base.categoryId,
+    recurrence: base.recurrence,
+    source: "calendar",
+    // Hard-stripped, same as V1 — nothing budget/reminder/connection-shaped.
+    price: null,
+    reminder: null,
+    span: null,
+    connections: [],
+    connectionGroupId: "",
+    connectionGroupName: "",
+    connectionGroupIds: [],
+    _shared: true,
+    _sharedV2: true,
+    _v2Id: row.id,
+    _version: row.version || 1,
+    _calendarId: cal.id,
+    _calendarName: cal.name || "Shared calendar",
+    _role: sharedV2State.roles[cal.id] || "viewer",
+    _sharedOwnerEmail: cal.owner_email || cal.name || "shared calendar"
+  };
+}
+
+// --- Day expansion + flat search (consumed by the section-19 hooks) -----------
+
+function getSharedV2EventsForDay(iso){
+  const out = [];
+  if(!iso) return out;
+  if(!sharedV2State || !sharedV2State.eventsByCalendar) return out; // pre-init
+
+  for(const calId of Object.keys(sharedV2State.eventsByCalendar)){
+    if(isSharedV2CalendarHidden(calId)) continue;
+    const bucket = sharedV2State.eventsByCalendar[calId];
+    if(!bucket) continue;
+
+    const direct = bucket.direct[iso];
+    if(Array.isArray(direct)) out.push(...direct);
+
+    for(const m of bucket.masters){
+      if(m.startDate === iso) continue;
+      if(!recurrenceMatches(m, iso)) continue;   // existing recurrence engine
+      const ex = m.recurrence?.exceptions;
+      if(Array.isArray(ex) && ex.includes(iso)) continue;
+
+      out.push({
+        ...m,
+        id: `${m.id}@shared@${iso}`,
+        _sharedOccurrence: true,
+        _sharedOccursOn: iso
+      });
+    }
+  }
+
+  return out;
+}
+
+function getVisibleSharedV2EventsFlat(){
+  const out = [];
+  if(!sharedV2State || !sharedV2State.eventsByCalendar) return out; // pre-init
+
+  for(const calId of Object.keys(sharedV2State.eventsByCalendar)){
+    if(isSharedV2CalendarHidden(calId)) continue;
+    const bucket = sharedV2State.eventsByCalendar[calId];
+    if(!bucket) continue;
+
+    for(const iso of Object.keys(bucket.direct)){
+      for(const ev of bucket.direct[iso]){
+        out.push({
+          iso,
+          title: (ev.title || "").trim(),
+          notes: (ev.details || "").toString(),
+          time: formatTimeRange(ev.startTime, ev.endTime),
+          color: ev.color || "",
+          shared: true,
+          ownerEmail: ev._calendarName || ev._sharedOwnerEmail,
+          _sharedEvent: ev
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
+// --- Role gate (V4) -------------------------------------------------------------
+
+function canEditSharedV2Event(ev){
+  if(!ev || !ev._sharedV2) return false;
+  if(!sharedEditingEnabled()) return false;
+  const role = sharedV2State.roles[ev._calendarId];
+  return role === "owner" || role === "editor";
+}
+
+function getEditableSharedV2Calendars(){
+  if(!sharedEditingEnabled()) return [];
+  return sharedV2State.calendars.filter(c =>
+    c.kind === "shared" &&
+    (sharedV2State.roles[c.id] === "owner" || sharedV2State.roles[c.id] === "editor")
+  );
+}
+
+// --- Fetching (V2/V3/V4 read side) ------------------------------------------------
+
+function isMissingTableError(err){
+  const msg = String(err?.message || err || "").toLowerCase();
+  const code = String(err?.code || "");
+  return code === "42P01" || code === "PGRST205" || code === "PGRST202" ||
+         msg.includes("does not exist") || msg.includes("could not find the table") ||
+         msg.includes("schema cache");
+}
+
+async function probeSharedV2Available(){
+  try{
+    const { error } = await supabaseClient
+      .from("calendars").select("id").limit(1);
+    if(error) throw error;
+    sharedV2State.available = true;
+  }catch(err){
+    sharedV2State.available = false;
+    if(isMissingTableError(err)){
+      console.info("Shared Calendars V2: tables not installed — V2-V5 dormant, V1 unaffected.");
+    }else{
+      console.warn("Shared Calendars V2: availability probe failed:", err);
+    }
+  }
+  sharedV2State.probed = true;
+  return sharedV2State.available;
+}
+
+async function ensurePersonalCalendar(){
+  if(sharedV2State.personalCalendarId) return sharedV2State.personalCalendarId;
+
+  const { data, error } = await supabaseClient
+    .from("calendars")
+    .select("id")
+    .eq("owner_user_id", cloudUser.id)
+    .eq("kind", "personal")
+    .maybeSingle();
+  if(error) throw error;
+
+  if(data?.id){
+    sharedV2State.personalCalendarId = data.id;
+    return data.id;
+  }
+
+  const { data: created, error: insErr } = await supabaseClient
+    .from("calendars")
+    .insert({ name: "My calendar", kind: "personal" })
+    .select("id")
+    .single();
+  if(insErr) throw insErr;
+
+  sharedV2State.personalCalendarId = created.id;
+  return created.id;
+}
+
+async function refreshSharedCalendarV2(reason = "manual"){
+  if(!supabaseClient || !cloudUser){
+    sharedV2State.calendars = [];
+    sharedV2State.roles = {};
+    sharedV2State.members = {};
+    sharedV2State.invitesIncoming = [];
+    sharedV2State.invitesOutgoing = [];
+    sharedV2State.eventsByCalendar = {};
+    sharedV2State.personalCalendarId = "";
+    teardownSharedV2Realtime();
+    render();
+    renderEventList();
+    renderSharedV2Panel();
+    return sharedV2State;
+  }
+
+  try{
+    if(!sharedV2State.probed) await probeSharedV2Available();
+    if(!sharedV2State.available){ renderSharedV2Panel(); return sharedV2State; }
+
+    await ensurePersonalCalendar();
+
+    // Calendars I can see = mine + memberships (RLS does the filtering).
+    const { data: cals, error: calErr } = await supabaseClient
+      .from("calendars")
+      .select("id, owner_user_id, owner_email, name, kind, color, created_at")
+      .order("created_at", { ascending: true });
+    if(calErr) throw calErr;
+    sharedV2State.calendars = cals || [];
+
+    // My membership rows -> roles for calendars I don't own.
+    const { data: myMemberRows, error: memErr } = await supabaseClient
+      .from("calendar_members")
+      .select("calendar_id, role")
+      .eq("user_id", cloudUser.id);
+    if(memErr) throw memErr;
+
+    const roles = {};
+    for(const cal of sharedV2State.calendars){
+      roles[cal.id] = (cal.owner_user_id === cloudUser.id) ? "owner" : "viewer";
+    }
+    for(const m of (myMemberRows || [])){
+      if(roles[m.calendar_id] !== "owner") roles[m.calendar_id] = m.role;
+    }
+    sharedV2State.roles = roles;
+
+    // Member lists for calendars I own (for the members UI).
+    const ownedIds = sharedV2State.calendars
+      .filter(c => c.owner_user_id === cloudUser.id).map(c => c.id);
+    const members = {};
+    if(ownedIds.length){
+      const { data: memberRows, error: mlErr } = await supabaseClient
+        .from("calendar_members")
+        .select("id, calendar_id, user_id, member_email, role")
+        .in("calendar_id", ownedIds);
+      if(mlErr) throw mlErr;
+      for(const row of (memberRows || [])){
+        (members[row.calendar_id] ||= []).push(row);
+      }
+    }
+    sharedV2State.members = members;
+
+    // Invites.
+    const myEmail = (cloudUser.email || "").toLowerCase();
+    const { data: invites, error: invErr } = await supabaseClient
+      .from("calendar_invites")
+      .select("id, calendar_id, inviter_email, invitee_email, role, status, created_at")
+      .order("created_at", { ascending: false });
+    if(invErr) throw invErr;
+
+    sharedV2State.invitesIncoming = (invites || []).filter(i =>
+      i.status === "pending" && (i.invitee_email || "").toLowerCase() === myEmail);
+    sharedV2State.invitesOutgoing = (invites || []).filter(i =>
+      (i.invitee_email || "").toLowerCase() !== myEmail && i.status === "pending");
+
+    // Overlay events: every calendar I'm a member of EXCEPT my own personal
+    // mirror (those events already render from local storage — including them
+    // would show duplicates).
+    const overlayCals = sharedV2State.calendars.filter(c =>
+      !(c.kind === "personal" && c.owner_user_id === cloudUser.id));
+
+    const eventsByCalendar = {};
+    for(const cal of overlayCals){
+      const { data: rows, error: evErr } = await supabaseClient
+        .from("calendar_events")
+        .select("id, calendar_id, source_event_id, title, details, start_date, start_time, end_time, color, category_id, recurrence, version, deleted_at")
+        .eq("calendar_id", cal.id)
+        .is("deleted_at", null);
+      if(evErr){
+        console.warn("Shared Calendars V2: events fetch failed for", cal.name, evErr);
+        continue;
+      }
+      const direct = {};
+      const masters = [];
+      for(const row of (rows || [])){
+        const ev = sanitizeSharedV2Event(row, cal);
+        if(!ev) continue;
+        (direct[ev.startDate] ||= []).push(ev);
+        if((ev.recurrence?.freq || "none") !== "none") masters.push(ev);
+      }
+      eventsByCalendar[cal.id] = { direct, masters };
+    }
+    sharedV2State.eventsByCalendar = eventsByCalendar;
+    sharedV2State.lastFetchAt = Date.now();
+    sharedV2State.lastError = "";
+
+    ensureSharedV2Realtime();          // V5, no-op unless flag is on
+    queueCalendarMirrorSync(reason);   // V3, keeps the mirror fresh
+  }catch(err){
+    sharedV2State.lastError = String(err?.message || err);
+    if(isMissingTableError(err)){
+      sharedV2State.available = false;
+      console.info("Shared Calendars V2: tables not installed — dormant.");
+    }else{
+      console.warn("Shared Calendars V2: refresh failed (" + reason + "):", err);
+    }
+  }
+
+  render();
+  renderEventList();
+  renderSharedV2Panel();
+  return sharedV2State;
+}
+
+// --- V3: one-way mirror of my own events into calendar_events -------------------
+// Diff-based: a fingerprint per event id is kept in localStorage so each sync
+// only upserts changed events and soft-deletes removed ones. The personal
+// events map is READ here, never written.
+
+var mirrorSyncTimer = null;
+var mirrorSyncRunning = false;
+
+function readMirrorIndex(){
+  try{
+    const raw = JSON.parse(localStorage.getItem(MIRROR_INDEX_KEY));
+    return raw && typeof raw === "object" ? raw : {};
+  }catch{
+    return {};
+  }
+}
+
+function writeMirrorIndex(index){
+  try{ localStorage.setItem(MIRROR_INDEX_KEY, JSON.stringify(index)); }catch{}
+}
+
+// Whitelisted mirror fields ONLY. price/reminder/connections/span and every
+// non-calendar slice are excluded by construction (Hard Rules 7/8).
+function buildMirrorRowFromEvent(ev, dateISO){
+  const rec = ev.recurrence || {};
+  return {
+    source_event_id: String(ev.id),
+    title: String(ev.title || ""),
+    details: String(ev.details || ""),
+    start_date: String(ev.startDate || dateISO || ""),
+    start_time: String(ev.startTime || ""),
+    end_time: String(ev.endTime || ""),
+    color: safeHexColor(ev.color, DEFAULT_COLOR),
+    category_id: String(ev.categoryId || "other"),
+    recurrence: {
+      freq: rec.freq || "none",
+      until: rec.until || null,
+      interval: rec.interval || null,
+      days: Array.isArray(rec.days) ? rec.days : null,
+      exceptions: Array.isArray(rec.exceptions) ? rec.exceptions : null
+    }
+  };
+}
+
+function mirrorFingerprint(row){
+  return JSON.stringify([
+    row.title, row.details, row.start_date, row.start_time, row.end_time,
+    row.color, row.category_id, row.recurrence
+  ]);
+}
+
+function queueCalendarMirrorSync(reason = ""){
+  if(mirrorSyncTimer) clearTimeout(mirrorSyncTimer);
+  mirrorSyncTimer = setTimeout(() => {
+    mirrorSyncTimer = null;
+    runCalendarMirrorSync(reason).catch(err => {
+      sharedV2State.mirror.lastError = String(err?.message || err);
+      console.warn("Shared Calendars V2: mirror sync failed:", err);
+    });
+  }, 4000);
+}
+
+async function runCalendarMirrorSync(reason = "", opts = {}){
+  if(mirrorSyncRunning) return sharedV2State.mirror;
+  if(!supabaseClient || !cloudUser) return sharedV2State.mirror;
+  if(!sharedV2State.available) return sharedV2State.mirror;
+
+  mirrorSyncRunning = true;
+  try{
+    const calendarId = await ensurePersonalCalendar();
+    const index = opts.full ? {} : readMirrorIndex();
+    const nextIndex = {};
+    const upserts = [];
+
+    // Read (never write) the personal events map.
+    for(const dateISO of Object.keys(events)){
+      const list = events[dateISO];
+      if(!Array.isArray(list)) continue;
+      for(const ev of list){
+        if(!ev || !ev.id) continue;
+        if(ev.source === "budget") continue;            // Hard Rule 7
+        const row = buildMirrorRowFromEvent(ev, dateISO);
+        const fp = mirrorFingerprint(row);
+        nextIndex[row.source_event_id] = fp;
+        if(index[row.source_event_id] !== fp){
+          upserts.push({ ...row, calendar_id: calendarId, deleted_at: null });
+        }
+      }
+    }
+
+    // Events that vanished locally -> soft delete in the mirror.
+    const deletedIds = Object.keys(index).filter(id => !(id in nextIndex));
+
+    let upserted = 0, deleted = 0;
+
+    for(let i = 0; i < upserts.length; i += 100){
+      const batch = upserts.slice(i, i + 100);
+      const { error } = await supabaseClient
+        .from("calendar_events")
+        .upsert(batch, { onConflict: "calendar_id,source_event_id" });
+      if(error) throw error;
+      upserted += batch.length;
+    }
+
+    if(deletedIds.length){
+      for(let i = 0; i < deletedIds.length; i += 100){
+        const batch = deletedIds.slice(i, i + 100);
+        const { error } = await supabaseClient
+          .from("calendar_events")
+          .update({ deleted_at: new Date().toISOString() })
+          .eq("calendar_id", calendarId)
+          .in("source_event_id", batch);
+        if(error) throw error;
+        deleted += batch.length;
+      }
+    }
+
+    writeMirrorIndex(nextIndex);
+    sharedV2State.mirror.lastRunAt = Date.now();
+    sharedV2State.mirror.lastUpserts = upserted;
+    sharedV2State.mirror.lastDeletes = deleted;
+    sharedV2State.mirror.lastError = "";
+    if(upserted || deleted){
+      console.info(`Shared Calendars V2: mirror sync (${reason}) — ${upserted} upserted, ${deleted} soft-deleted.`);
+    }
+  }finally{
+    mirrorSyncRunning = false;
+  }
+  return sharedV2State.mirror;
+}
+
+// --- V4: editing shared events (kind='shared' calendars only) --------------------
+
+function showSharedToast(text){
+  let box = document.getElementById("sharedToast");
+  if(!box){
+    box = document.createElement("div");
+    box.id = "sharedToast";
+    document.body.appendChild(box);
+  }
+  box.textContent = text;
+  box.classList.add("visible");
+  clearTimeout(showSharedToast._t);
+  showSharedToast._t = setTimeout(() => box.classList.remove("visible"), 4000);
+}
+
+function handleSharedV2Conflict(context){
+  showSharedToast(`Someone changed that ${context} first — refreshed instead of overwriting.`);
+  refreshSharedCalendarV2("conflict").catch(console.error);
+}
+
+async function moveSharedV2EventToDate(payload, targetISO){
+  if(!payload?.v2Id || !targetISO) return;
+  if(!sharedEditingEnabled()){ showSharedToast("Shared editing is disabled."); return; }
+
+  // Optimistic-version guard (V5): the update matches only if nobody else
+  // bumped the version since we fetched. 0 rows updated => conflict.
+  const { data, error } = await supabaseClient
+    .from("calendar_events")
+    .update({ start_date: targetISO })
+    .eq("id", payload.v2Id)
+    .eq("version", payload.version || 1)
+    .is("deleted_at", null)
+    .select("id");
+
+  if(error){
+    showSharedToast("Move failed: " + error.message);
+    return;
+  }
+  if(!data || !data.length){
+    handleSharedV2Conflict("event");
+    return;
+  }
+  await refreshSharedCalendarV2("event moved");
+}
+
+async function deleteSharedV2Event(ev){
+  if(!canEditSharedV2Event(ev)) return;
+
+  const { data, error } = await supabaseClient
+    .from("calendar_events")
+    .update({ deleted_at: new Date().toISOString() })
+    .eq("id", ev._v2Id)
+    .eq("version", ev._version || 1)
+    .is("deleted_at", null)
+    .select("id");
+
+  if(error){
+    showSharedToast("Delete failed: " + error.message);
+    return;
+  }
+  if(!data || !data.length){
+    handleSharedV2Conflict("event");
+    return;
+  }
+  showSharedToast("Shared event deleted.");
+  await refreshSharedCalendarV2("event deleted");
+}
+
+// ---- Shared event editor modal (separate from the personal event form) ----
+
+var sharedV2EditorCtx = null; // { calendarId, ev|null }
+
+function minutesToClock12(mins){
+  if(mins === null || mins === undefined || isNaN(mins)) return "";
+  let h = Math.floor(mins / 60) % 24;
+  const m = mins % 60;
+  const suffix = h >= 12 ? "pm" : "am";
+  h = h % 12; if(h === 0) h = 12;
+  return `${h}:${String(m).padStart(2, "0")} ${suffix}`;
+}
+
+function clockTo24hInput(str){
+  const mins = parseClockToMinutes(str || "");
+  if(mins === null) return "";
+  return `${String(Math.floor(mins/60)).padStart(2,"0")}:${String(mins%60).padStart(2,"0")}`;
+}
+
+function timeInputToClock12(value){
+  if(!value) return "";
+  const [h, m] = value.split(":").map(Number);
+  if(isNaN(h) || isNaN(m)) return "";
+  return minutesToClock12(h * 60 + m);
+}
+
+function openSharedV2Editor(calendarId, ev = null){
+  const modal = document.getElementById("sharedV2EditorModal");
+  if(!modal) return;
+  if(!sharedEditingEnabled()){ showSharedToast("Shared editing is disabled."); return; }
+
+  const role = sharedV2State.roles[calendarId];
+  if(role !== "owner" && role !== "editor"){
+    showSharedToast("You are a viewer on this calendar.");
+    return;
+  }
+
+  sharedV2EditorCtx = { calendarId, ev };
+
+  const cal = sharedV2State.calendars.find(c => c.id === calendarId);
+  const set = (id, v) => { const el = document.getElementById(id); if(el) el.value = v; };
+  const setText = (id, t) => { const el = document.getElementById(id); if(el) el.textContent = t; };
+
+  setText("sharedV2EditorHeading", ev ? "Edit shared event" : "New shared event");
+  setText("sharedV2EditorCalName", cal ? `${cal.name} · your role: ${role}` : "");
+  setText("sharedV2EditorStatus", "");
+
+  set("sharedV2Title",   ev?.title || "");
+  set("sharedV2Date",    ev?.startDate || selectedDateISO || new Date().toISOString().slice(0,10));
+  set("sharedV2Start",   clockTo24hInput(ev?.startTime));
+  set("sharedV2End",     clockTo24hInput(ev?.endTime));
+  set("sharedV2Details", ev?.details || "");
+  set("sharedV2Color",   safeHexColor(ev?.color, DEFAULT_COLOR));
+  set("sharedV2Freq",    ev?.recurrence?.freq || "none");
+  set("sharedV2Until",   ev?.recurrence?.until || "");
+
+  modal.classList.remove("hidden");
+  document.getElementById("sharedV2Title")?.focus();
+}
+
+function closeSharedV2Editor(){
+  sharedV2EditorCtx = null;
+  document.getElementById("sharedV2EditorModal")?.classList.add("hidden");
+}
+
+async function saveSharedV2EventFromEditor(){
+  if(!sharedV2EditorCtx) return;
+  const { calendarId, ev } = sharedV2EditorCtx;
+
+  const val = (id) => document.getElementById(id)?.value ?? "";
+  const title = val("sharedV2Title").trim();
+  const startDate = val("sharedV2Date").trim();
+  const statusEl = document.getElementById("sharedV2EditorStatus");
+  const say = (t) => { if(statusEl) statusEl.textContent = t; };
+
+  if(!startDate){ say("A date is required."); return; }
+
+  const freq = val("sharedV2Freq") || "none";
+  const rowFields = {
+    title,
+    details: val("sharedV2Details"),
+    start_date: startDate,
+    start_time: timeInputToClock12(val("sharedV2Start")),
+    end_time: timeInputToClock12(val("sharedV2End")),
+    color: safeHexColor(val("sharedV2Color"), DEFAULT_COLOR),
+    recurrence: {
+      freq,
+      until: (freq !== "none" && val("sharedV2Until")) ? val("sharedV2Until") : null,
+      // Editing a recurring shared event keeps its existing exceptions.
+      exceptions: ev?.recurrence?.exceptions?.length ? ev.recurrence.exceptions : null
+    }
+  };
+
+  say("Saving…");
+
+  try{
+    if(ev){
+      const { data, error } = await supabaseClient
+        .from("calendar_events")
+        .update(rowFields)
+        .eq("id", ev._v2Id)
+        .eq("version", ev._version || 1)   // optimistic-version guard (V5)
+        .is("deleted_at", null)
+        .select("id");
+      if(error) throw error;
+      if(!data || !data.length){
+        closeSharedV2Editor();
+        handleSharedV2Conflict("event");
+        return;
+      }
+    }else{
+      const { error } = await supabaseClient
+        .from("calendar_events")
+        .insert({
+          ...rowFields,
+          calendar_id: calendarId,
+          source_event_id: cryptoId()
+        });
+      if(error) throw error;
+    }
+
+    closeSharedV2Editor();
+    showSharedToast(ev ? "Shared event updated." : "Shared event created.");
+    await refreshSharedCalendarV2(ev ? "event edited" : "event created");
+  }catch(err){
+    say("Save failed: " + (err?.message || err));
+  }
+}
+
+// --- V5: realtime -----------------------------------------------------------------
+
+function teardownSharedV2Realtime(){
+  if(sharedV2State.realtimeChannel){
+    try{ supabaseClient?.removeChannel(sharedV2State.realtimeChannel); }catch{}
+    sharedV2State.realtimeChannel = null;
+    sharedV2State.realtimeCalendarsKey = "";
+  }
+}
+
+var sharedV2RealtimeRefreshTimer = null;
+
+function ensureSharedV2Realtime(){
+  if(!supabaseClient || !cloudUser || !sharedV2State.available) return;
+  if(!sharedRealtimeEnabled()){ teardownSharedV2Realtime(); return; }
+
+  const calIds = sharedV2State.calendars
+    .filter(c => !(c.kind === "personal" && c.owner_user_id === cloudUser.id))
+    .map(c => c.id)
+    .sort();
+  const key = calIds.join(",");
+  if(!calIds.length){ teardownSharedV2Realtime(); return; }
+  if(key === sharedV2State.realtimeCalendarsKey && sharedV2State.realtimeChannel) return;
+
+  teardownSharedV2Realtime();
+
+  let channel = supabaseClient.channel("shared-calendars-v5");
+  for(const calId of calIds){
+    channel = channel.on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "calendar_events",
+        filter: `calendar_id=eq.${calId}` },
+      () => {
+        // Debounce bursts, then re-fetch (simple + always consistent).
+        clearTimeout(sharedV2RealtimeRefreshTimer);
+        sharedV2RealtimeRefreshTimer = setTimeout(() => {
+          showSharedToast("Shared calendar updated");
+          refreshSharedCalendarV2("realtime").catch(console.error);
+        }, 400);
+      }
+    );
+  }
+  channel.subscribe();
+  sharedV2State.realtimeChannel = channel;
+  sharedV2State.realtimeCalendarsKey = key;
+}
+
+// --- Account modal panel (V2 UI) -----------------------------------------------------
+
+function renderSharedV2Panel(){
+  const panel = document.getElementById("sharedCalendarsV2Panel");
+  if(!panel) return;
+
+  const statusEl = document.getElementById("sharedV2StatusLine");
+  const bodyEl = document.getElementById("sharedV2Body");
+
+  if(!cloudUser){
+    if(statusEl) statusEl.textContent = "Sign in to use shared calendars V2.";
+    if(bodyEl) bodyEl.style.display = "none";
+    return;
+  }
+  if(sharedV2State.probed && !sharedV2State.available){
+    if(statusEl) statusEl.textContent =
+      "V2 tables not installed (run shared-calendars-v2.sql). V1 sharing and your personal calendar are unaffected.";
+    if(bodyEl) bodyEl.style.display = "none";
+    return;
+  }
+
+  if(statusEl){
+    statusEl.textContent =
+      `Editing: ${sharedEditingEnabled() ? "ON" : "off"} · Realtime: ${sharedRealtimeEnabled() ? "ON" : "off"}` +
+      ` · Mirror: ${sharedV2State.mirror.lastRunAt ? "synced " + new Date(sharedV2State.mirror.lastRunAt).toLocaleTimeString() : "not yet run"}`;
+  }
+  if(bodyEl) bodyEl.style.display = "";
+
+  // ---- Incoming invites ----
+  const inBox = document.getElementById("sharedV2IncomingInvites");
+  if(inBox){
+    inBox.innerHTML = "";
+    if(!sharedV2State.invitesIncoming.length){
+      inBox.innerHTML = `<div class="hint">No pending invites.</div>`;
+    }
+    for(const inv of sharedV2State.invitesIncoming){
+      const row = document.createElement("div");
+      row.className = "sharedListRow";
+
+      const label = document.createElement("div");
+      label.className = "sharedListLabel";
+      label.textContent = `${inv.inviter_email} · ${inv.role}`;
+
+      const actions = document.createElement("div");
+      actions.className = "sharedV2RowActions";
+
+      const acceptBtn = document.createElement("button");
+      acceptBtn.type = "button";
+      acceptBtn.className = "tiny";
+      acceptBtn.textContent = "Accept";
+      acceptBtn.addEventListener("click", async () => {
+        try{
+          const { error } = await supabaseClient.rpc("accept_calendar_invite", { p_invite_id: inv.id });
+          if(error) throw error;
+          showSharedToast("Invite accepted.");
+          await refreshSharedCalendarV2("invite accepted");
+        }catch(err){ showSharedToast("Accept failed: " + (err?.message || err)); }
+      });
+
+      const declineBtn = document.createElement("button");
+      declineBtn.type = "button";
+      declineBtn.className = "tiny sharedRevokeBtn";
+      declineBtn.textContent = "Decline";
+      declineBtn.addEventListener("click", async () => {
+        try{
+          const { error } = await supabaseClient.rpc("decline_calendar_invite", { p_invite_id: inv.id });
+          if(error) throw error;
+          await refreshSharedCalendarV2("invite declined");
+        }catch(err){ showSharedToast("Decline failed: " + (err?.message || err)); }
+      });
+
+      actions.appendChild(acceptBtn);
+      actions.appendChild(declineBtn);
+      row.appendChild(label);
+      row.appendChild(actions);
+      inBox.appendChild(row);
+    }
+  }
+
+  // ---- My calendars (owned + memberships) ----
+  const calBox = document.getElementById("sharedV2CalendarList");
+  if(calBox){
+    calBox.innerHTML = "";
+    const visibleCals = sharedV2State.calendars;
+    if(!visibleCals.length){
+      calBox.innerHTML = `<div class="hint">No calendars yet.</div>`;
+    }
+
+    for(const cal of visibleCals){
+      const role = sharedV2State.roles[cal.id] || "viewer";
+      const isMyMirror = cal.kind === "personal" && cal.owner_user_id === cloudUser.id;
+      const card = document.createElement("div");
+      card.className = "sharedV2CalCard";
+
+      const head = document.createElement("div");
+      head.className = "sharedV2CalHead";
+
+      const name = document.createElement("div");
+      name.className = "sharedListLabel";
+      name.textContent = cal.name + (isMyMirror ? " (your mirror)" : "");
+
+      const badge = document.createElement("span");
+      badge.className = `sharedRoleBadge role-${role}`;
+      badge.textContent = cal.kind === "personal" ? `${role} · read-only mirror` : role;
+
+      head.appendChild(name);
+      head.appendChild(badge);
+      card.appendChild(head);
+
+      // Visibility toggle for calendars whose events overlay my views.
+      if(!isMyMirror){
+        const toggleRow = document.createElement("div");
+        toggleRow.className = "sharedListRow sharedV2InnerRow";
+        const tLabel = document.createElement("div");
+        tLabel.className = "sharedListLabel";
+        tLabel.textContent = "Show on my calendar";
+
+        const toggle = document.createElement("label");
+        toggle.className = "sharedToggle";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = !isSharedV2CalendarHidden(cal.id);
+        cb.addEventListener("change", () => setSharedV2CalendarHidden(cal.id, !cb.checked));
+        const knob = document.createElement("span");
+        knob.className = "sharedToggleKnob";
+        toggle.appendChild(cb); toggle.appendChild(knob);
+
+        toggleRow.appendChild(tLabel);
+        toggleRow.appendChild(toggle);
+        card.appendChild(toggleRow);
+      }
+
+      // "+ Event" for editable shared calendars (V4).
+      if(cal.kind === "shared" && (role === "owner" || role === "editor") && sharedEditingEnabled()){
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "tiny sharedV2AddEventBtn";
+        addBtn.textContent = "+ Event";
+        addBtn.addEventListener("click", () => openSharedV2Editor(cal.id, null));
+        card.appendChild(addBtn);
+      }
+
+      // Owner tools: members + invite form.
+      if(role === "owner"){
+        const memberRows = sharedV2State.members[cal.id] || [];
+        for(const m of memberRows){
+          const mRow = document.createElement("div");
+          mRow.className = "sharedListRow sharedV2InnerRow";
+
+          const mLabel = document.createElement("div");
+          mLabel.className = "sharedListLabel";
+          mLabel.textContent = `${m.member_email} · ${m.role}`;
+
+          const removeBtn = document.createElement("button");
+          removeBtn.type = "button";
+          removeBtn.className = "tiny sharedRevokeBtn";
+          removeBtn.textContent = "Remove";
+          removeBtn.addEventListener("click", async () => {
+            if(!confirm(`Remove ${m.member_email} from "${cal.name}"?`)) return;
+            const { error } = await supabaseClient
+              .from("calendar_members").delete().eq("id", m.id);
+            if(error){ showSharedToast("Remove failed: " + error.message); return; }
+            await refreshSharedCalendarV2("member removed");
+          });
+
+          mRow.appendChild(mLabel);
+          mRow.appendChild(removeBtn);
+          card.appendChild(mRow);
+        }
+
+        const inviteRow = document.createElement("div");
+        inviteRow.className = "sharedV2InviteRow";
+
+        const email = document.createElement("input");
+        email.type = "email";
+        email.className = "input cloudEmailInput";
+        email.placeholder = "invite@example.com";
+        email.setAttribute("aria-label", `Invite someone to ${cal.name}`);
+
+        const roleSel = document.createElement("select");
+        roleSel.className = "input sharedV2RoleSelect";
+        const optViewer = new Option("viewer", "viewer");
+        roleSel.appendChild(optViewer);
+        if(cal.kind === "shared") roleSel.appendChild(new Option("editor", "editor"));
+
+        const sendBtn = document.createElement("button");
+        sendBtn.type = "button";
+        sendBtn.className = "tiny";
+        sendBtn.textContent = "Invite";
+        sendBtn.addEventListener("click", async () => {
+          const addr = (email.value || "").trim().toLowerCase();
+          if(!addr || !addr.includes("@")){ showSharedToast("Enter a valid email."); return; }
+          const { error } = await supabaseClient
+            .from("calendar_invites")
+            .insert({ calendar_id: cal.id, invitee_email: addr, role: roleSel.value });
+          if(error){ showSharedToast("Invite failed: " + error.message); return; }
+          email.value = "";
+          showSharedToast(`Invited ${addr}.`);
+          await refreshSharedCalendarV2("invite sent");
+        });
+
+        inviteRow.appendChild(email);
+        inviteRow.appendChild(roleSel);
+        inviteRow.appendChild(sendBtn);
+        card.appendChild(inviteRow);
+      }
+
+      calBox.appendChild(card);
+    }
+  }
+
+  // ---- Outgoing pending invites ----
+  const outBox = document.getElementById("sharedV2OutgoingInvites");
+  if(outBox){
+    outBox.innerHTML = "";
+    if(!sharedV2State.invitesOutgoing.length){
+      outBox.innerHTML = `<div class="hint">No pending outgoing invites.</div>`;
+    }
+    for(const inv of sharedV2State.invitesOutgoing){
+      const cal = sharedV2State.calendars.find(c => c.id === inv.calendar_id);
+      const row = document.createElement("div");
+      row.className = "sharedListRow";
+
+      const label = document.createElement("div");
+      label.className = "sharedListLabel";
+      label.textContent = `${inv.invitee_email} → ${cal?.name || "calendar"} · ${inv.role}`;
+
+      const revokeBtn = document.createElement("button");
+      revokeBtn.type = "button";
+      revokeBtn.className = "tiny sharedRevokeBtn";
+      revokeBtn.textContent = "Revoke";
+      revokeBtn.addEventListener("click", async () => {
+        const { error } = await supabaseClient
+          .from("calendar_invites")
+          .update({ status: "revoked" })
+          .eq("id", inv.id);
+        if(error){ showSharedToast("Revoke failed: " + error.message); return; }
+        await refreshSharedCalendarV2("invite revoked");
+      });
+
+      row.appendChild(label);
+      row.appendChild(revokeBtn);
+      outBox.appendChild(row);
+    }
+  }
+}
+
+// --- Wiring -----------------------------------------------------------------------
+
+document.getElementById("sharedV2CreateBtn")?.addEventListener("click", async () => {
+  const input = document.getElementById("sharedV2NewName");
+  const name = (input?.value || "").trim();
+  if(!name){ showSharedToast("Give the calendar a name."); return; }
+  if(!supabaseClient || !cloudUser){ showSharedToast("Sign in first."); return; }
+
+  const { error } = await supabaseClient
+    .from("calendars")
+    .insert({ name, kind: "shared" });
+  if(error){ showSharedToast("Create failed: " + error.message); return; }
+  if(input) input.value = "";
+  showSharedToast(`Created "${name}".`);
+  await refreshSharedCalendarV2("calendar created");
+});
+
+document.getElementById("sharedV2EditorSaveBtn")
+  ?.addEventListener("click", () => { saveSharedV2EventFromEditor().catch(console.error); });
+document.getElementById("sharedV2EditorCancelBtn")
+  ?.addEventListener("click", closeSharedV2Editor);
+document.getElementById("sharedV2EditorModal")?.addEventListener("click", (e) => {
+  if(e.target === document.getElementById("sharedV2EditorModal")) closeSharedV2Editor();
+});
+
+// Refresh when the account modal opens (additive alongside V1's listener).
+document.getElementById("accountBtn")?.addEventListener("click", () => {
+  if(cloudUser) refreshSharedCalendarV2("account modal opened").catch(console.error);
+  else renderSharedV2Panel();
+});
+
+// supabaseClient is created asynchronously by initCloudSync(); poll briefly,
+// then attach an auth listener (same additive pattern as sections 18/19).
+(function attachSharedV2AuthHook(){
+  let tries = 0;
+  const t = setInterval(() => {
+    tries++;
+    if(supabaseClient){
+      clearInterval(t);
+      try{
+        supabaseClient.auth.onAuthStateChange(() => {
+          refreshSharedCalendarV2("auth change").catch(console.error);
+        });
+      }catch(err){
+        console.warn("Shared Calendars V2: could not attach auth listener:", err);
+      }
+    }else if(tries > 40){
+      clearInterval(t); // cloud sync not configured — V2-V5 stay dormant
+    }
+  }, 1500);
+})();
+
+setTimeout(() => {
+  refreshSharedCalendarV2("startup").catch(console.error);
+}, 4500);
+
+setInterval(() => {
+  if(cloudUser && !document.hidden){
+    refreshSharedCalendarV2("periodic").catch(console.error);
+  }
+}, SHARED_V2_REFRESH_MS);
+
+// --- Debug helpers (console) ---------------------------------------------------------
+
+window.refreshSharedCalendarV2 = function(){
+  refreshSharedCalendarV2("manual (console)").catch(console.error);
+  return "Refreshing shared calendars V2…";
+};
+
+window.backfillCalendarEventMirror = async function(){
+  if(!supabaseClient || !cloudUser) return "Sign in first.";
+  if(!sharedV2State.probed) await probeSharedV2Available();
+  if(!sharedV2State.available) return "V2 tables not installed.";
+  console.info("Mirror backfill: re-mirroring ALL personal events…");
+  const res = await runCalendarMirrorSync("backfill (console)", { full: true });
+  return `Backfill done — ${res.lastUpserts} upserted, ${res.lastDeletes} soft-deleted.`;
+};
+
+window.toggleSharedEditingDebug = function(){
+  const next = sharedEditingEnabled() ? "off" : "on";
+  try{ localStorage.setItem(SHARED_V2_EDIT_FLAG_KEY, next); }catch{}
+  render(); renderEventList(); renderSharedV2Panel();
+  return `SHARED_EDITING is now ${next.toUpperCase()} on this device (localStorage override).`;
+};
+
+window.toggleSharedRealtimeDebug = function(){
+  const next = sharedRealtimeEnabled() ? "off" : "on";
+  try{ localStorage.setItem(SHARED_V2_RT_FLAG_KEY, next); }catch{}
+  ensureSharedV2Realtime();
+  renderSharedV2Panel();
+  return `SHARED_REALTIME is now ${next.toUpperCase()} on this device (localStorage override).`;
+};
+
+window.debugSharedCalendarV2 = function(){
+  console.group("Shared Calendars V2-V5 debug");
+  console.log("Signed in:", !!cloudUser, cloudUser?.email || "");
+  console.log("Tables available:", sharedV2State.available, "(probed:", sharedV2State.probed + ")");
+  console.log("Flags — editing:", sharedEditingEnabled(), "| realtime:", sharedRealtimeEnabled());
+  console.log("Personal mirror calendar:", sharedV2State.personalCalendarId || "(none)");
+  console.log("Mirror:", sharedV2State.mirror);
+  console.log("Realtime channel:", !!sharedV2State.realtimeChannel,
+    sharedV2State.realtimeCalendarsKey || "");
+  console.log("Hidden calendar ids:", getHiddenSharedV2CalendarIds());
+  console.log("Last error:", sharedV2State.lastError || "(none)");
+  console.table(sharedV2State.calendars.map(c => ({
+    name: c.name, kind: c.kind, role: sharedV2State.roles[c.id],
+    mine: c.owner_user_id === cloudUser?.id,
+    events: Object.values(sharedV2State.eventsByCalendar[c.id]?.direct || {})
+      .reduce((n, l) => n + l.length, 0)
+  })));
+  console.table(sharedV2State.invitesIncoming.map(i => ({
+    kind: "incoming", from: i.inviter_email, role: i.role, status: i.status })));
+  console.table(sharedV2State.invitesOutgoing.map(i => ({
+    kind: "outgoing", to: i.invitee_email, role: i.role, status: i.status })));
+  console.groupEnd();
+  return sharedV2State;
 };
