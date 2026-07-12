@@ -803,52 +803,14 @@
             </div>
           </div>
 
-      <!-- ===== Shared Calendars V1 (read-only overlay) ===== -->
-      <div id="sharedCalendarsPanel" class="sharedCalendarsPanel">
-        <div class="sharedCalendarsHeader">
-          <div class="budgetDrawerKicker">Shared calendars</div>
-          <h4>Share &amp; view read-only calendars</h4>
-        </div>
-
-        <div id="sharedCalendarsSignedOutHint" class="hint">
-          Sign in to share your calendar or see calendars shared with you.
-        </div>
-
-        <div id="sharedCalendarsBody">
-          <div class="sharedShareRow">
-            <input
-              id="shareEmailInput"
-              class="input cloudEmailInput"
-              type="email"
-              autocomplete="off"
-              placeholder="friend@example.com"
-              aria-label="Email to share your calendar with"
-            />
-            <button id="shareCalendarBtn" class="cloudPrimaryAction" type="button">Share</button>
-          </div>
-          <div id="shareCalendarStatus" class="sharedShareStatus" aria-live="polite"></div>
-
-          <div class="sharedListTitle">People you've shared with</div>
-          <div id="outgoingSharesList" class="sharedList"></div>
-
-          <div class="sharedListTitle">Shared with you</div>
-          <div id="incomingSharesList" class="sharedList"></div>
-
-          <div class="cloudSyncHint">
-            Shared calendars are read-only. Recipients can see your event titles,
-            times and notes — never prices, budget data or reminders.
-          </div>
-        </div>
-      </div>
-
-      <!-- ===== Shared Calendars V2-V5 (invites, roles, editable calendars) ===== -->
+      <!-- ===== Shared Calendars V2-V5 (PRIMARY: invites, roles, editable, realtime) ===== -->
       <div id="sharedCalendarsV2Panel" class="sharedCalendarsPanel">
         <div class="sharedCalendarsHeader">
-          <div class="budgetDrawerKicker">Shared calendars V2 · beta</div>
-          <h4>Invites, roles &amp; collaborative calendars</h4>
+          <div class="budgetDrawerKicker">Shared calendars</div>
+          <h4>Shared calendars, roles &amp; realtime collaboration</h4>
         </div>
 
-        <div id="sharedV2StatusLine" class="hint"></div>
+        <div id="sharedV2StatusLine" class="hint sharedV2StatusLine"></div>
 
         <div id="sharedV2Body" style="display:none">
           <div class="sharedListTitle">Invites for you</div>
@@ -873,13 +835,49 @@
           <div id="sharedV2OutgoingInvites" class="sharedList"></div>
 
           <div class="cloudSyncHint">
-            Your personal calendar stays local-first — it is mirrored one-way into
-            the shared system and can only ever be shared read-only. Editable
-            calendars are separate, and editing stays off until you enable the
-            feature flag.
+            Your personal calendar stays local-first and is mirrored one-way as a
+            read-only calendar others can view. Editable collaboration happens on
+            separate shared calendars, where owners and editors can add and change
+            events in realtime; viewers see them read-only.
           </div>
         </div>
       </div>
+
+      <!-- ===== Shared Calendars V1 (LEGACY read-only overlay, collapsed) ===== -->
+      <details id="sharedCalendarsLegacyWrap" class="sharedCalendarsLegacyWrap">
+        <summary class="sharedLegacySummary">Legacy read-only sharing</summary>
+        <div id="sharedCalendarsPanel" class="sharedCalendarsPanel sharedCalendarsPanelLegacy">
+          <div id="sharedCalendarsSignedOutHint" class="hint">
+            Sign in to share your calendar or see calendars shared with you.
+          </div>
+
+          <div id="sharedCalendarsBody">
+            <div class="cloudSyncHint">
+              This is the original email-based read-only sharing. Prefer the shared
+              calendars above for roles and realtime; this remains as a fallback.
+            </div>
+
+            <div class="sharedShareRow">
+              <input
+                id="shareEmailInput"
+                class="input cloudEmailInput"
+                type="email"
+                autocomplete="off"
+                placeholder="friend@example.com"
+                aria-label="Email to share your calendar with (legacy)"
+              />
+              <button id="shareCalendarBtn" class="cloudPrimaryAction" type="button">Share</button>
+            </div>
+            <div id="shareCalendarStatus" class="sharedShareStatus" aria-live="polite"></div>
+
+            <div class="sharedListTitle">People you've shared with</div>
+            <div id="outgoingSharesList" class="sharedList"></div>
+
+            <div class="sharedListTitle">Shared with you</div>
+            <div id="incomingSharesList" class="sharedList"></div>
+          </div>
+        </div>
+      </details>
 
   </div>
 </div>

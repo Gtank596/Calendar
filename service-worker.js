@@ -15,7 +15,26 @@
 // never-cache bypass below and a notificationclick handler. Bumping the
 // version forces a clean shell re-cache on activate (local assets are
 // cache-first, so without this users could keep running the old script.js).
-const CACHE_NAME = "my-calendar-pwa-v25";
+// v24: Account Privacy follow-up — script.js-only change. After a privacy
+// clear, the next login now runs a forced FULL cloud pull (cleared-baseline
+// marker) instead of the unclaimed/adoption path, fixing the A->B->A case
+// where A's events would not render until a manual Pull. Caching behavior
+// unchanged; Supabase remains never-cached.
+//
+// v23: Account Privacy — script.js-only change (private-by-default account
+// switching: logout/switch clears the previous account's local view). Version
+// bump forces the shell re-cache so all clients get the fix promptly — this
+// matters more than usual because it is a privacy fix. Caching behavior
+// unchanged; Supabase remains never-cached.
+// v25: Shared Calendars V2 calendar-creation hotfix — script.js change only
+// (RPC-first calendar creation, non-fatal refresh when the personal mirror
+// calendar can't be created, diagnoseSharedV2Setup() helper). Pair with
+// shared-calendars-v2-hotfix2.sql on the database.
+// v26: Shared Calendars V5 rollout — script.js/index.html/style.css change.
+// V4 editing + V5 realtime are now ON by default; V2/V5 panel is primary and
+// the old V1 read-only sharing is collapsed under "Legacy read-only sharing".
+// No caching-behavior change; Supabase stays never-cached.
+const CACHE_NAME = "my-calendar-pwa-v26";
 
 const APP_SHELL = [
   "./",

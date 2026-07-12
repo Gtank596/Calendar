@@ -8274,3 +8274,104 @@ position: relative;
     flex-basis: 100%;
   }
 }
+
+/* ============================================================================
+   SHARED CALENDARS V5 ROLLOUT (script.js section 20) — primary panel polish,
+   realtime status, editable badges, legacy collapse. ROLLBACK: delete this
+   banner block.
+   ============================================================================ */
+
+/* Primary panel status line states */
+.sharedV2StatusLine.rtLive{ color: rgba(120,220,160,.95); }
+.sharedV2StatusLine.rtError{ color: #d98a5a; }
+
+/* Badge row on each calendar card */
+.sharedV2BadgeWrap{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.sharedRoleBadge.editableBadge{
+  border-color: rgba(90,200,140,.85);
+  color: rgba(150,230,185,.95);
+}
+
+.sharedRoleBadge.mirrorBadge{
+  border-style: dashed;
+  opacity: .8;
+}
+
+/* Realtime dot */
+.sharedRtDot{
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+}
+.sharedRtDot.rt-live{
+  background: #58c88c;
+  box-shadow: 0 0 0 3px rgba(88,200,140,.18);
+}
+.sharedRtDot.rt-wait{
+  background: #d9b45a;
+  animation: sharedRtPulse 1.2s ease-in-out infinite;
+}
+.sharedRtDot.rt-error{
+  background: #d05555;
+}
+@keyframes sharedRtPulse{
+  0%,100%{ opacity: 1; }
+  50%{ opacity: .35; }
+}
+
+/* Day-view editable-shared hint */
+.sharedEditHint{
+  position: absolute;
+  right: 6px;
+  bottom: 4px;
+  font-size: 9px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  opacity: .6;
+  pointer-events: none;
+}
+.eventPill.sharedEditablePill{
+  cursor: pointer;
+}
+
+/* Legacy sharing collapse */
+.sharedCalendarsLegacyWrap{
+  margin-top: 14px;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 14px;
+  background: rgba(255,255,255,.015);
+  padding: 4px 12px;
+}
+.sharedLegacySummary{
+  cursor: pointer;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  opacity: .6;
+  padding: 8px 2px;
+  list-style: none;
+  user-select: none;
+}
+.sharedLegacySummary::-webkit-details-marker{ display: none; }
+.sharedLegacySummary::before{
+  content: "▸ ";
+  display: inline-block;
+  transition: transform .15s ease;
+}
+.sharedCalendarsLegacyWrap[open] .sharedLegacySummary::before{
+  content: "▾ ";
+}
+.sharedCalendarsPanelLegacy{
+  margin-top: 0;
+  border: none;
+  background: transparent;
+  padding: 0 0 10px;
+}

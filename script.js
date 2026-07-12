@@ -15940,9 +15940,17 @@ for(const item of railLabels){
     pill.className = "eventPill";
 
     // Shared Calendars V1: read-only — no resize handles, no drag.
+    // Shared Calendars V4/V5: day-view drag/resize stays disabled even for
+    // editable shared events (safest route — see the requirements note); a
+    // tiny "tap to edit" hint tells editors to use the detail/editor modal.
+    const editableShared = ev._shared &&
+      typeof canEditSharedV2Event === "function" && canEditSharedV2Event(ev);
     if(ev._shared){
       pill.classList.add("sharedEventPill");
-      pill.title = `Shared from ${ev._sharedOwnerEmail || "another user"}`;
+      if(editableShared) pill.classList.add("sharedEditablePill");
+      pill.title = editableShared
+        ? "Shared calendar — tap to edit in the detail view"
+        : `Shared from ${ev._sharedOwnerEmail || "another user"}`;
     }
 
     const t = getSegmentDisplayTime(ev);
@@ -15957,6 +15965,7 @@ for(const item of railLabels){
         <div class="pillTime">${escapeHtml(t)}</div>
       </div>
       ${ev.details ? `<div class="pillDetails">${escapeHtml(ev.details)}</div>` : ""}
+      ${editableShared ? `<div class="sharedEditHint">tap to edit</div>` : ""}
       ${showBottomResize ? `<div class="resizeHandle resizeHandleBottom" data-edge="bottom"></div>` : ""}
     `;
 
@@ -19200,8 +19209,8 @@ window.debugSharedCalendars = function(){
 // Defaults are OFF. Flip either by editing these two lines, or per-device via
 // toggleSharedEditingDebug() / toggleSharedRealtimeDebug() in the console
 // (localStorage override wins; remove with the same toggle).
-var SHARED_EDITING_ENABLED = false;
-var SHARED_REALTIME_ENABLED = false;
+var SHARED_EDITING_ENABLED = true;   // V4 editable shared calendars — ON by default
+var SHARED_REALTIME_ENABLED = true;  // V5 realtime shared updates — ON by default
 
 var SHARED_V2_EDIT_FLAG_KEY = "mySharedEditingFlag_v1";
 var SHARED_V2_RT_FLAG_KEY   = "mySharedRealtimeFlag_v1";
@@ -19241,6 +19250,7 @@ var sharedV2State = {
   eventsByCalendar: {},    // calendarId -> { direct:{iso:[ev]}, masters:[ev] }
   realtimeChannel: null,
   realtimeCalendarsKey: "",
+  realtimeStatus: "off",   // off | connecting | connected | reconnecting | error
   lastFetchAt: 0,
   lastError: "",
   mirror: { lastRunAt: 0, lastUpserts: 0, lastDeletes: 0, lastError: "" }
@@ -19961,12 +19971,19 @@ function teardownSharedV2Realtime(){
     sharedV2State.realtimeChannel = null;
     sharedV2State.realtimeCalendarsKey = "";
   }
+  sharedV2State.realtimeStatus = "off";
 }
 
 var sharedV2RealtimeRefreshTimer = null;
 
+function setRealtimeStatus(status){
+  if(sharedV2State.realtimeStatus === status) return;
+  sharedV2State.realtimeStatus = status;
+  try{ renderSharedV2Panel(); }catch{}
+}
+
 function ensureSharedV2Realtime(){
-  if(!supabaseClient || !cloudUser || !sharedV2State.available) return;
+  if(!supabaseClient || !cloudUser || !sharedV2State.available){ return; }
   if(!sharedRealtimeEnabled()){ teardownSharedV2Realtime(); return; }
 
   const calIds = sharedV2State.calendars
@@ -19975,9 +19992,11 @@ function ensureSharedV2Realtime(){
     .sort();
   const key = calIds.join(",");
   if(!calIds.length){ teardownSharedV2Realtime(); return; }
+  // Avoid duplicate subscriptions: same calendar set + live channel = no-op.
   if(key === sharedV2State.realtimeCalendarsKey && sharedV2State.realtimeChannel) return;
 
   teardownSharedV2Realtime();
+  setRealtimeStatus("connecting");
 
   let channel = supabaseClient.channel("shared-calendars-v5");
   for(const calId of calIds){
@@ -19995,7 +20014,21 @@ function ensureSharedV2Realtime(){
       }
     );
   }
-  channel.subscribe();
+
+  // Subscribe status callback drives the visible Realtime indicator and keeps
+  // manual refresh working regardless. Supabase emits SUBSCRIBED once joined,
+  // then CHANNEL_ERROR / TIMED_OUT / CLOSED on trouble (it auto-retries).
+  channel.subscribe((status) => {
+    if(status === "SUBSCRIBED"){
+      setRealtimeStatus("connected");
+    }else if(status === "CHANNEL_ERROR" || status === "TIMED_OUT"){
+      setRealtimeStatus("reconnecting");
+    }else if(status === "CLOSED"){
+      // Only surface as an error if we didn't intentionally tear down.
+      if(sharedV2State.realtimeChannel === channel) setRealtimeStatus("error");
+    }
+  });
+
   sharedV2State.realtimeChannel = channel;
   sharedV2State.realtimeCalendarsKey = key;
 }
@@ -20022,12 +20055,30 @@ function renderSharedV2Panel(){
   }
 
   if(statusEl){
+    const editing = sharedEditingEnabled() ? "on" : "off";
+    let realtime;
+    if(!sharedRealtimeEnabled()){
+      realtime = "off";
+    }else{
+      realtime = ({
+        connected: "connected",
+        connecting: "connecting…",
+        reconnecting: "reconnecting…",
+        error: "error (manual refresh works)",
+        off: "starting…"
+      })[sharedV2State.realtimeStatus] || "on";
+    }
+    const mirror = sharedV2State.mirror.lastRunAt
+      ? "synced " + new Date(sharedV2State.mirror.lastRunAt).toLocaleTimeString()
+      : "not yet run";
+
     statusEl.textContent =
-      `Editing: ${sharedEditingEnabled() ? "ON" : "off"} · Realtime: ${sharedRealtimeEnabled() ? "ON" : "off"}` +
-      ` · Mirror: ${sharedV2State.mirror.lastRunAt ? "synced " + new Date(sharedV2State.mirror.lastRunAt).toLocaleTimeString() : "not yet run"}` +
+      `Editing: ${editing} · Realtime: ${realtime} · Mirror: ${mirror}` +
       (sharedV2State.personalCalendarError && !sharedV2State.personalCalendarId
         ? ` · ⚠ mirror calendar unavailable — run shared-calendars-v2-hotfix2.sql (${sharedV2State.personalCalendarError})`
         : "");
+    statusEl.classList.toggle("rtError", sharedRealtimeEnabled() && sharedV2State.realtimeStatus === "error");
+    statusEl.classList.toggle("rtLive", sharedRealtimeEnabled() && sharedV2State.realtimeStatus === "connected");
   }
   if(bodyEl) bodyEl.style.display = "";
 
@@ -20102,14 +20153,43 @@ function renderSharedV2Panel(){
 
       const name = document.createElement("div");
       name.className = "sharedListLabel";
-      name.textContent = cal.name + (isMyMirror ? " (your mirror)" : "");
+      name.textContent = cal.name;
+
+      const badgeWrap = document.createElement("div");
+      badgeWrap.className = "sharedV2BadgeWrap";
 
       const badge = document.createElement("span");
       badge.className = `sharedRoleBadge role-${role}`;
-      badge.textContent = cal.kind === "personal" ? `${role} · read-only mirror` : role;
+      if(cal.kind === "personal"){
+        badge.textContent = "Read-only mirror";
+        badge.classList.add("mirrorBadge");
+      }else{
+        badge.textContent = role;
+      }
+      badgeWrap.appendChild(badge);
+
+      // Editable badge when this role may edit this shared calendar.
+      const editableHere = cal.kind === "shared" &&
+        (role === "owner" || role === "editor") && sharedEditingEnabled();
+      if(editableHere){
+        const eb = document.createElement("span");
+        eb.className = "sharedRoleBadge editableBadge";
+        eb.textContent = "editable";
+        badgeWrap.appendChild(eb);
+      }
+
+      // Realtime indicator on shared (non-mirror) calendars when realtime is on.
+      if(cal.kind === "shared" && sharedRealtimeEnabled()){
+        const rt = document.createElement("span");
+        const st = sharedV2State.realtimeStatus;
+        rt.className = "sharedRtDot rt-" + (st === "connected" ? "live"
+          : st === "error" ? "error" : "wait");
+        rt.title = "Realtime: " + st;
+        badgeWrap.appendChild(rt);
+      }
 
       head.appendChild(name);
-      head.appendChild(badge);
+      head.appendChild(badgeWrap);
       card.appendChild(head);
 
       // Visibility toggle for calendars whose events overlay my views.
