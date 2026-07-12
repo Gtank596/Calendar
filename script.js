@@ -3743,19 +3743,26 @@ async function initCloudSync(){
   const { data } = await supabaseClient.auth.getSession();
   cloudUser = data?.session?.user || null;
 
-  supabaseClient.auth.onAuthStateChange((_event, session) => {
+  supabaseClient.auth.onAuthStateChange((event, session) => {
     cloudUser = session?.user || null;
     updateCloudUI();
 
-    if(cloudUser){
-      tryFlushPendingCloudSync("auth change").catch(console.error);
+    // ACCOUNT PRIVACY (section 21): all sign-in/out transitions flow through
+    // one handler. It guarantees that (a) sign-out clears the account's data
+    // from view, and (b) User A's pending local ops are never flushed under
+    // User B — the old unconditional tryFlushPendingCloudSync was the replay
+    // bug. TOKEN_REFRESHED etc. are deduped inside the handler.
+    if(event === "SIGNED_OUT"){
+      handleAccountSignedOut("auth listener").catch(console.error);
+    }else if(cloudUser){
+      handleAuthUserChange(cloudUser, "auth change").catch(console.error);
     }
   });
 
   updateCloudUI();
 
   if(cloudUser){
-    await tryFlushPendingCloudSync("startup");
+    await handleAuthUserChange(cloudUser, "startup");
   }
 }
 
@@ -3829,7 +3836,20 @@ async function loginCloud(){
     cloudUser = data?.user || null;
 
     if(cloudUser){
-      await pullCloudIfNewer({ preferDelta:true });
+      // ACCOUNT PRIVACY (section 21): never start with a delta pull here.
+      // handleAuthUserChange decides between three cases:
+      //   same owner      -> normal local-first flush + delta pull
+      //   unclaimed device-> existing adoption behavior (offline-first signup)
+      //   DIFFERENT owner -> snapshot, clear account-scoped state, then a
+      //                      forced FULL pull of this account's cloud data
+      //                      (stale local data can never block or leak).
+      const status = await handleAuthUserChange(cloudUser, "login", { pullSameOwner: true });
+
+      // If the auth listener handled this sign-in first (deduped), it did not
+      // delta-pull. Do it here — but never during/after an account switch.
+      if(status === "deduped" && !accountSwitchInProgress && !cloudIdentityMismatch()){
+        await pullCloudIfNewer({ preferDelta: true });
+      }
     }
   }finally{
     setCloudBusy(false);
@@ -3843,9 +3863,28 @@ async function logoutCloud(){
   setCloudStatus("Cloud: Logging out...");
 
   try{
+    // ACCOUNT PRIVACY (section 21): logout must leave nothing of this account
+    // visible on the device. Order matters:
+    //   1. While still signed in: stop Web Push for this device (needs auth
+    //      for the server-side disable; safe no-op if push was never enabled).
+    //   2. Snapshot + clear all account-scoped local state (snapshot happens
+    //      inside clearAccountScopedLocalState, before anything is removed).
+    //   3. Only then sign out.
+    if(typeof getPushIntent === "function" && getPushIntent() &&
+       typeof disablePush === "function"){
+      try{ await disablePush(); }
+      catch(err){ console.warn("Logout: push disable failed (continuing):", err); }
+    }
+
+    if(typeof clearAccountScopedLocalState === "function"){
+      await clearAccountScopedLocalState("logout");
+    }
+
     await supabaseClient.auth.signOut();
     cloudUser = null;
-    setCloudStatus("Cloud: Logged out");
+    if(typeof noteAuthSignedOutHandled === "function") noteAuthSignedOutHandled();
+    updateCloudUI();
+    setCloudStatus("Cloud: Logged out — local account data cleared from this device view");
   }finally{
     setCloudBusy(false);
   }
@@ -20279,4 +20318,329 @@ window.debugSharedCalendarV2 = function(){
     kind: "outgoing", to: i.invitee_email, role: i.role, status: i.status })));
   console.groupEnd();
   return sharedV2State;
+};
+
+// ============================================================================
+// 21. ACCOUNT PRIVACY — private-by-default account switching
+// ============================================================================
+// Fixes the shared-device privacy bug: logging out (or logging into a
+// different account) previously left the prior user's events, budget data,
+// receipt memory and shared-calendar state fully visible, and could replay
+// User A's queued sync ops under User B. The old owner guard
+// (cloudIdentityMismatch/warnCloudIdentityMismatch) only PAUSED sync; it never
+// hid the data. From now on:
+//
+//   * logout            -> snapshot, then clear every account-scoped piece of
+//                          local state (view shows an empty default calendar)
+//   * login, same user  -> unchanged local-first behavior (flush + delta pull)
+//   * login, unclaimed  -> unchanged adoption behavior (offline-first signup)
+//   * login, DIFFERENT  -> snapshot, clear, forced FULL pull of the new
+//                          account's cloud data; empty defaults if none.
+//                          Owner is claimed only AFTER the pull completes.
+//
+// Nothing in the cloud is ever deleted. Rollback safety: a full local
+// snapshot ("before account scoped clear: <reason>") is written to the
+// separate snapshot DB (myCalendarBackups_v1) before anything is removed —
+// restorable via the existing snapshot tools, but never displayed to the next
+// user. The mismatch guard functions above are kept as a defense-in-depth
+// backstop.
+// ----------------------------------------------------------------------------
+
+var lastAccountClearAt = 0;          // dedupes back-to-back clears (logout fires
+                                     // both the button path and SIGNED_OUT)
+var lastAuthHandledUserId = null;    // dedupes SIGNED_IN / TOKEN_REFRESHED bursts
+var accountSwitchInProgress = false;
+
+function noteAuthSignedOutHandled(){
+  lastAuthHandledUserId = null;
+}
+
+// Every localStorage key that belongs to the ACCOUNT rather than the device.
+// (Snapshot DB, SW cache, theme-free device prefs are intentionally not here.)
+function getAccountScopedLocalStorageKeys(){
+  const keys = [
+    STORAGE_KEY,                    // legacy combined blob
+    APP_META_STORAGE_KEY,
+    CLOUD_PENDING_KEY,
+    CLOUD_KNOWN_RECORDS_KEY,
+    CLOUD_LAST_SYNC_KEY,
+    LOCAL_DATA_OWNER_KEY,
+    "myCalendar_activeSection",
+    "myCalendar_budgetViewMode"
+  ];
+
+  for(const slice of DATA_SLICE_NAMES){
+    const k = getSliceStorageKey(slice);
+    if(k) keys.push(k);
+  }
+
+  // Feature-layer keys (guarded: constants exist only while their sections do).
+  if(typeof PUSH_SYNC_FINGERPRINT_KEY !== "undefined") keys.push(PUSH_SYNC_FINGERPRINT_KEY);
+  if(typeof SHARED_CAL_HIDDEN_KEY !== "undefined") keys.push(SHARED_CAL_HIDDEN_KEY);       // V1 toggles
+  if(typeof SHARED_V2_HIDDEN_KEY !== "undefined") keys.push(SHARED_V2_HIDDEN_KEY);         // V2 toggles
+  if(typeof MIRROR_INDEX_KEY !== "undefined") keys.push(MIRROR_INDEX_KEY);                 // V3 mirror index
+
+  return keys;
+}
+
+// Wipe every store in the offline DB. Critical: month/week/day renders hydrate
+// events straight from IndexedDB (requestIndexedDbEventRangeHydration), so
+// leaving these stores populated would resurrect the previous user's events
+// on the very next render. The syncQueue store is the other half of the
+// replay bug: queued record ops from User A must never survive into B's
+// session.
+async function clearCalendarIndexedDbAllStores(){
+  try{
+    const db = await openCalendarIndexedDb();
+    if(!db) return false;
+
+    const names = CALENDAR_IDB_STORES.filter(n => db.objectStoreNames.contains(n));
+    if(!names.length) return true;
+
+    const tx = db.transaction(names, "readwrite");
+    for(const name of names){
+      tx.objectStore(name).clear();
+    }
+    await idbTransactionDone(tx);
+
+    clearIndexedDbEventRangeCache?.("account scoped clear");
+    clearIndexedDbBudgetTransactionRangeCache?.("account scoped clear");
+    return true;
+  }catch(err){
+    console.warn("Account privacy: IndexedDB clear failed (continuing):", err);
+    return false;
+  }
+}
+
+// The post-clear baseline: explicit empty defaults for every slice. Built
+// AFTER storage is cleared, so the load*() helpers return their built-in
+// defaults rather than anything user-specific. updatedAt is 1 (truthy but
+// ancient) so ANY cloud data wins the next pull comparison.
+function buildDefaultLocalPayload(){
+  return {
+    version: SPLIT_STORAGE_VERSION,
+    updatedAt: 1,
+    sliceUpdatedAt: {},
+    events: {},
+    settings: loadSettings(),
+    budgetPlans: loadBudgetPlans(),
+    budgetCategories: loadBudgetCategories(),
+    merchantAliases: {},
+    receiptItemCategoryMemory: {},
+    receiptTrainingRecords: [],
+    selectedBudgetPanes: loadBudgetPaneSelection(),
+    activeSection: "calendar",
+    budgetViewMode: "month",
+    people: [],
+    households: []
+  };
+}
+
+async function clearAccountScopedLocalState(reason = "account change"){
+  // Dedupe: logout runs this directly AND triggers SIGNED_OUT moments later.
+  // A second clear within 15s would only burn snapshot slots on empty state.
+  if(Date.now() - lastAccountClearAt < 15000) return false;
+  lastAccountClearAt = Date.now();
+
+  // 1. Rollback safety net FIRST — full local snapshot before anything moves.
+  await saveLocalSnapshot("before account scoped clear: " + reason);
+
+  // 2. Stop anything in flight that could write stale data afterwards.
+  try{ if(typeof mirrorSyncTimer !== "undefined" && mirrorSyncTimer){ clearTimeout(mirrorSyncTimer); mirrorSyncTimer = null; } }catch{}
+  try{ if(typeof teardownSharedV2Realtime === "function") teardownSharedV2Realtime(); }catch{}
+
+  // 3. Remove account-scoped localStorage (includes pending queue, known
+  //    records, last-sync stamp, owner claim, slice data, mirror index).
+  for(const key of getAccountScopedLocalStorageKeys()){
+    try{ localStorage.removeItem(key); }catch{}
+  }
+
+  // 4. Wipe the offline IndexedDB (events, budget, receipts, people, meta,
+  //    and — for the replay bug — the syncQueue of record ops).
+  await clearCalendarIndexedDbAllStores();
+
+  // 5. Reset in-memory state to explicit defaults and re-render everything.
+  //    applyFullSavePayload persists the defaults, rebuilds derived data and
+  //    calls render()/renderEventList()/renderBudgetPage()/etc. It does NOT
+  //    mark anything cloud-pending, so an account clear can never queue an
+  //    upload of the empty state.
+  selectedEventId = null;
+  editBaseDateISO = null;
+  undoStack = [];
+  redoStack = [];
+  applyFullSavePayload(buildDefaultLocalPayload());
+  updateHistoryUI();
+
+  // 6. Clear the shared-calendar overlays (V1 + V2-V5) held in memory.
+  try{
+    if(typeof sharedCalendarState !== "undefined" && sharedCalendarState){
+      sharedCalendarState.incoming = [];
+      sharedCalendarState.outgoing = [];
+      sharedCalendarState.byOwner = {};
+    }
+    if(typeof sharedV2State !== "undefined" && sharedV2State){
+      sharedV2State.calendars = [];
+      sharedV2State.roles = {};
+      sharedV2State.members = {};
+      sharedV2State.invitesIncoming = [];
+      sharedV2State.invitesOutgoing = [];
+      sharedV2State.eventsByCalendar = {};
+      sharedV2State.personalCalendarId = "";
+    }
+    if(typeof renderSharedCalendarPanels === "function") renderSharedCalendarPanels();
+    if(typeof renderSharedV2Panel === "function") renderSharedV2Panel();
+  }catch(err){
+    console.warn("Account privacy: shared-state reset issue (continuing):", err);
+  }
+
+  // 7. Refresh account UI.
+  updateCloudUI();
+  console.info(`Account privacy: account-scoped local state cleared (${reason}).`);
+  return true;
+}
+
+// --- Auth transition handling -------------------------------------------------
+
+async function handleAccountSignedOut(source = "sign out"){
+  noteAuthSignedOutHandled();
+  // Only clear if there is anything account-scoped to clear: a device that was
+  // never claimed (pure offline use, never signed in) is left alone.
+  if(!getLocalDataOwner() && Date.now() - lastAccountClearAt < 15000) return;
+  if(!getLocalDataOwner() && !localStorage.getItem(CLOUD_PENDING_KEY)) {
+    // Unclaimed device with no queued cloud ops: nothing account-scoped here.
+    updateCloudUI();
+    return;
+  }
+  await clearAccountScopedLocalState(source);
+  setCloudStatus("Cloud: Logged out — local account data cleared from this device view");
+}
+
+async function handleAuthUserChange(user, source = "auth", opts = {}){
+  if(!user) return "no-user";
+  if(accountSwitchInProgress) return "busy";
+  if(lastAuthHandledUserId === user.id) return "deduped";   // login + listener + token refresh
+  lastAuthHandledUserId = user.id;
+
+  const owner = getLocalDataOwner();
+
+  // Case 1: same account as the data on this device — unchanged local-first
+  // behavior: flush anything pending, optionally delta-pull (login does).
+  if(owner && owner === user.id){
+    await tryFlushPendingCloudSync(source);
+    if(opts.pullSameOwner) await pullCloudIfNewer({ preferDelta: true });
+    return "same-owner";
+  }
+
+  // Case 2: unclaimed device (fresh install or offline-first usage before the
+  // first ever login) — keep the existing adoption semantics: local data may
+  // sync up to this first account.
+  if(!owner){
+    await tryFlushPendingCloudSync(source);
+    if(opts.pullSameOwner) await pullCloudIfNewer({ preferDelta: true });
+    return "adopted";
+  }
+
+  // Case 3: DIFFERENT account — the privacy path. Never flush, never delta.
+  accountSwitchInProgress = true;
+  try{
+    setCloudStatus("Cloud: Switching accounts — clearing the previous account's data from this device...");
+    await clearAccountScopedLocalState(`account switch via ${source}`);
+
+    // Forced FULL pull: local is now empty defaults with updatedAt=1, so every
+    // cloud slice wins. If this account has no cloud data, readCloudState
+    // returns null and the empty defaults simply remain — spec'd behavior.
+    await pullCloudIfNewer({ forceFull: true });
+
+    // Claim ownership only AFTER the pull (or empty init) completed.
+    setLocalDataOwner(user.id);
+    updateCloudUI();
+    setCloudStatus(`Cloud: Switched to ${user.email || "account"} — loaded this account's cloud data`);
+
+    // Let the shared-calendar layers rebuild for the new identity.
+    if(typeof refreshSharedCalendars === "function") refreshSharedCalendars("account switch").catch(console.error);
+    if(typeof refreshSharedCalendarV2 === "function") refreshSharedCalendarV2("account switch").catch(console.error);
+  }finally{
+    accountSwitchInProgress = false;
+  }
+  return "switched";
+}
+
+// --- Debug helpers ---------------------------------------------------------------
+
+window.debugAccountLocalOwner = function(){
+  const owner = getLocalDataOwner();
+  console.group("Account privacy debug");
+  console.log("Local data owner:", owner || "(unclaimed)");
+  console.log("Signed-in user:", cloudUser ? `${cloudUser.email} (${cloudUser.id})` : "(none)");
+  console.log("Identity mismatch:", cloudIdentityMismatch());
+  console.log("Pending cloud flag:", localStorage.getItem(CLOUD_PENDING_KEY) || "(none)");
+  console.log("Known records key present:", !!localStorage.getItem(CLOUD_KNOWN_RECORDS_KEY));
+  console.log("Last sync at:", getCloudLastSyncAt() || "(never)");
+  console.log("Last account clear:", lastAccountClearAt ? new Date(lastAccountClearAt).toLocaleString() : "(never this session)");
+  console.groupEnd();
+  return { owner, user: cloudUser?.id || null, mismatch: cloudIdentityMismatch() };
+};
+
+// Manual "make this device forget the account view" — same path logout uses.
+window.clearSignedOutLocalView = async function(){
+  await clearAccountScopedLocalState("manual clearSignedOutLocalView()");
+  return "Account-scoped local state cleared (snapshot saved first).";
+};
+
+// Non-destructive audit: reports anything account-scoped still visible or
+// replayable. All checks should PASS right after a logout/switch.
+window.testAccountSwitchSafety = async function(){
+  const report = [];
+  const check = (label, ok, detail = "") =>
+    report.push(`${ok ? "PASS" : "FAIL"} — ${label}${detail ? ` (${detail})` : ""}`);
+
+  const eventCount = Object.values(events || {}).reduce(
+    (n, l) => n + (Array.isArray(l) ? l.length : 0), 0);
+
+  let idbEvents = -1, idbQueue = -1;
+  try{
+    const db = await openCalendarIndexedDb();
+    if(db){
+      const names = ["events", "syncQueue"].filter(n => db.objectStoreNames.contains(n));
+      const tx = db.transaction(names, "readonly");
+      const counts = await Promise.all(names.map(n =>
+        new Promise(res => {
+          const req = tx.objectStore(n).count();
+          req.onsuccess = () => res(req.result);
+          req.onerror = () => res(-1);
+        })
+      ));
+      idbEvents = counts[names.indexOf("events")] ?? -1;
+      idbQueue = counts[names.indexOf("syncQueue")] ?? -1;
+    }
+  }catch{}
+
+  const signedOut = !cloudUser;
+  if(signedOut){
+    check("in-memory events cleared", eventCount === 0, `${eventCount} events`);
+    check("IndexedDB events cleared", idbEvents === 0, `${idbEvents} rows`);
+    check("sync queue empty (no replay)", idbQueue === 0, `${idbQueue} ops`);
+    check("pending cloud flag cleared", !localStorage.getItem(CLOUD_PENDING_KEY));
+    check("known-records map cleared", !localStorage.getItem(CLOUD_KNOWN_RECORDS_KEY));
+    check("owner claim cleared", !getLocalDataOwner(), getLocalDataOwner());
+    check("events slice storage cleared", (localStorage.getItem(EVENTS_STORAGE_KEY) || "{}").length <= 2);
+    const v1Owners = (typeof sharedCalendarState !== "undefined")
+      ? Object.keys(sharedCalendarState.byOwner || {}).length : 0;
+    check("V1 shared overlay cleared", v1Owners === 0, `${v1Owners} owners`);
+    const v2Cals = (typeof sharedV2State !== "undefined")
+      ? Object.keys(sharedV2State.eventsByCalendar || {}).length : 0;
+    check("V2 shared overlay cleared", v2Cals === 0, `${v2Cals} calendars`);
+    check("mirror index cleared",
+      typeof MIRROR_INDEX_KEY === "undefined" || !localStorage.getItem(MIRROR_INDEX_KEY));
+  }else{
+    check("owner matches signed-in user", getLocalDataOwner() === cloudUser.id,
+      `owner=${getLocalDataOwner() || "(unclaimed)"} user=${cloudUser.id}`);
+    check("no cross-account mismatch", !cloudIdentityMismatch());
+    report.push(`INFO — ${eventCount} events in memory, ${idbEvents} in IndexedDB, ${idbQueue} queued ops (all should belong to ${cloudUser.email}).`);
+  }
+
+  console.group("testAccountSwitchSafety()");
+  for(const line of report) console.log(line);
+  console.groupEnd();
+  return report;
 };

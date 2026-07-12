@@ -15,7 +15,7 @@
 // never-cache bypass below and a notificationclick handler. Bumping the
 // version forces a clean shell re-cache on activate (local assets are
 // cache-first, so without this users could keep running the old script.js).
-const CACHE_NAME = "my-calendar-pwa-v22";
+const CACHE_NAME = "my-calendar-pwa-v23";
 
 const APP_SHELL = [
   "./",
