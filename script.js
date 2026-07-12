@@ -19447,7 +19447,12 @@ async function ensurePersonalCalendar(){
 
   const { data: created, error: insErr } = await supabaseClient
     .from("calendars")
-    .insert({ name: "My calendar", kind: "personal" })
+    .insert({
+      owner_user_id: cloudUser.id,
+      owner_email: (cloudUser.email || "").toLowerCase(),
+      name: "My calendar",
+      kind: "personal"
+    })
     .select("id")
     .single();
   if(insErr) throw insErr;
@@ -20212,7 +20217,12 @@ document.getElementById("sharedV2CreateBtn")?.addEventListener("click", async ()
 
   const { error } = await supabaseClient
     .from("calendars")
-    .insert({ name, kind: "shared" });
+    .insert({
+      owner_user_id: cloudUser.id,
+      owner_email: (cloudUser.email || "").toLowerCase(),
+      name,
+      kind: "shared"
+    });
   if(error){ showSharedToast("Create failed: " + error.message); return; }
   if(input) input.value = "";
   showSharedToast(`Created "${name}".`);
