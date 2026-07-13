@@ -238,6 +238,18 @@
             <button id="quickAddBtn" class="tiny" type="button">Add</button>
           </div>
 
+          <!-- Shared Calendars UX pass: choose where this event lives.
+               Personal stays exactly as before; editable shared calendars
+               (owner/editor on kind='shared') save into calendar_events. -->
+          <label class="label" for="eventCalendarDest">Calendar</label>
+          <select id="eventCalendarDest" class="input eventCalendarDest"
+                  aria-label="Choose which calendar this event is saved to">
+            <option value="personal">My private calendar</option>
+          </select>
+          <div id="eventCalendarDestHint" class="eventCalendarDestHint" aria-live="polite">
+            Private — only shared through your read-only mirror if you invite someone.
+          </div>
+
           <label class="label">Event title</label>
           <input id="eventTitle" class="input" placeholder="e.g., Study: Network+ (Ports)" />
 
@@ -888,7 +900,7 @@
     <div id="sharedEventModalStripe" class="sharedEventModalStripe" aria-hidden="true"></div>
 
     <div class="sharedEventModalHeader">
-      <div class="sharedEventBadge">Shared calendar · read-only</div>
+      <div class="sharedEventBadge" id="sharedEventModalBadge">Shared calendar</div>
       <button id="sharedEventModalCloseBtn" class="navBtn navBtnIcon" type="button" aria-label="Close shared event details">×</button>
     </div>
 

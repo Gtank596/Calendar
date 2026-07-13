@@ -16195,6 +16195,9 @@ function clearFormForNew(){
   selectedEventId = null;
   editBaseDateISO = null;
 
+  // Shared Calendars UX pass: new events may target any writable calendar.
+  if(typeof syncCalendarDestPicker === "function") syncCalendarDestPicker(false);
+
   eventTitle.value = "";
   eventDetails.value = "";
 if(eventPrice) eventPrice.value = "";
@@ -16230,6 +16233,11 @@ renderEventCategoryOptions();
 }
 
 function populateFormFromSelected(){
+  // Shared Calendars UX pass: existing personal events always stay personal —
+  // lock the destination picker while editing (shared events never reach this
+  // form; they open the shared detail/editor modal instead).
+  if(typeof syncCalendarDestPicker === "function") syncCalendarDestPicker(true);
+
   if(!selectedDateISO) return;
 
   const baseKey = getEditDateKey();
@@ -16354,6 +16362,41 @@ const connectionFields = getConnectionFieldsForSave(color);
     : { offsetMinutes: Math.max(0, parseInt(reminderRaw, 10) || 0) };
 
   if(!title && !details && !startStr && !endStr && price === null) return;
+
+  // Shared Calendars UX pass: destination picker routing. If an editable
+  // shared calendar is selected and this is a NEW event, hand off to the
+  // shared V2 path and RETURN — nothing below this line runs, so the event
+  // can never enter the personal events map, localStorage/IndexedDB, undo/
+  // redo, budget transactions, reminders, Web Push, or personal cloud sync.
+  // Editing an existing personal event always stays personal (the picker is
+  // locked to "My private calendar" while editing).
+  const destSelEl = document.getElementById("eventCalendarDest");
+  const destCalendarId = destSelEl?.value || "personal";
+  if(destCalendarId !== "personal" && !selectedEventId &&
+     typeof createSharedV2EventFromMainForm === "function"){
+    let weeklyDays = null;
+    if(freq === "weeklyDays"){
+      weeklyDays = Array.from(document.querySelectorAll("#weeklyDaysRow .weekdayBtn.active"))
+        .map(b => Number(b.dataset.day))
+        .filter(n => Number.isInteger(n) && n >= 0 && n <= 6);
+      if(!weeklyDays.length){
+        weeklyDays = [new Date(selectedDateISO + "T00:00:00").getDay()];
+      }
+    }
+    createSharedV2EventFromMainForm(destCalendarId, {
+      title, details,
+      startDate: selectedDateISO,
+      startTime: startStr, endTime: endStr,
+      color, categoryId,
+      freq, until, interval, weeklyDays,
+      priceIgnored: price !== null,
+      reminderIgnored: !!reminder
+    }).catch(console.error);
+    clearFormForNew();
+    renderEventList();
+    closeMobileEditor();
+    return;
+  }
 
   const baseKey = getEditDateKey();
   const list = getEventsForDay(baseKey);
@@ -19027,22 +19070,28 @@ function openSharedEventDetails(ev, iso){
   const stripe = document.getElementById("sharedEventModalStripe");
   if(stripe) stripe.style.background = safeHexColor(ev.color, DEFAULT_COLOR);
 
-  // Shared Calendars V2-V5 (section 20): calendar/role line + role-gated
-  // action buttons. Everything stays hidden for V1 events and for viewers.
+  // Shared Calendars V2-V5 (section 20) + UX pass: the badge and the meta line
+  // reflect the true state — calendar kind (personal mirror vs shared), the
+  // user's role, and whether editing is actually permitted. Never show
+  // READ-ONLY alongside Edit/Delete, and never show Edit/Delete unless the
+  // user can actually write.
   const v2Meta = document.getElementById("sharedEventModalV2Meta");
+  const badgeEl = document.getElementById("sharedEventModalBadge");
   const editBtn = document.getElementById("sharedEventModalEditBtn");
   const delBtn = document.getElementById("sharedEventModalDeleteBtn");
   const canEdit = typeof canEditSharedV2Event === "function" && canEditSharedV2Event(ev);
 
+  const info = describeSharedEventPermission(ev);   // { badge, meta, canEdit }
+
+  if(badgeEl){
+    badgeEl.textContent = info.badge;
+    badgeEl.classList.toggle("badgeEditable", info.canEdit);
+    badgeEl.classList.toggle("badgeReadonly", !info.canEdit);
+  }
+
   if(v2Meta){
-    if(ev._sharedV2){
-      const roleNote = canEdit
-        ? ""
-        : (ev._role === "editor" || ev._role === "owner")
-          ? " · editing disabled (flag off)"
-          : " · read-only";
-      v2Meta.textContent =
-        `${ev._calendarName || "Shared calendar"} · your role: ${ev._role || "viewer"}${roleNote}`;
+    if(ev._sharedV2 || ev._shared){
+      v2Meta.textContent = info.meta;
       v2Meta.style.display = "";
     } else {
       v2Meta.style.display = "none";
@@ -19051,6 +19100,7 @@ function openSharedEventDetails(ev, iso){
 
   if(editBtn){
     editBtn.style.display = canEdit ? "" : "none";
+    editBtn.setAttribute("aria-label", `Edit this event in ${ev._calendarName || "the shared calendar"}`);
     editBtn.onclick = canEdit ? () => {
       closeSharedEventDetails();
       openSharedV2Editor(ev._calendarId, ev);
@@ -19059,6 +19109,7 @@ function openSharedEventDetails(ev, iso){
 
   if(delBtn){
     delBtn.style.display = canEdit ? "" : "none";
+    delBtn.setAttribute("aria-label", `Delete this event from ${ev._calendarName || "the shared calendar"}`);
     delBtn.onclick = canEdit ? () => {
       if(confirm(`Delete "${ev.title || "this event"}" from the shared calendar?`)){
         closeSharedEventDetails();
@@ -19068,6 +19119,53 @@ function openSharedEventDetails(ev, iso){
   }
 
   modal.classList.remove("hidden");
+}
+
+// Single source of truth for how a shared event's permission is described in
+// the detail modal. Distinguishes personal-mirror (always read-only) from
+// kind='shared' calendars, and owner/editor from viewer, and accounts for the
+// editing kill switch. Used for the badge, the role line, and drag/edit gates.
+function describeSharedEventPermission(ev){
+  const role = ev._role || "viewer";
+  const isMirror = ev._sharedV2 && ev._calendarKind === "personal";
+  const canEdit = typeof canEditSharedV2Event === "function" && canEditSharedV2Event(ev);
+
+  // V1 legacy read-only overlay (no _sharedV2).
+  if(!ev._sharedV2){
+    return {
+      canEdit: false,
+      badge: "Shared calendar · read-only",
+      meta: `Shared from ${ev._sharedOwnerEmail || "another user"} · read-only`
+    };
+  }
+
+  const calName = ev._calendarName || "Shared calendar";
+
+  if(isMirror){
+    return {
+      canEdit: false,
+      badge: "Personal mirror · read-only",
+      meta: `${calName} · your role: ${role}\nRead-only mirror — personal calendar events cannot be edited through sharing.`
+    };
+  }
+
+  if(canEdit){
+    return {
+      canEdit: true,
+      badge: `Shared calendar · ${role === "owner" ? "owner" : "editor"}`,
+      meta: `${calName} · your role: ${role}\nEditable shared event.`
+    };
+  }
+
+  // Shared calendar but not editable: either viewer, or editing kill-switched.
+  const editingOff = (role === "owner" || role === "editor") && !sharedEditingEnabled();
+  return {
+    canEdit: false,
+    badge: "Shared calendar · read-only",
+    meta: editingOff
+      ? `${calName} · your role: ${role}\nRead-only right now — shared editing is turned off on this device.`
+      : `${calName} · your role: viewer\nRead-only — ask the owner for editor access.`
+  };
 }
 
 function closeSharedEventDetails(){
@@ -19329,6 +19427,7 @@ function sanitizeSharedV2Event(row, cal){
     _version: row.version || 1,
     _calendarId: cal.id,
     _calendarName: cal.name || "Shared calendar",
+    _calendarKind: cal.kind || "shared",
     _role: sharedV2State.roles[cal.id] || "viewer",
     _sharedOwnerEmail: cal.owner_email || cal.name || "shared calendar"
   };
@@ -19632,6 +19731,7 @@ async function refreshSharedCalendarV2Core(reason = "manual"){
   render();
   renderEventList();
   renderSharedV2Panel();
+  if(typeof renderCalendarDestinationOptions === "function") renderCalendarDestinationOptions();
   return sharedV2State;
 }
 
@@ -20178,19 +20278,33 @@ function renderSharedV2Panel(){
         badgeWrap.appendChild(eb);
       }
 
-      // Realtime indicator on shared (non-mirror) calendars when realtime is on.
+      // Realtime indicator on shared (non-mirror) calendars when realtime is
+      // on. Accessibility: the dot is decorative — the STATUS TEXT lives in
+      // the aria-label and in the panel status line, never color alone.
       if(cal.kind === "shared" && sharedRealtimeEnabled()){
         const rt = document.createElement("span");
         const st = sharedV2State.realtimeStatus;
         rt.className = "sharedRtDot rt-" + (st === "connected" ? "live"
           : st === "error" ? "error" : "wait");
         rt.title = "Realtime: " + st;
+        rt.setAttribute("role", "img");
+        rt.setAttribute("aria-label", "Realtime status: " + st);
         badgeWrap.appendChild(rt);
       }
 
       head.appendChild(name);
       head.appendChild(badgeWrap);
       card.appendChild(head);
+
+      // UX pass: one short line that cements the mental model per kind.
+      const sub = document.createElement("div");
+      sub.className = "sharedV2CalSub";
+      sub.textContent = cal.kind === "personal"
+        ? (isMyMirror
+            ? "Mirrors your private calendar outward. Members can view only."
+            : "Someone's private calendar, mirrored to you. View only.")
+        : "Collaborative calendar — members can add and edit events based on their role.";
+      card.appendChild(sub);
 
       // Visibility toggle for calendars whose events overlay my views.
       if(!isMyMirror){
@@ -20221,6 +20335,7 @@ function renderSharedV2Panel(){
         addBtn.type = "button";
         addBtn.className = "tiny sharedV2AddEventBtn";
         addBtn.textContent = "+ Event";
+        addBtn.setAttribute("aria-label", `Add an event to ${cal.name}`);
         addBtn.addEventListener("click", () => openSharedV2Editor(cal.id, null));
         card.appendChild(addBtn);
       }
@@ -20240,6 +20355,7 @@ function renderSharedV2Panel(){
           removeBtn.type = "button";
           removeBtn.className = "tiny sharedRevokeBtn";
           removeBtn.textContent = "Remove";
+          removeBtn.setAttribute("aria-label", `Remove ${m.member_email} from ${cal.name}`);
           removeBtn.addEventListener("click", async () => {
             if(!confirm(`Remove ${m.member_email} from "${cal.name}"?`)) return;
             const { error } = await supabaseClient
@@ -20272,6 +20388,7 @@ function renderSharedV2Panel(){
         sendBtn.type = "button";
         sendBtn.className = "tiny";
         sendBtn.textContent = "Invite";
+        sendBtn.setAttribute("aria-label", `Send invite to join ${cal.name}`);
         sendBtn.addEventListener("click", async () => {
           const addr = (email.value || "").trim().toLowerCase();
           if(!addr || !addr.includes("@")){ showSharedToast("Enter a valid email."); return; }
@@ -20328,6 +20445,152 @@ function renderSharedV2Panel(){
       outBox.appendChild(row);
     }
   }
+}
+
+// --- Calendar destination picker (UX pass) ------------------------------------
+// Lets the NORMAL event editor create events on editable shared calendars.
+// Personal remains the default and existing behavior is untouched.
+
+function getWritableCalendarDestinations(){
+  const out = [{
+    type: "personal",
+    id: "personal",
+    name: "My private calendar",
+    role: null,
+    kind: "personal"
+  }];
+
+  // Editable shared calendars only: kind='shared' + owner/editor role, and
+  // only while the editing feature is enabled. Personal mirrors are NEVER
+  // writable destinations (one-way mirror stays inviolable).
+  if(typeof sharedV2State !== "undefined" && sharedV2State &&
+     typeof sharedEditingEnabled === "function" && sharedEditingEnabled()){
+    for(const cal of (sharedV2State.calendars || [])){
+      if(cal.kind !== "shared") continue;
+      const role = sharedV2State.roles[cal.id];
+      if(role !== "owner" && role !== "editor") continue;
+      out.push({ type: "sharedV2", id: cal.id, name: cal.name || "Shared calendar", role, kind: "shared" });
+    }
+  }
+
+  return out;
+}
+
+function renderCalendarDestinationOptions(){
+  const sel = document.getElementById("eventCalendarDest");
+  if(!sel) return;
+
+  const prev = sel.value || "personal";
+  const dests = getWritableCalendarDestinations();
+
+  sel.innerHTML = "";
+  for(const d of dests){
+    const opt = document.createElement("option");
+    opt.value = d.id;
+    opt.textContent = d.type === "personal" ? d.name : `${d.name} (shared · ${d.role})`;
+    sel.appendChild(opt);
+  }
+
+  // Keep the previous choice when it is still writable; fall back to personal.
+  sel.value = dests.some(d => d.id === prev) ? prev : "personal";
+
+  // Hide the whole row when there is nothing to choose (no editable shared
+  // calendars) — zero clutter for single-calendar users.
+  const label = sel.previousElementSibling;
+  const hint = document.getElementById("eventCalendarDestHint");
+  const show = dests.length > 1;
+  sel.style.display = show ? "" : "none";
+  if(label && label.classList?.contains("label")) label.style.display = show ? "" : "none";
+  if(hint) hint.style.display = show ? "" : "none";
+
+  updateCalendarDestHint();
+}
+
+function updateCalendarDestHint(){
+  const sel = document.getElementById("eventCalendarDest");
+  const hint = document.getElementById("eventCalendarDestHint");
+  if(!sel || !hint) return;
+
+  if((sel.value || "personal") === "personal"){
+    hint.textContent = "Private — only shared through your read-only mirror if you invite someone.";
+    hint.classList.remove("destShared");
+  }else{
+    const cal = sharedV2State.calendars.find(c => c.id === sel.value);
+    hint.textContent = `Shared — visible to members of ${cal?.name || "this shared calendar"}.`;
+    hint.classList.add("destShared");
+  }
+}
+
+// Editing an existing personal event locks the picker to personal; new events
+// unlock it (selection persists between creates).
+function syncCalendarDestPicker(editingExisting){
+  const sel = document.getElementById("eventCalendarDest");
+  if(!sel) return;
+  if(editingExisting){
+    sel.value = "personal";
+    sel.disabled = true;
+    sel.title = "Existing private events stay on your private calendar";
+  }else{
+    sel.disabled = false;
+    sel.title = "";
+  }
+  updateCalendarDestHint();
+}
+
+document.getElementById("eventCalendarDest")?.addEventListener("change", updateCalendarDestHint);
+
+// Create a shared event from the NORMAL editor form. Uses the exact same
+// insert path as the shared editor modal — calendar_events only. Personal
+// storage, undo/redo, budget, reminders and Web Push are structurally out of
+// reach (the save handler returned before touching any of them).
+async function createSharedV2EventFromMainForm(calendarId, f){
+  if(!supabaseClient || !cloudUser){ showSharedToast("Sign in to add shared events."); return; }
+  if(!sharedEditingEnabled()){ showSharedToast("Shared editing is disabled."); return; }
+
+  const role = sharedV2State.roles[calendarId];
+  if(role !== "owner" && role !== "editor"){
+    showSharedToast("You need editor access on that calendar.");
+    return;
+  }
+
+  // Trip shading (span) has no shared equivalent; save as a single event.
+  let freq = f.freq || "none";
+  if(freq === "span") freq = "none";
+
+  const recurrence = {
+    freq,
+    until: (freq !== "none" && f.until) ? f.until : null,
+    interval: (freq !== "none" && f.interval > 1) ? f.interval : null,
+    days: (freq === "weeklyDays" && Array.isArray(f.weeklyDays) && f.weeklyDays.length)
+      ? f.weeklyDays : null,
+    exceptions: null
+  };
+
+  const { error } = await supabaseClient
+    .from("calendar_events")
+    .insert({
+      calendar_id: calendarId,
+      source_event_id: cryptoId(),
+      title: f.title || "",
+      details: f.details || "",
+      start_date: f.startDate,
+      start_time: f.startTime || "",
+      end_time: f.endTime || "",
+      color: safeHexColor(f.color, DEFAULT_COLOR),
+      category_id: f.categoryId || "other",
+      recurrence
+    });
+
+  if(error){
+    showSharedToast("Shared event failed: " + error.message);
+    return;
+  }
+
+  const cal = sharedV2State.calendars.find(c => c.id === calendarId);
+  showSharedToast(`Added to ${cal?.name || "shared calendar"}.` +
+    ((f.priceIgnored || f.reminderIgnored)
+      ? " (Price/reminders aren't saved on shared events.)" : ""));
+  await refreshSharedCalendarV2Core("event created (main editor)");
 }
 
 // --- Wiring -----------------------------------------------------------------------
@@ -20430,6 +20693,7 @@ window.toggleSharedEditingDebug = function(){
   const next = sharedEditingEnabled() ? "off" : "on";
   try{ localStorage.setItem(SHARED_V2_EDIT_FLAG_KEY, next); }catch{}
   render(); renderEventList(); renderSharedV2Panel();
+  if(typeof renderCalendarDestinationOptions === "function") renderCalendarDestinationOptions();
   return `SHARED_EDITING is now ${next.toUpperCase()} on this device (localStorage override).`;
 };
 

@@ -8375,3 +8375,55 @@ position: relative;
   background: transparent;
   padding: 0 0 10px;
 }
+
+/* ============================================================================
+   SHARED CALENDARS UX/ACCESSIBILITY PASS — destination picker, permission
+   badges, card sub-lines. ROLLBACK: delete this banner block.
+   ============================================================================ */
+
+/* Calendar destination picker in the normal editor */
+.eventCalendarDest{
+  width: 100%;
+}
+.eventCalendarDest:disabled{
+  opacity: .55;
+  cursor: not-allowed;
+}
+.eventCalendarDestHint{
+  font-size: 11px;
+  opacity: .6;
+  margin: 4px 0 10px;
+  line-height: 1.35;
+}
+.eventCalendarDestHint.destShared{
+  color: rgba(150,230,185,.9);
+  opacity: .85;
+}
+
+/* Detail modal badge states — text carries the meaning; color reinforces */
+.sharedEventBadge.badgeEditable{
+  border-style: solid;
+  border-color: rgba(90,200,140,.85);
+  color: rgba(150,230,185,.95);
+}
+.sharedEventBadge.badgeReadonly{
+  border-style: dashed;
+}
+
+/* Permission meta line uses two lines (calendar/role, then explanation) */
+.sharedEventModalV2Meta{
+  white-space: pre-line;
+}
+
+/* Calendar card sub-line (mental-model helper) — compact on mobile */
+.sharedV2CalSub{
+  font-size: 11px;
+  opacity: .6;
+  line-height: 1.35;
+}
+
+@media (max-width: 760px){
+  .sharedV2CalSub{
+    font-size: 10.5px;
+  }
+}

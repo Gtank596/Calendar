@@ -34,7 +34,10 @@
 // V4 editing + V5 realtime are now ON by default; V2/V5 panel is primary and
 // the old V1 read-only sharing is collapsed under "Legacy read-only sharing".
 // No caching-behavior change; Supabase stays never-cached.
-const CACHE_NAME = "my-calendar-pwa-v26";
+// v27: Shared Calendars UX/accessibility pass — calendar destination picker
+// in the normal editor, truthful permission badges in the shared detail
+// modal, card sub-lines, aria-labels. script.js/index.html/style.css only.
+const CACHE_NAME = "my-calendar-pwa-v27";
 
 const APP_SHELL = [
   "./",
