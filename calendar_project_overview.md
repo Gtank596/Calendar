@@ -370,13 +370,47 @@ The application is being built with the assumption that users should not receive
 
 ---
 
+## Testing and Quality Assurance
+
+Since July 2026 the project carries a permanent quality foundation
+(Quality Foundation V1) built around the application rather than inside it —
+the app itself remains a static, no-build PWA with zero production runtime
+dependencies.
+
+What it includes:
+
+- Unit, integration, and regression suites (Vitest) that boot the real,
+  unmodified `script.js` inside a simulated browser with fake IndexedDB and
+  a deterministic fake Supabase — production logic is never duplicated in
+  tests
+- Real-browser tests (Playwright) covering navigation, event and budget
+  workflows, persistence across reload, offline app-shell loading, and an
+  account-switch privacy drill, with all Supabase and weather traffic
+  blocked at the network layer
+- Named regression scenarios protecting historical bugs: A→B→A account
+  privacy, sync-queue isolation across accounts, shared-calendar role
+  enforcement, optimistic-version conflicts, realtime subscription hygiene,
+  global naming collisions, and budget/receipt privacy boundaries
+- Static checks: syntax validation of every first-party JavaScript file and
+  duplicate-HTML-id detection via a real parser
+- Coverage reporting attributed to the real `script.js` (baseline ~44% of
+  statements), plus continuous integration on GitHub Actions that runs the
+  entire pipeline on every push and pull request
+
+The developer documentation lives in `TESTING.md` (how to run and extend
+the suites) and `QUALITY-FOUNDATION-V1.md` (what was built, bugs found and
+fixed, rollback).
+
+---
+
 ## Current Project Scale
 
 The project has grown into a substantial single-page application.
 
 Approximate current scale:
 
-- More than 17,000 lines of JavaScript
+- More than 21,000 lines of application JavaScript, plus a dedicated test
+  suite (118 automated tests) and CI pipeline
 - More than 500 KB of JavaScript source
 - More than 150 KB of CSS
 - Dozens of responsive media-query sections
