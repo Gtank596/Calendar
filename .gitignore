@@ -14,3 +14,7 @@ node_modules/
 coverage/
 test-results/
 playwright-report/
+
+# Project Markdown docs stay local-only (see local working rules).
+# Root-level ignore on purpose: supabase/**/README.md deployment docs stay tracked.
+/*.md
