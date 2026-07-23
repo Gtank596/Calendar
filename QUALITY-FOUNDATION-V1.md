@@ -136,9 +136,15 @@ Full Vitest run (`npm run test:coverage`), V8 provider:
 ## CI behavior
 
 `.github/workflows/test.yml`, on PRs / pushes to main / manual dispatch:
-checkout → Node LTS with npm cache → `npm ci` → `check:syntax` →
+checkout → Node 18 with npm cache → `npm ci` → `check:syntax` →
 `check:ids` → `test:coverage` (coverage artifact) → Playwright install →
-`test:e2e` (failure artifacts). Any failed step fails the run. No secrets.
+`test:e2e` (12-minute step timeout, failure artifacts). Any failed step
+fails the run. No secrets.
+
+Node is pinned to 18 on purpose: it matches the verified local toolchain,
+and the first CI run proved Playwright 1.49.1 hangs silently under the
+runner's Node 24 (29 minutes of no output until the job cap). Bump Node and
+Playwright together when upgrading either.
 
 ## Checks run for this change (all passing)
 
@@ -160,7 +166,8 @@ checkout → Node LTS with npm cache → `npm ci` → `check:syntax` →
 - Web Push end-to-end delivery; receipt OCR accuracy; live weather.
 - Drag/resize pointer physics and visual layout regressions.
 - Cross-browser behavior (Chromium only in V1).
-- The GitHub Actions workflow itself first runs on the push that lands it.
+- The GitHub Actions workflow was hardened after its first live run (Node
+  pinned to 18, Playwright step timeout) — see "CI behavior" above.
 
 ## Rollback
 

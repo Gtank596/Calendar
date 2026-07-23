@@ -17,10 +17,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install Node LTS
+      - name: Install Node 18 (matches the verified local toolchain)
         uses: actions/setup-node@v4
         with:
-          node-version: "lts/*"
+          # Pinned deliberately: the dev machine runs Node 18, and the pinned
+          # Playwright 1.49.1 hangs silently under Node 24 (first CI run sat
+          # 29 minutes with no output). Bump Node and Playwright together.
+          node-version: "18"
           cache: npm
 
       - name: Install dependencies (npm ci)
@@ -49,6 +52,7 @@ jobs:
 
       - name: Playwright browser tests
         run: npm run test:e2e
+        timeout-minutes: 12
 
       - name: Upload Playwright artifacts (traces, screenshots, videos)
         if: failure()
