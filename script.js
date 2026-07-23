@@ -44,6 +44,21 @@
 // ============================================================================
 
 // ============================================================================
+// 00. TEST SEAM (Quality Foundation V1)
+// ============================================================================
+// Browser-test mode is active ONLY when the page URL carries ?testMode=1
+// (e.g. http://localhost:8123/index.html?testMode=1). In ordinary use this
+// flag is false and every branch below is inert. Current effects:
+//   * service-worker registration is skipped (tests need uncached loads)
+//   * window.__VANGUARD_TEST_MODE__ is set so tests can verify the mode
+// No production behavior changes outside these two points.
+const VANGUARD_TEST_MODE = (() => {
+  try{ return new URLSearchParams(window.location.search).has("testMode"); }
+  catch{ return false; }
+})();
+if(VANGUARD_TEST_MODE) window.__VANGUARD_TEST_MODE__ = true;
+
+// ============================================================================
 // 01. DOM REFERENCES
 // ============================================================================
 // Budget page controls + panels
@@ -9170,7 +9185,17 @@ const amount = (budgetTxType?.value === "income" ? -1 : 1) * Math.abs(rawAmount)
 saveReceiptTrainingRecordFromDraft(newEv);
   resetBudgetTransactionForm();
 
-  renderBudgetPage();
+  // Persist to IndexedDB BEFORE the budget re-render: the transaction list
+  // hydrates from the budgetTransactions store, and rendering first would
+  // hydrate the PRE-add (empty) store into the range cache — which nothing
+  // re-renders afterwards, so the new transaction stayed invisible until the
+  // next unrelated render.
+  flushIndexedDbSliceWrites()
+    .catch(() => {})
+    .then(() => {
+      clearIndexedDbBudgetTransactionRangeCache("budget transaction added");
+      renderBudgetPage();
+    });
   renderEventList();
   render();
   closeBudgetTxDrawer();
@@ -9262,7 +9287,13 @@ const amount = (budgetTxType?.value === "income" ? -1 : 1) * Math.abs(rawAmount)
 
   resetBudgetTransactionForm();
 
-  renderBudgetPage();
+  // Same stale-hydration race as createBudgetTransactionFromDrawer above.
+  flushIndexedDbSliceWrites()
+    .catch(() => {})
+    .then(() => {
+      clearIndexedDbBudgetTransactionRangeCache("budget transaction updated");
+      renderBudgetPage();
+    });
   renderEventList();
   render();
   closeBudgetTxDrawer();
@@ -12284,7 +12315,10 @@ const freq = r.freq;
   if(r.freq === "weekly"){
     if(targetDt.getDay() !== startDt.getDay()) return false;
     const interval = Math.max(1, parseInt(r.interval || "1",10) || 1);
-    const diffDays = Math.floor((targetDt - startDt) / (1000*60*60*24));
+    // Math.round, not floor: both dates are local midnights, but a DST
+    // spring-forward makes the raw gap ~6.96 days — floor miscounted the
+    // week and shifted interval>1 series by a week after a DST change.
+    const diffDays = Math.round((targetDt - startDt) / (1000*60*60*24));
     const diffWeeks = Math.floor(diffDays / 7);
     return (diffWeeks % interval) === 0;
   }
@@ -12299,7 +12333,8 @@ if(freq === "weeklyDays"){
   const startDt2 = ymdToDate(master.startDate);
   const targetDt2 = ymdToDate(targetISO);
 
-  const diffDays = Math.floor((targetDt2 - startDt2) / (1000*60*60*24));
+  // Math.round for the same DST reason as the weekly branch above.
+  const diffDays = Math.round((targetDt2 - startDt2) / (1000*60*60*24));
   if(diffDays < 0) return false;
 
   const diffWeeks = Math.floor(diffDays / 7);
@@ -17638,7 +17673,7 @@ if(deleteBtn) deleteBtn.disabled = true;
 try{
 setEditorCollapsed(isEditorCollapsed());
 setSyncUI();
-if("serviceWorker" in navigator){
+if("serviceWorker" in navigator && !VANGUARD_TEST_MODE){
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("./service-worker.js").catch(console.error);
   });

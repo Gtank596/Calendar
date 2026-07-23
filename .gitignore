@@ -8,3 +8,9 @@ Thumbs.db
 .env.*
 *.key
 *.pem
+
+# Quality Foundation V1 — dev tooling artifacts (never commit)
+node_modules/
+coverage/
+test-results/
+playwright-report/

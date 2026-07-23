@@ -37,7 +37,12 @@
 // v27: Shared Calendars UX/accessibility pass — calendar destination picker
 // in the normal editor, truthful permission badges in the shared detail
 // modal, card sub-lines, aria-labels. script.js/index.html/style.css only.
-const CACHE_NAME = "my-calendar-pwa-v27";
+// v28: Quality Foundation V1 — script.js-only changes: (1) guarded
+// ?testMode=1 seam (skips SW registration during browser tests; inert in
+// normal use), (2) recurrence DST fix — weekly interval>1 series no longer
+// shift a week after a DST change (Math.round on the day diff). Caching
+// behavior unchanged; Supabase remains never-cached.
+const CACHE_NAME = "my-calendar-pwa-v28";
 
 const APP_SHELL = [
   "./",

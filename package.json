@@ -1,0 +1,24 @@
+{
+  "name": "vanguard-calendar-quality-foundation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Development-only test and CI tooling for Vanguard Calendar. The application itself is a static, no-build vanilla HTML/CSS/JS PWA and has zero production runtime dependencies.",
+  "type": "module",
+  "scripts": {
+    "check:syntax": "node scripts/check-syntax.js",
+    "check:ids": "node scripts/check-duplicate-ids.js",
+    "test:unit": "vitest run tests/unit tests/integration",
+    "test:regression": "vitest run tests/regression",
+    "test:coverage": "vitest run --coverage tests/unit tests/integration tests/regression",
+    "test:e2e": "playwright test",
+    "test:ci": "node scripts/check-syntax.js && node scripts/check-duplicate-ids.js && vitest run --coverage tests/unit tests/integration tests/regression && playwright test",
+    "serve": "node scripts/serve.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1",
+    "@vitest/coverage-v8": "2.1.9",
+    "fake-indexeddb": "6.0.1",
+    "jsdom": "25.0.1",
+    "vitest": "2.1.9"
+  }
+}
