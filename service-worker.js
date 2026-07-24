@@ -42,7 +42,11 @@
 // normal use), (2) recurrence DST fix — weekly interval>1 series no longer
 // shift a week after a DST change (Math.round on the day diff). Caching
 // behavior unchanged; Supabase remains never-cached.
-const CACHE_NAME = "my-calendar-pwa-v28";
+// v29: Trust Layer V1 — index.html/style.css/script.js shell changes (data
+// safety & recovery panel, sync status/history dashboard, restore review,
+// shared attribution + activity). Caching behavior unchanged; Supabase
+// (including the new calendar_activity reads) remains never-cached.
+const CACHE_NAME = "my-calendar-pwa-v29";
 
 const APP_SHELL = [
   "./",

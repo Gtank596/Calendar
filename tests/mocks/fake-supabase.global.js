@@ -108,6 +108,80 @@
       return role === "owner" || role === "editor";
     }
 
+    // --- Trust Layer V1: server-trigger emulation for calendar_events -------
+    // Mirrors trust-layer-v1-activity.sql + the v2 before-write trigger:
+    //   * created_by/updated_by are ALWAYS pinned to auth.uid() (client-sent
+    //     values are ignored — spoof attempts silently lose).
+    //   * kind='shared' calendars get immutable calendar_activity rows;
+    //     kind='personal' mirrors NEVER do.
+    var TRUST_ACTIVITY_FIELDS = [
+      "title", "details", "start_date", "start_time", "end_time",
+      "color", "category_id", "recurrence",
+    ];
+
+    function pinEventAttributionOnInsert(row) {
+      const user = currentUser();
+      if (!user) return;
+      row.created_by = user.id;
+      row.updated_by = user.id;
+      row.created_at = row.created_at || nowISO();
+      row.updated_at = nowISO();
+    }
+
+    function pinEventAttributionOnUpdate(row, before) {
+      const user = currentUser();
+      row.created_by = before.created_by !== undefined ? before.created_by : row.created_by;
+      row.created_at = before.created_at !== undefined ? before.created_at : row.created_at;
+      row.source_event_id = before.source_event_id;
+      row.calendar_id = before.calendar_id;
+      if (user) row.updated_by = user.id;
+      row.updated_at = nowISO();
+    }
+
+    function recordCalendarActivity(op, before, after) {
+      const user = currentUser();
+      const row = after || before;
+      if (!row) return;
+      const cal = table("calendars").find((c) => c.id === row.calendar_id);
+      if (!cal || cal.kind !== "shared") return; // mirrors: NO activity, ever
+
+      let action;
+      const fields = [];
+      if (op === "insert") {
+        action = "create";
+      } else if (op === "hard-delete") {
+        action = "delete";
+      } else {
+        const beforeDeleted = !!(before && before.deleted_at);
+        const afterDeleted = !!(after && after.deleted_at);
+        if (!beforeDeleted && afterDeleted) action = "delete";
+        else if (beforeDeleted && !afterDeleted) action = "restore";
+        else if (before && after && String(before.start_date) !== String(after.start_date)) action = "move";
+        else action = "edit";
+
+        if (before && after) {
+          for (const f of TRUST_ACTIVITY_FIELDS) {
+            if (JSON.stringify(before[f]) !== JSON.stringify(after[f])) fields.push(f);
+          }
+        }
+        if (action === "edit" && !fields.length) return; // no-op update
+      }
+
+      const activity = {
+        id: fakeId("act"),
+        calendar_id: row.calendar_id,
+        event_id: row.id,
+        actor_user_id: user ? user.id : null,      // server-derived, never client-sent
+        actor_email: user ? (user.email || "").toLowerCase() : "",
+        action: action,
+        changed_fields: fields,
+        title_snapshot: String(row.title || "").slice(0, 120),
+        created_at: nowISO(),
+      };
+      table("calendar_activity").push(activity);
+      emitPostgresChange("calendar_activity", activity);
+    }
+
     function visibleCalendarIds(userId) {
       const ids = [];
       for (const c of table("calendars")) {
@@ -134,11 +208,17 @@
         const ids = visibleCalendarIds(user.id);
         return rows.filter((r) => ids.includes(r.calendar_id));
       }
+      if (tableName === "calendar_activity") {
+        // Trust Layer V1: "members read activity" — visible only for
+        // calendars the user can currently see (removed members lose access).
+        const ids = visibleCalendarIds(user.id);
+        return rows.filter((r) => ids.includes(r.calendar_id));
+      }
       if (tableName === "calendar_members") {
-        const owned = table("calendars")
-          .filter((c) => c.owner_user_id === user.id)
-          .map((c) => c.id);
-        return rows.filter((r) => r.user_id === user.id || owned.includes(r.calendar_id));
+        // Real policy: "members read member list" — any current member (or
+        // the owner) of a calendar can read its member rows.
+        const ids = visibleCalendarIds(user.id);
+        return rows.filter((r) => r.user_id === user.id || ids.includes(r.calendar_id));
       }
       if (tableName === "calendar_invites") {
         const owned = table("calendars")
@@ -178,6 +258,15 @@
         }
         // UPDATE (incl. soft delete): only rows in writable calendars match.
         return { filterTo: (r) => canWriteCalendarEvents(user.id, r.calendar_id) };
+      }
+
+      if (tableName === "calendar_activity") {
+        // Trust Layer V1: the activity table is immutable to clients. INSERTs
+        // hard-fail like real RLS; UPDATE/DELETE silently match 0 rows.
+        if (op === "insert" || op === "upsert") {
+          return { error: { message: "new row violates row-level security policy for table \"calendar_activity\"", code: "42501" } };
+        }
+        return { filterTo: function () { return false; } };
       }
 
       if (tableName === "calendar_members" || tableName === "calendar_invites") {
@@ -319,6 +408,12 @@
         table("calendar_members").push(m);
         return m;
       },
+      removeMember(calendarId, userId) {
+        const rows = table("calendar_members");
+        const idx = rows.findIndex((m) => m.calendar_id === calendarId && m.user_id === userId);
+        if (idx !== -1) rows.splice(idx, 1);
+        return idx !== -1;
+      },
       makeSharedEvent(opts) {
         const row = {
           id: opts.id || fakeId("evt"),
@@ -334,9 +429,30 @@
           recurrence: opts.recurrence || { freq: "none" },
           version: opts.version || 1,
           deleted_at: opts.deletedAt || null,
-          created_at: nowISO(),
+          created_at: opts.createdAt || nowISO(),
+          // Trust Layer V1 attribution. Default null = legacy row (created
+          // before the attribution columns existed) — the app must render it.
+          created_by: opts.createdBy || null,
+          updated_by: opts.updatedBy || opts.createdBy || null,
+          updated_at: opts.updatedAt || opts.createdAt || nowISO(),
         };
         table("calendar_events").push(row);
+        return row;
+      },
+      // Trust Layer V1: seed an activity row directly (server-side fixture).
+      makeActivity(opts) {
+        const row = {
+          id: fakeId("act"),
+          calendar_id: opts.calendarId,
+          event_id: opts.eventId || null,
+          actor_user_id: opts.actorId || null,
+          actor_email: (opts.actorEmail || "").toLowerCase(),
+          action: opts.action || "create",
+          changed_fields: opts.changedFields || [],
+          title_snapshot: String(opts.title || "").slice(0, 120),
+          created_at: opts.createdAt || nowISO(),
+        };
+        table("calendar_activity").push(row);
         return row;
       },
 
@@ -362,6 +478,9 @@
         rpcHandlers: rpcHandlers,
         fireAuth: fireAuth,
         takeInjectedError: takeInjectedError,
+        pinEventAttributionOnInsert: pinEventAttributionOnInsert,
+        pinEventAttributionOnUpdate: pinEventAttributionOnUpdate,
+        recordCalendarActivity: recordCalendarActivity,
       },
     };
 
@@ -439,7 +558,13 @@
         if (policy.error) return { data: null, error: policy.error };
         const inserted = rows.map((r) => {
           const row = Object.assign({ id: fakeId(tableName), version: 1, deleted_at: null, created_at: nowISO() }, deepClone(r));
+          if (tableName === "calendar_events") {
+            S.pinEventAttributionOnInsert(row); // trigger emulation: actor pinned server-side
+          }
           S.table(tableName).push(row);
+          if (tableName === "calendar_events") {
+            S.recordCalendarActivity("insert", null, row);
+          }
           server.emitPostgresChange(tableName, row);
           return row;
         });
@@ -454,10 +579,15 @@
         for (const row of S.table(tableName)) {
           if (!rowMatches(row)) continue;
           if (policy.filterTo && !policy.filterTo(row)) continue; // RLS: silently no match
+          const before = tableName === "calendar_events" ? deepClone(row) : null;
           Object.assign(row, deepClone(q.payload));
           // Emulate the version-bump trigger used by optimistic locking.
           if (tableName === "calendar_events" && typeof row.version === "number") {
             row.version += 1;
+          }
+          if (tableName === "calendar_events") {
+            S.pinEventAttributionOnUpdate(row, before); // spoofed identity fields lose
+            S.recordCalendarActivity("update", before, row);
           }
           updated.push(row);
           server.emitPostgresChange(tableName, row);
@@ -477,8 +607,25 @@
           const existing = S.table(tableName).find((x) =>
             conflictCols.every((col) => String(x[col]) === String(r[col]))
           );
-          if (existing) Object.assign(existing, deepClone(r));
-          else S.table(tableName).push(Object.assign({ id: fakeId(tableName), created_at: nowISO() }, deepClone(r)));
+          if (existing) {
+            const before = tableName === "calendar_events" ? deepClone(existing) : null;
+            Object.assign(existing, deepClone(r));
+            if (tableName === "calendar_events") {
+              if (typeof existing.version === "number") existing.version += 1;
+              S.pinEventAttributionOnUpdate(existing, before);
+              S.recordCalendarActivity("update", before, existing);
+            }
+          } else {
+            const row = Object.assign({ id: fakeId(tableName), created_at: nowISO() }, deepClone(r));
+            if (tableName === "calendar_events") {
+              if (typeof row.version !== "number") row.version = 1;
+              S.pinEventAttributionOnInsert(row);
+            }
+            S.table(tableName).push(row);
+            if (tableName === "calendar_events") {
+              S.recordCalendarActivity("insert", null, row);
+            }
+          }
         }
         runtime.queryLog.push({ table: tableName, op: "upsert", rows: rows.length });
         return { data: null, error: null };

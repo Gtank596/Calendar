@@ -3628,6 +3628,16 @@ function markCloudPending(reason = "local change", slices = []){
       console.warn("Could not add changed records to sync queue.", err);
     });
   }
+
+  // TRUST LAYER V1: structured sync history (merged — rapid consecutive local
+  // edits collapse into one entry instead of flooding the log).
+  try{
+    logTrustSyncEvent("local-change-queued", {
+      status: "info",
+      reason,
+      counts: { slices: mergedSlices.length }
+    });
+  }catch{}
 }
 
 function clearCloudPending(){
@@ -3636,6 +3646,11 @@ function clearCloudPending(){
 }
 
 function getCloudSyncLabel(){
+  // TRUST LAYER V1: an active restore review overrides everything — the user
+  // must decide Keep & Push or Discard & Pull before sync resumes.
+  if(typeof isRestoreReviewActive === "function" && isRestoreReviewActive()){
+    return "Cloud: Restore review — automatic sync is paused";
+  }
   if(!cloudUser) return "Cloud: Not signed in";
   if(isCloudPending()) return "Cloud: Pending sync";
   return `Cloud: Signed in as ${cloudUser.email || "user"}`;
@@ -3740,6 +3755,10 @@ function updateCloudUI(){
   if(cloudBusy) return;
 
   setCloudStatus(getCloudSyncLabel());
+
+  // TRUST LAYER V1: keep the sync dashboard truthful whenever cloud state
+  // changes (cheap no-op while the Account modal is closed).
+  try{ renderTrustSyncStatus(); }catch{}
 }
 
 
@@ -3956,9 +3975,19 @@ async function writeCloudStateNow(slices = null){
     return false;
   }
 
+  // TRUST LAYER V1: never upload while a restore is awaiting review. The
+  // explicit "Keep restored copy and Push" action clears the review marker
+  // BEFORE calling pushLocalToCloud, so the deliberate path passes through.
+  if(typeof isRestoreReviewActive === "function" && isRestoreReviewActive()){
+    markCloudPending("restore review", dirtySlices);
+    setCloudStatus("Cloud: Restore review — automatic sync is paused");
+    return false;
+  }
+
   if(typeof navigator !== "undefined" && navigator.onLine === false){
     markCloudPending("offline", dirtySlices);
     setCloudStatus("Cloud: Offline, saved locally");
+    try{ logTrustSyncEvent("went-offline-pending", { status: "warn", counts: { slices: dirtySlices.length } }); }catch{}
     return false;
   }
 
@@ -3992,6 +4021,13 @@ async function writeCloudStateNow(slices = null){
   if(error){
     markCloudPending("cloud row save failed", dirtySlices);
     setCloudStatus("Cloud row save failed, will retry: " + error.message);
+    try{
+      logTrustSyncEvent("sync-flush-failed", {
+        status: "error",
+        detail: error.message,
+        counts: { slices: dirtySlices.length, rows: rows.length }
+      });
+    }catch{}
     return false;
   }
 
@@ -3999,6 +4035,12 @@ async function writeCloudStateNow(slices = null){
   await clearQueuedCloudRecordOps(ops);
   updateKnownCloudKeysFromOps(ops);
   clearCloudPending();
+  try{
+    logTrustSyncEvent("sync-flush-succeeded", {
+      status: "ok",
+      counts: { slices: dirtySlices.length, rows: rows.length }
+    });
+  }catch{}
   setCloudStatus(
     `Cloud: Synced ${rows.length} row${rows.length === 1 ? "" : "s"} across ${dirtySlices.length} slice${dirtySlices.length === 1 ? "" : "s"} • ${new Date(payload.updatedAt || Date.now()).toLocaleString()}`
   );
@@ -4020,6 +4062,12 @@ function cloudWriteDebounced(slices = null){
     return;
   }
 
+  // TRUST LAYER V1: edits made during a restore review stay pending locally;
+  // nothing is scheduled until the review is resolved.
+  if(typeof isRestoreReviewActive === "function" && isRestoreReviewActive()){
+    return;
+  }
+
   clearTimeout(cloudWriteTimer);
   cloudWriteTimer = setTimeout(() => {
     tryFlushPendingCloudSync("debounced write").catch(console.error);
@@ -4030,6 +4078,12 @@ async function tryFlushPendingCloudSync(reason = "sync"){
   if(cloudFlushInProgress) return false;
   if(!supabaseClient || !cloudUser){
     updateCloudUI();
+    return false;
+  }
+
+  // TRUST LAYER V1: restore review pauses ALL background sync.
+  if(typeof isRestoreReviewActive === "function" && isRestoreReviewActive()){
+    setCloudStatus("Cloud: Restore review — automatic sync is paused");
     return false;
   }
 
@@ -4062,6 +4116,13 @@ async function tryFlushPendingCloudSync(reason = "sync"){
 
       if(cloudHasNewerDirtySlice){
         setCloudStatus("Cloud: Sync paused, cloud has newer changes in the same slice. Use Push or Pull.");
+        try{
+          logTrustSyncEvent("sync-paused-conflict", {
+            status: "warn",
+            reason,
+            counts: { slices: dirtySlices.length }
+          });
+        }catch{}
         return false;
       }
 
@@ -4080,14 +4141,29 @@ async function tryFlushPendingCloudSync(reason = "sync"){
 // ---------------------------------------------------------------------------
 // Local snapshot backups (data-loss safety net for Push / forced Pull).
 // Uses its OWN IndexedDB database so the app's main DB schema/version is
-// untouched. Keeps the last 5 snapshots. Restore from DevTools console:
+// untouched. Keeps the last 10 snapshots. Restore from DevTools console:
 //   await listLocalSnapshots()          // see ids + reasons
-//   await restoreLocalSnapshot()        // restore most recent
-//   await restoreLocalSnapshot(<id>)    // restore a specific one
+//   await restoreLocalSnapshot()        // restore most recent ELIGIBLE one
+//   await restoreLocalSnapshot(<id>)    // restore a specific eligible one
+//
+// TRUST LAYER V1 (section 22): snapshots are owner-scoped. Each new snapshot
+// records the identity it belongs to (signed-in user id, or "" for genuinely
+// unclaimed offline data). The UI and the restore function only accept
+// snapshots eligible for the CURRENT identity — User B can never list or
+// restore User A's snapshot. Legacy snapshots (no ownerId field) are treated
+// like unclaimed ones: visible only while no account identity is active.
+// Advanced/manual recovery (documented in the project docs) can bypass the
+// identity gate from the console with
+//   await restoreLocalSnapshot(<id>, { force:true })
+// which is the same recovery path section 21 has always relied on after an
+// account-scoped clear.
 // ---------------------------------------------------------------------------
 const SNAPSHOT_DB_NAME = "myCalendarBackups_v1";
 const SNAPSHOT_STORE = "snapshots";
-const SNAPSHOT_KEEP = 5;
+const SNAPSHOT_KEEP = 10;
+const TRUST_SNAPSHOT_FORMAT = 2;
+
+var trustLastSnapshotId = 0; // monotonic guard: two snapshots in the same ms
 
 function openSnapshotDb(){
   return new Promise((resolve, reject) => {
@@ -4109,11 +4185,22 @@ async function saveLocalSnapshot(reason = "manual"){
     const db = await openSnapshotDb();
     if(!db) return false;
 
+    const payload = buildFullSavePayload(getLocalPayload());
+    const id = Math.max(Date.now(), trustLastSnapshotId + 1);
+    trustLastSnapshotId = id;
+
     const snapshot = {
-      id: Date.now(),
+      id,
       reason: String(reason || "manual"),
       savedAt: new Date().toISOString(),
-      payload: buildFullSavePayload(getLocalPayload())
+      // TRUST LAYER V1 identity + safe summary metadata (no tokens, no
+      // secrets — just the stable user id / email the app already holds).
+      format: TRUST_SNAPSHOT_FORMAT,
+      appDataVersion: SPLIT_STORAGE_VERSION,
+      ownerId: trustCurrentIdentity(),
+      ownerEmail: (typeof cloudUser !== "undefined" && cloudUser?.email) ? String(cloudUser.email) : "",
+      summary: buildTrustSnapshotSummary(payload),
+      payload
     };
 
     await new Promise((resolve, reject) => {
@@ -4135,6 +4222,7 @@ async function saveLocalSnapshot(reason = "manual"){
     });
 
     db.close();
+    try{ renderTrustBackupPanel(); }catch{}
     return true;
   }catch(err){
     console.warn("Could not save local snapshot; continuing without it.", err);
@@ -4142,46 +4230,85 @@ async function saveLocalSnapshot(reason = "manual"){
   }
 }
 
-async function listLocalSnapshots(){
+// Raw rows, ALL identities. Internal only — everything user-facing must go
+// through the eligibility filter.
+async function readAllSnapshotRows(){
+  const db = await openSnapshotDb();
+  if(!db) return null; // null = IndexedDB unavailable (distinct from empty)
   try{
-    const db = await openSnapshotDb();
-    if(!db) return [];
     const rows = await new Promise((resolve, reject) => {
       const tx = db.transaction(SNAPSHOT_STORE, "readonly");
       const req = tx.objectStore(SNAPSHOT_STORE).getAll();
       req.onsuccess = () => resolve(req.result || []);
       req.onerror = () => reject(req.error);
     });
+    return rows;
+  }finally{
     db.close();
+  }
+}
+
+// Lists snapshots ELIGIBLE for the current identity (metadata only, never
+// payloads). Pass { all:true } from the console for the advanced/manual
+// recovery view across identities (ids + reasons only — still no payloads).
+async function listLocalSnapshots(opts = {}){
+  try{
+    const rows = await readAllSnapshotRows();
+    if(!rows) return [];
     return rows
+      .filter(r => opts.all ? true : snapshotEligibleForCurrentIdentity(r))
       .sort((a, b) => b.id - a.id)
-      .map(r => ({ id: r.id, savedAt: r.savedAt, reason: r.reason }));
+      .map(r => ({
+        id: r.id,
+        savedAt: r.savedAt,
+        reason: r.reason,
+        ownerId: hasOwn(r, "ownerId") ? String(r.ownerId || "") : null, // null = legacy
+        ownerEmail: r.ownerEmail || "",
+        summary: (r.summary && typeof r.summary === "object") ? r.summary : null,
+        legacy: !hasOwn(r, "ownerId")
+      }));
   }catch(err){
     console.warn("Could not list snapshots.", err);
     return [];
   }
 }
 
-async function restoreLocalSnapshot(id = null){
-  const db = await openSnapshotDb();
-  if(!db) throw new Error("IndexedDB unavailable");
+// Safe restore (TRUST LAYER V1). Enforces identity eligibility ON THE
+// FUNCTION (hiding a button is not the security boundary), validates the
+// snapshot before touching current data, snapshots the current state first,
+// then applies the payload through the normal full-save path and enters the
+// restore-review state so nothing auto-pushes the restored copy.
+// opts.force is the documented console-only advanced recovery path.
+async function restoreLocalSnapshot(id = null, opts = {}){
+  const rows = await readAllSnapshotRows();
+  if(!rows) throw new Error("IndexedDB unavailable");
 
-  const rows = await new Promise((resolve, reject) => {
-    const tx = db.transaction(SNAPSHOT_STORE, "readonly");
-    const req = tx.objectStore(SNAPSHOT_STORE).getAll();
-    req.onsuccess = () => resolve(req.result || []);
-    req.onerror = () => reject(req.error);
-  });
-  db.close();
-
+  const eligible = rows.filter(r => opts.force ? true : snapshotEligibleForCurrentIdentity(r));
   const target = id
-    ? rows.find(r => r.id === Number(id))
-    : rows.sort((a, b) => b.id - a.id)[0];
+    ? eligible.find(r => r.id === Number(id))
+    : eligible.slice().sort((a, b) => b.id - a.id)[0];
 
-  if(!target) throw new Error("No snapshot found");
+  if(!target){
+    if(id && rows.some(r => r.id === Number(id))){
+      throw new Error("That snapshot belongs to a different identity on this device and cannot be restored right now.");
+    }
+    throw new Error("No snapshot found");
+  }
+
+  const check = validateSnapshotForRestore(target);
+  if(!check.ok) throw new Error(check.error);
+
+  // Safety net: snapshot the CURRENT state before it is replaced.
+  if(!opts.skipPreSnapshot){
+    await saveLocalSnapshot("before user restore");
+  }
 
   applyFullSavePayload(target.payload);
-  setCloudStatus(`Restored local snapshot from ${target.savedAt} (${target.reason}). Review, then Push if you want the cloud to match.`);
+  await trustFlushRestoredStateNow("snapshot restore");
+  enterRestoreReviewState(target, opts.source || "snapshot");
+  setCloudStatus(`Restored local snapshot from ${target.savedAt} (${target.reason}). Review, then Keep & Push or Discard & Pull.`);
+  try{ logTrustSyncEvent("restore-review-entered", { status: "warn", reason: target.reason }); }catch{}
+  try{ renderTrustBackupPanel(); renderTrustSyncStatus(); updateCloudUI(); }catch{}
   return { id: target.id, savedAt: target.savedAt, reason: target.reason };
 }
 
@@ -4191,6 +4318,14 @@ window.restoreLocalSnapshot = restoreLocalSnapshot;
 
 async function pullCloudIfNewer(opts = {}){
   const forceFull = !!opts.forceFull;
+
+  // TRUST LAYER V1: while a restore is awaiting review, background pulls must
+  // not overwrite the restored copy. A manual Discard & Pull clears the
+  // review marker first, so forceFull pulls pass through.
+  if(!forceFull && typeof isRestoreReviewActive === "function" && isRestoreReviewActive()){
+    setCloudStatus("Cloud: Restore review — automatic sync is paused");
+    return;
+  }
 
   // Automatic pulls must not merge another account's cloud data into a
   // different account's local state. A manual (forceFull) Pull is an
@@ -4275,6 +4410,13 @@ async function pullCloudIfNewer(opts = {}){
     setCloudStatus(
       `Cloud: Pulled ${slicesToPull.length} slice${slicesToPull.length === 1 ? "" : "s"} via ${preferDelta ? "delta" : "full"} sync • ${new Date(cloud.updatedAt || Date.now()).toLocaleString()}`
     );
+
+    // TRUST LAYER V1: truthful remote-change notice + history entry. Only
+    // fires when remote data was ACTUALLY applied (this branch), never on a
+    // poll that found nothing.
+    try{
+      noteRemoteCloudChangesApplied(slicesToPull, forceFull ? "manual pull" : (preferDelta ? "delta pull" : "full pull"));
+    }catch{}
   }else{
     setCloudLastSyncAt(Date.now());
     setCloudStatus(isCloudPending() ? "Cloud: Pending sync" : `Cloud: Local copy is current${preferDelta ? " • delta checked" : ""}`);
@@ -4285,6 +4427,7 @@ async function pushLocalToCloud(){
   await saveLocalSnapshot("before manual push");
   if(cloudUser) setLocalDataOwner(cloudUser.id);
   markCloudPending("manual push", DATA_SLICE_NAMES);
+  try{ logTrustSyncEvent("manual-push", { status: "info", reason: "user pressed Push" }); }catch{}
   await writeCloudStateNow(DATA_SLICE_NAMES);
 }
 
@@ -4315,6 +4458,7 @@ cloudPullBtn?.addEventListener("click", async () => {
   try{
     await saveLocalSnapshot("before manual pull");
     if(cloudUser) setLocalDataOwner(cloudUser.id);
+    try{ logTrustSyncEvent("manual-pull", { status: "info", reason: "user pressed Pull" }); }catch{}
     await pullCloudIfNewer({ forceFull:true });
   }catch(err){
     console.error(err);
@@ -19133,6 +19277,16 @@ function openSharedEventDetails(ev, iso){
     }
   }
 
+  // TRUST LAYER V1: server-owned created-by / last-edited-by attribution.
+  const attrEl = document.getElementById("sharedEventModalAttribution");
+  if(attrEl){
+    const lines = (typeof formatSharedAttributionLines === "function")
+      ? formatSharedAttributionLines(ev)
+      : [];
+    attrEl.textContent = lines.join("\n");
+    attrEl.style.display = lines.length ? "" : "none";
+  }
+
   if(editBtn){
     editBtn.style.display = canEdit ? "" : "none";
     editBtn.setAttribute("aria-label", `Edit this event in ${ev._calendarName || "the shared calendar"}`);
@@ -19386,7 +19540,12 @@ var sharedV2State = {
   realtimeStatus: "off",   // off | connecting | connected | reconnecting | error
   lastFetchAt: 0,
   lastError: "",
-  mirror: { lastRunAt: 0, lastUpserts: 0, lastDeletes: 0, lastError: "" }
+  mirror: { lastRunAt: 0, lastUpserts: 0, lastDeletes: 0, lastError: "" },
+  // TRUST LAYER V1 — attribution + activity (per-session capability caches so
+  // a missing migration is probed once, not hammered):
+  attributionAvailable: null,  // null = unknown, false = columns missing
+  activityAvailable: null,     // null = unknown, false = table missing
+  activityByCalendar: {}       // calendarId -> { rows, fetchedAt }
 };
 
 // --- Per-device visibility toggles for V2 calendars ---------------------------
@@ -19464,7 +19623,13 @@ function sanitizeSharedV2Event(row, cal){
     _calendarName: cal.name || "Shared calendar",
     _calendarKind: cal.kind || "shared",
     _role: sharedV2State.roles[cal.id] || "viewer",
-    _sharedOwnerEmail: cal.owner_email || cal.name || "shared calendar"
+    _sharedOwnerEmail: cal.owner_email || cal.name || "shared calendar",
+    // TRUST LAYER V1: server-owned attribution (safe: ids + timestamps only;
+    // null on legacy rows or when the migration is not installed).
+    _createdBy: row.created_by || null,
+    _updatedBy: row.updated_by || null,
+    _createdAt: row.created_at || null,
+    _updatedAt: row.updated_at || null
   };
 }
 
@@ -19645,6 +19810,9 @@ async function refreshSharedCalendarV2Core(reason = "manual"){
     sharedV2State.invitesOutgoing = [];
     sharedV2State.eventsByCalendar = {};
     sharedV2State.personalCalendarId = "";
+    sharedV2State.activityByCalendar = {};   // Trust Layer: no cross-account cache
+    sharedV2State.activityAvailable = null;
+    if(typeof trustActivityOpenCalendars !== "undefined") trustActivityOpenCalendars.clear();
     teardownSharedV2Realtime();
     render();
     renderEventList();
@@ -19691,15 +19859,22 @@ async function refreshSharedCalendarV2Core(reason = "manual"){
     }
     sharedV2State.roles = roles;
 
-    // Member lists for calendars I own (for the members UI).
+    // Member lists: calendars I own (owner management UI) PLUS shared
+    // calendars I belong to (TRUST LAYER V1 — attribution needs member email
+    // labels, which the "members read member list" RLS policy already grants
+    // to every member).
     const ownedIds = sharedV2State.calendars
       .filter(c => c.owner_user_id === cloudUser.id).map(c => c.id);
+    const memberFetchIds = [...new Set([
+      ...ownedIds,
+      ...sharedV2State.calendars.filter(c => c.kind === "shared").map(c => c.id)
+    ])];
     const members = {};
-    if(ownedIds.length){
+    if(memberFetchIds.length){
       const { data: memberRows, error: mlErr } = await supabaseClient
         .from("calendar_members")
         .select("id, calendar_id, user_id, member_email, role")
-        .in("calendar_id", ownedIds);
+        .in("calendar_id", memberFetchIds);
       if(mlErr) throw mlErr;
       for(const row of (memberRows || [])){
         (members[row.calendar_id] ||= []).push(row);
@@ -19727,12 +19902,34 @@ async function refreshSharedCalendarV2Core(reason = "manual"){
       !(c.kind === "personal" && c.owner_user_id === cloudUser.id));
 
     const eventsByCalendar = {};
+    const EVENT_BASE_COLS = "id, calendar_id, source_event_id, title, details, start_date, start_time, end_time, color, category_id, recurrence, version, deleted_at";
+    const EVENT_ATTR_COLS = EVENT_BASE_COLS + ", created_by, updated_by, created_at, updated_at";
     for(const cal of overlayCals){
-      const { data: rows, error: evErr } = await supabaseClient
-        .from("calendar_events")
-        .select("id, calendar_id, source_event_id, title, details, start_date, start_time, end_time, color, category_id, recurrence, version, deleted_at")
-        .eq("calendar_id", cal.id)
-        .is("deleted_at", null);
+      // TRUST LAYER V1: ask for the attribution columns unless a previous
+      // probe proved them absent; fall back (once per session) on databases
+      // that predate them, so old deployments keep rendering shared events.
+      let rows = null, evErr = null;
+      if(sharedV2State.attributionAvailable !== false){
+        ({ data: rows, error: evErr } = await supabaseClient
+          .from("calendar_events")
+          .select(EVENT_ATTR_COLS)
+          .eq("calendar_id", cal.id)
+          .is("deleted_at", null));
+        if(evErr && isMissingColumnError(evErr)){
+          sharedV2State.attributionAvailable = false;
+          console.info("Trust Layer: attribution columns not installed — shared events render without attribution.");
+          rows = null; evErr = null;
+        }else if(!evErr){
+          sharedV2State.attributionAvailable = true;
+        }
+      }
+      if(rows === null && !evErr){
+        ({ data: rows, error: evErr } = await supabaseClient
+          .from("calendar_events")
+          .select(EVENT_BASE_COLS)
+          .eq("calendar_id", cal.id)
+          .is("deleted_at", null));
+      }
       if(evErr){
         console.warn("Shared Calendars V2: events fetch failed for", cal.name, evErr);
         continue;
@@ -19753,6 +19950,12 @@ async function refreshSharedCalendarV2Core(reason = "manual"){
 
     ensureSharedV2Realtime();          // V5, no-op unless flag is on
     queueCalendarMirrorSync(reason);   // V3, keeps the mirror fresh
+
+    // TRUST LAYER V1: refresh activity for feeds the user has opened (bounded,
+    // cached — never a per-render fetch, never for personal mirrors).
+    try{ await refreshOpenSharedActivityFeeds(reason); }catch(err){
+      console.warn("Trust Layer: activity refresh failed (continuing):", err);
+    }
   }catch(err){
     sharedV2State.lastError = String(err?.message || err);
     if(isMissingTableError(err)){
@@ -19836,6 +20039,9 @@ async function runCalendarMirrorSync(reason = "", opts = {}){
   if(mirrorSyncRunning) return sharedV2State.mirror;
   if(!supabaseClient || !cloudUser) return sharedV2State.mirror;
   if(!sharedV2State.available) return sharedV2State.mirror;
+  // TRUST LAYER V1: a restore awaiting review must not leak outward through
+  // the one-way mirror either — the mirror resumes after the user decides.
+  if(typeof isRestoreReviewActive === "function" && isRestoreReviewActive()) return sharedV2State.mirror;
 
   mirrorSyncRunning = true;
   try{
@@ -20115,6 +20321,18 @@ function setRealtimeStatus(status){
   if(sharedV2State.realtimeStatus === status) return;
   sharedV2State.realtimeStatus = status;
   try{ renderSharedV2Panel(); }catch{}
+  // TRUST LAYER V1: realtime transitions belong in the sync history (the
+  // early-return above already dedupes repeats of the same status).
+  try{
+    if(status === "connected"){
+      logTrustSyncEvent("realtime-connected", { status: "ok" });
+    }else if(status === "reconnecting"){
+      logTrustSyncEvent("realtime-reconnecting", { status: "warn" });
+    }else if(status === "error"){
+      logTrustSyncEvent("realtime-failed", { status: "error" });
+    }
+    renderTrustSyncStatus();
+  }catch{}
 }
 
 function ensureSharedV2Realtime(){
@@ -20373,6 +20591,12 @@ function renderSharedV2Panel(){
         addBtn.setAttribute("aria-label", `Add an event to ${cal.name}`);
         addBtn.addEventListener("click", () => openSharedV2Editor(cal.id, null));
         card.appendChild(addBtn);
+      }
+
+      // TRUST LAYER V1: recent-activity feed. kind='shared' only — personal
+      // mirrors never have (or show) activity.
+      if(cal.kind === "shared"){
+        card.appendChild(buildSharedActivitySection(cal));
       }
 
       // Owner tools: members + invite form.
@@ -20936,6 +21160,8 @@ function getAccountScopedLocalStorageKeys(){
   if(typeof SHARED_CAL_HIDDEN_KEY !== "undefined") keys.push(SHARED_CAL_HIDDEN_KEY);       // V1 toggles
   if(typeof SHARED_V2_HIDDEN_KEY !== "undefined") keys.push(SHARED_V2_HIDDEN_KEY);         // V2 toggles
   if(typeof MIRROR_INDEX_KEY !== "undefined") keys.push(MIRROR_INDEX_KEY);                 // V3 mirror index
+  if(typeof TRUST_SYNC_LOG_KEY !== "undefined") keys.push(TRUST_SYNC_LOG_KEY);             // Trust Layer sync history
+  if(typeof TRUST_RESTORE_REVIEW_KEY !== "undefined") keys.push(TRUST_RESTORE_REVIEW_KEY); // Trust Layer restore review
 
   return keys;
 }
@@ -21063,6 +21289,21 @@ async function clearAccountScopedLocalState(reason = "account change"){
   try{ localStorage.removeItem(CLOUD_LAST_SYNC_KEY); }catch{}
   setClearedBaselineMarker(reason);
 
+  // TRUST LAYER V1: the account-scoped clear above also wiped the previous
+  // account's sync history and restore-review marker (both are scoped keys).
+  // Start the fresh, empty history with an honest device-level entry, and
+  // reset the trust caches held in shared state.
+  try{
+    if(typeof sharedV2State !== "undefined" && sharedV2State){
+      sharedV2State.activityByCalendar = {};
+      sharedV2State.activityAvailable = null;
+    }
+    if(typeof trustActivityOpenCalendars !== "undefined") trustActivityOpenCalendars.clear();
+    logTrustSyncEvent("account-clear", { status: "info", reason });
+    renderTrustBackupPanel();
+    renderTrustSyncStatus();
+  }catch{}
+
   console.info(`Account privacy: account-scoped local state cleared (${reason}).`);
   return true;
 }
@@ -21150,6 +21391,7 @@ async function handleAuthUserChange(user, source = "auth", opts = {}){
       setLocalDataOwner(user.id);
       consumeClearedBaselineMarker();
       lastLoginPullMode = "cleared-baseline-full-pull";
+      try{ logTrustSyncEvent("account-login", { status: "ok", reason: "account-switch full pull" }); }catch{}
       updateCloudUI();
       if(typeof refreshSharedCalendarsCore === "function") refreshSharedCalendarsCore("baseline login").catch(console.error);
       if(typeof refreshSharedCalendarV2Core === "function") refreshSharedCalendarV2Core("baseline login").catch(console.error);
@@ -21173,6 +21415,7 @@ async function handleAuthUserChange(user, source = "auth", opts = {}){
       await pullCloudIfNewer({ forceFull: true });
       setLocalDataOwner(user.id);
       lastLoginPullMode = "empty-baseline-full-pull";
+      try{ logTrustSyncEvent("account-login", { status: "ok", reason: "full pull (empty device)" }); }catch{}
       updateCloudUI();
     }finally{
       accountSwitchInProgress = false;
@@ -21209,6 +21452,7 @@ async function handleAuthUserChange(user, source = "auth", opts = {}){
     // Let the shared-calendar layers rebuild for the new identity.
     if(typeof refreshSharedCalendarsCore === "function") refreshSharedCalendarsCore("account switch").catch(console.error);
     if(typeof refreshSharedCalendarV2Core === "function") refreshSharedCalendarV2Core("account switch").catch(console.error);
+    try{ logTrustSyncEvent("account-switch", { status: "ok", reason: "switched accounts, cloud data loaded" }); }catch{}
   }finally{
     accountSwitchInProgress = false;
   }
@@ -21326,4 +21570,1224 @@ window.testAccountSwitchSafety = async function(){
   for(const line of report) console.log(line);
   console.groupEnd();
   return report;
+};
+
+// ============================================================================
+// 22. TRUST LAYER V1 — visible recovery, sync transparency, shared activity
+// ============================================================================
+// Three user-facing trust systems on top of the existing machinery:
+//   * Data safety & recovery: the snapshot DB (section 04c) becomes visible —
+//     owner-scoped listing, create/download/import, and a SAFE restore flow
+//     that snapshots first, applies through the normal full-save path, and
+//     parks the app in an explicit "restore review" state (no auto-push).
+//   * Sync transparency: a truthful status dashboard plus a bounded,
+//     account-scoped, privacy-safe structured sync history, and a
+//     deduplicated "changes from another device were applied" notice.
+//   * Shared-calendar attribution + activity: renders the server-owned
+//     created_by / updated_by columns and the calendar_activity feed created
+//     by supabase/trust-layer-v1-activity.sql. Fully degradation-safe: if the
+//     migration is not installed, shared calendars work exactly as before.
+//
+// Privacy rules enforced here:
+//   * Snapshot eligibility is enforced IN restoreLocalSnapshot itself (section
+//     04c) — DOM tampering cannot restore another identity's snapshot.
+//   * The sync log stores event types, timestamps, statuses and counts. Never
+//     event titles, notes, budget amounts, receipt text, tokens or endpoints.
+//   * The sync log + restore-review marker are account-scoped localStorage
+//     keys (section 21 clears them on logout/switch).
+//   * Activity rendering shows only what the server-side activity table holds
+//     (actor email, action, safe field names, title snapshot) — nothing is
+//     fetched for personal mirror calendars.
+//
+// ROLLBACK: delete this section, the "TRUST LAYER V1" tagged hooks in sections
+// 04c/20/21, the trust panels + #trustConfirmModal in index.html, the
+// #sharedEventModalAttribution div, and the section-22 CSS banner block.
+// Snapshots keep working exactly as before (extra metadata fields are simply
+// ignored by the old code).
+// ----------------------------------------------------------------------------
+
+// var (not const) on purpose: these are read behind typeof/try guards by code
+// that can run before this section evaluates during startup.
+var TRUST_SYNC_LOG_KEY = "myCalendarSyncLog_v1";
+var TRUST_RESTORE_REVIEW_KEY = "myCalendarRestoreReview_v1";
+var TRUST_SYNC_LOG_LIMIT = 50;
+var TRUST_BACKUP_FORMAT_NAME = "vanguard-calendar-backup";
+var TRUST_BACKUP_FORMAT_VERSION = 1;
+var TRUST_ACTIVITY_PAGE_SIZE = 25;
+var TRUST_ACTIVITY_CACHE_MS = 60 * 1000;
+
+// Whitelist of field names the activity feed may ever show as "changed".
+var TRUST_SAFE_ACTIVITY_FIELDS = [
+  "title", "details", "start_date", "start_time", "end_time",
+  "color", "category_id", "recurrence"
+];
+
+// --- Identity + snapshot metadata helpers -----------------------------------
+
+// The identity local data (and snapshots) belong to right now:
+//   * signed in            -> the user's stable id
+//   * signed out, claimed  -> the claiming owner (session may still be loading)
+//   * signed out, unclaimed-> "" (genuinely unclaimed offline context)
+function trustCurrentIdentity(){
+  if(typeof cloudUser !== "undefined" && cloudUser && cloudUser.id) return String(cloudUser.id);
+  try{ return getLocalDataOwner() || ""; }catch{ return ""; }
+}
+
+// Eligibility rule (documented in TRUST-LAYER-V1.md):
+//   * owned snapshots  -> visible/restorable only under the same identity
+//   * unclaimed ("")   -> visible/restorable only while unclaimed
+//   * legacy (no field)-> treated like unclaimed; never auto-shown to a
+//                         signed-in account. Console force-restore remains
+//                         the advanced recovery path.
+function snapshotEligibleForCurrentIdentity(snap){
+  if(!snap || typeof snap !== "object") return false;
+  const identity = trustCurrentIdentity();
+  if(!hasOwn(snap, "ownerId")) return identity === "";
+  return String(snap.ownerId || "") === identity;
+}
+
+// Small, safe, non-private summary for the snapshot list.
+function buildTrustSnapshotSummary(payload){
+  let eventCount = 0;
+  let pricedEventCount = 0;
+  try{
+    const map = payload?.events || {};
+    for(const iso of Object.keys(map)){
+      const list = map[iso];
+      if(!Array.isArray(list)) continue;
+      eventCount += list.length;
+      for(const ev of list){
+        if(ev && ev.price !== null && ev.price !== undefined && ev.price !== "") pricedEventCount++;
+      }
+    }
+  }catch{}
+  return { eventCount, pricedEventCount };
+}
+
+function validateSnapshotForRestore(snap){
+  if(!snap || typeof snap !== "object") return { ok: false, error: "Snapshot not found." };
+  const p = snap.payload;
+  if(!p || typeof p !== "object" || Array.isArray(p)){
+    return { ok: false, error: "This snapshot's data is missing or corrupted — nothing was changed." };
+  }
+  if(hasOwn(p, "events") && (typeof p.events !== "object" || Array.isArray(p.events) || p.events === null)){
+    return { ok: false, error: "This snapshot's event data is not valid — nothing was changed." };
+  }
+  if(Number(snap.format || 1) > TRUST_SNAPSHOT_FORMAT){
+    return { ok: false, error: "This snapshot was created by a newer version of Vanguard — nothing was changed." };
+  }
+  return { ok: true };
+}
+
+// After a restore/import replaces the in-memory state, the IndexedDB mirror
+// still holds the PREVIOUS records until the 120ms debounced slice write
+// fires — and the visible-range hydration would happily resurrect them into
+// the grid (same failure class as the Quality Foundation budget-drawer bug).
+// Flush the pending slice writes immediately, then invalidate both range
+// caches and re-render so the view can only hydrate the restored data.
+async function trustFlushRestoredStateNow(reason = "restore"){
+  try{
+    if(typeof flushIndexedDbSliceWrites === "function") await flushIndexedDbSliceWrites();
+    if(typeof clearIndexedDbEventRangeCache === "function") clearIndexedDbEventRangeCache(reason);
+    if(typeof clearIndexedDbBudgetTransactionRangeCache === "function") clearIndexedDbBudgetTransactionRangeCache(reason);
+    render();
+    renderEventList();
+  }catch(err){
+    console.warn("Trust Layer: post-restore IndexedDB flush issue (view may lag one refresh):", err);
+  }
+}
+
+function describeSnapshotReason(reason = ""){
+  const r = String(reason || "");
+  if(r === "manual backup") return "Manual backup";
+  if(r === "manual") return "Manual backup";
+  if(r === "before manual push") return "Safety snapshot before Push";
+  if(r === "before manual pull") return "Safety snapshot before Pull";
+  if(r === "before user restore") return "Before restoring a backup";
+  if(r === "before backup file import") return "Before importing a backup file";
+  if(r === "before discarding restored copy") return "Before discarding a restored copy";
+  if(r === "before cleared-baseline force pull") return "Offline work saved before sign-in";
+  if(r.startsWith("before account scoped clear")) return "Before this device was cleared (logout / account switch)";
+  return r;
+}
+
+// --- Restore review state ----------------------------------------------------
+// While active, EVERY automatic sync path is paused (pull, flush, debounced
+// write, mirror). Only the explicit review actions resume syncing. The marker
+// survives reloads and is account-scoped (cleared by section 21).
+
+function getRestoreReviewState(){
+  try{
+    const raw = JSON.parse(localStorage.getItem(TRUST_RESTORE_REVIEW_KEY));
+    return (raw && typeof raw === "object") ? raw : null;
+  }catch{
+    return null;
+  }
+}
+
+function isRestoreReviewActive(){
+  const st = getRestoreReviewState();
+  if(!st) return false;
+  const markerOwner = String(st.ownerId || "");
+  const identity = trustCurrentIdentity();
+  if(markerOwner === identity) return true;
+  // No signed-in identity yet (e.g. session still resolving after a reload):
+  // keep the review active — pausing sync is always the safe interpretation.
+  if(typeof cloudUser === "undefined" || !cloudUser) return true;
+  // A DIFFERENT account is signed in: the marker is stale (account switching
+  // clears it, but resolve defensively rather than pausing B's sync).
+  clearRestoreReviewState("identity changed");
+  return false;
+}
+
+function enterRestoreReviewState(snapshotLike = {}, source = "snapshot"){
+  try{
+    localStorage.setItem(TRUST_RESTORE_REVIEW_KEY, JSON.stringify({
+      at: Date.now(),
+      ownerId: trustCurrentIdentity(),
+      snapshotId: Number(snapshotLike.id || 0),
+      snapshotSavedAt: String(snapshotLike.savedAt || ""),
+      reason: String(snapshotLike.reason || ""),
+      source: String(source || "snapshot")
+    }));
+  }catch{}
+  try{ renderRestoreReviewBanner(); renderTrustSyncStatus(); }catch{}
+}
+
+function clearRestoreReviewState(why = ""){
+  try{ localStorage.removeItem(TRUST_RESTORE_REVIEW_KEY); }catch{}
+  try{ renderRestoreReviewBanner(); renderTrustSyncStatus(); updateCloudUI(); }catch{}
+}
+
+async function resolveRestoreReviewKeepPush(){
+  if(!cloudUser){ showTrustToast("Sign in first to push the restored copy to the cloud."); return false; }
+  clearRestoreReviewState("kept + push");
+  try{ logTrustSyncEvent("restore-kept-pushed", { status: "ok" }); }catch{}
+  await pushLocalToCloud();
+  try{ renderTrustBackupPanel(); }catch{}
+  return true;
+}
+
+async function resolveRestoreReviewDiscardPull(){
+  if(!cloudUser){ showTrustToast("Sign in first to pull your cloud data."); return false; }
+  await saveLocalSnapshot("before discarding restored copy");
+  clearRestoreReviewState("discarded + pull");
+  try{ logTrustSyncEvent("restore-discarded-pulled", { status: "ok" }); }catch{}
+  setLocalDataOwner(cloudUser.id);
+  await pullCloudIfNewer({ forceFull: true });
+  try{ renderTrustBackupPanel(); }catch{}
+  return true;
+}
+
+// Signed-out (local-only) reviews have no cloud to push/pull — finishing the
+// review simply keeps the restored copy on this device.
+function resolveRestoreReviewFinishLocal(){
+  clearRestoreReviewState("kept locally");
+  try{ logTrustSyncEvent("restore-review-finished", { status: "ok", reason: "kept locally (signed out)" }); }catch{}
+  try{ renderTrustBackupPanel(); }catch{}
+  return true;
+}
+
+// --- Structured sync event log ------------------------------------------------
+// Bounded (50), account-scoped, metadata-only. Newest first.
+
+var TRUST_SYNC_EVENT_LABELS = {
+  "local-change-queued":      "Local change saved, waiting to sync",
+  "sync-flush-succeeded":     "Synced to cloud",
+  "sync-flush-failed":        "Cloud sync failed",
+  "sync-paused-conflict":     "Sync paused — cloud has newer changes",
+  "cloud-changes-applied":    "Changes from another device applied",
+  "manual-pull":              "Manual Pull requested",
+  "manual-push":              "Manual Push requested",
+  "went-offline-pending":     "Offline with changes pending",
+  "went-offline":             "Went offline",
+  "came-online":              "Back online",
+  "account-clear":            "Account data cleared from this device",
+  "account-switch":           "Switched accounts",
+  "account-login":            "Signed in",
+  "restore-review-entered":   "Backup restored — review pending",
+  "restore-kept-pushed":      "Restored copy kept and pushed",
+  "restore-discarded-pulled": "Restored copy discarded — cloud reloaded",
+  "restore-review-finished":  "Restore review finished",
+  "backup-created":           "Backup created",
+  "backup-downloaded":        "Backup downloaded",
+  "backup-imported":          "Backup file imported",
+  "realtime-connected":       "Realtime connected",
+  "realtime-reconnecting":    "Realtime reconnecting",
+  "realtime-failed":          "Realtime connection failed"
+};
+
+var trustLastFlushFailedAt = 0;
+
+function sanitizeTrustLogText(value){
+  if(value === null || value === undefined) return "";
+  let text = String(value).replace(/\s+/g, " ").trim();
+  // Belt and braces: nothing secret should ever be passed in, but strip long
+  // opaque token-shaped blobs and cap the length regardless.
+  text = text.replace(/(eyJ|sbp_|Bearer\s+)[A-Za-z0-9._-]{12,}/g, "[redacted]");
+  return text.slice(0, 140);
+}
+
+function sanitizeTrustLogCounts(counts){
+  const out = {};
+  if(counts && typeof counts === "object"){
+    for(const key of ["slices", "rows", "records", "events"]){
+      const n = Number(counts[key]);
+      if(Number.isFinite(n)) out[key] = n;
+    }
+  }
+  return out;
+}
+
+function getTrustSyncLog(){
+  try{
+    const raw = JSON.parse(localStorage.getItem(TRUST_SYNC_LOG_KEY));
+    if(!Array.isArray(raw)) return [];
+    return raw.filter(e => e && typeof e === "object" && e.type);
+  }catch{
+    return [];
+  }
+}
+
+function saveTrustSyncLog(log){
+  try{ localStorage.setItem(TRUST_SYNC_LOG_KEY, JSON.stringify(log.slice(0, TRUST_SYNC_LOG_LIMIT))); }catch{}
+}
+
+function clearTrustSyncLog(){
+  try{ localStorage.removeItem(TRUST_SYNC_LOG_KEY); }catch{}
+  try{ renderTrustSyncHistory(); }catch{}
+}
+
+function logTrustSyncEvent(type, data = {}){
+  const entry = {
+    at: Date.now(),
+    type: String(type || "info").slice(0, 40),
+    status: ["ok", "error", "warn", "info"].includes(data.status) ? data.status : "info",
+    reason: sanitizeTrustLogText(data.reason),
+    detail: sanitizeTrustLogText(data.detail),
+    counts: sanitizeTrustLogCounts(data.counts)
+  };
+
+  if(entry.type === "sync-flush-failed") trustLastFlushFailedAt = entry.at;
+  if(entry.type === "sync-flush-succeeded") trustLastFlushFailedAt = 0;
+
+  const log = getTrustSyncLog();
+
+  // Merge rapid consecutive "local change queued" entries so ordinary typing
+  // doesn't flood the 50-entry window.
+  const newest = log[0];
+  if(entry.type === "local-change-queued" && newest && newest.type === entry.type &&
+     entry.at - Number(newest.at || 0) < 20000){
+    newest.at = entry.at;
+    newest.counts = entry.counts;
+    newest.reason = entry.reason || newest.reason;
+  }else{
+    log.unshift(entry);
+  }
+
+  saveTrustSyncLog(log);
+  try{ renderTrustSyncHistory(); renderTrustSyncStatus(); }catch{}
+  return entry;
+}
+
+// --- Remote-change notice -------------------------------------------------------
+
+var trustLastRemoteNoticeAt = 0;
+
+function showTrustToast(text){
+  let box = document.getElementById("trustToast");
+  if(!box){
+    box = document.createElement("div");
+    box.id = "trustToast";
+    box.setAttribute("role", "status");
+    box.setAttribute("aria-live", "polite");
+    document.body.appendChild(box);
+  }
+  box.textContent = text;
+  box.classList.add("visible");
+  clearTimeout(showTrustToast._t);
+  showTrustToast._t = setTimeout(() => box.classList.remove("visible"), 4500);
+}
+
+// Called ONLY from the pull path that actually applied remote slices — never
+// from a poll that found nothing (truthfulness rule).
+function noteRemoteCloudChangesApplied(slices = [], mode = "pull"){
+  const labels = slices.map(s => (typeof DATA_SLICE_LABELS !== "undefined" && DATA_SLICE_LABELS[s]) || s);
+  try{
+    logTrustSyncEvent("cloud-changes-applied", {
+      status: "ok",
+      reason: mode,
+      detail: labels.slice(0, 4).join(", "),
+      counts: { slices: slices.length }
+    });
+  }catch{}
+
+  // Manual pulls are user-initiated — the status line already reports them.
+  if(mode === "manual pull") return;
+
+  const now = Date.now();
+  if(now - trustLastRemoteNoticeAt < 8000) return; // debounce bursts
+  trustLastRemoteNoticeAt = now;
+
+  const suffix = slices.includes("events")
+    ? " Calendar events were updated."
+    : (labels.length === 1 ? ` ${labels[0]} was updated.` : "");
+  showTrustToast("Changes from another device were applied." + suffix);
+}
+
+// --- Time formatting helpers ---------------------------------------------------
+
+function formatTrustTimestamp(value){
+  const d = value instanceof Date ? value : new Date(value);
+  if(isNaN(d.getTime())) return "";
+  return d.toLocaleString([], { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function formatTrustRelativeTime(value){
+  const t = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  if(!Number.isFinite(t) || t <= 0) return "";
+  const diff = Date.now() - t;
+  if(diff < 45 * 1000) return "just now";
+  if(diff < 90 * 1000) return "1 minute ago";
+  if(diff < 60 * 60 * 1000) return `${Math.round(diff / 60000)} minutes ago`;
+  if(diff < 2 * 60 * 60 * 1000) return "1 hour ago";
+  if(diff < 24 * 60 * 60 * 1000) return `${Math.round(diff / 3600000)} hours ago`;
+  if(diff < 48 * 60 * 60 * 1000) return "yesterday";
+  return new Date(t).toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+// --- Sync status dashboard -------------------------------------------------------
+
+var trustQueueCountToken = 0;
+
+function trustAccountModalVisible(){
+  const modal = document.getElementById("accountModal");
+  return !!modal && !modal.classList.contains("hidden");
+}
+
+function trustHintDiv(text){
+  const div = document.createElement("div");
+  div.className = "hint";
+  div.textContent = text;
+  return div;
+}
+
+function renderTrustSyncStatus(){
+  const headline = document.getElementById("trustSyncHeadline");
+  const list = document.getElementById("trustSyncStatusList");
+  if(!headline || !list) return;
+  if(!trustAccountModalVisible()) return;
+
+  const online = typeof navigator === "undefined" || navigator.onLine !== false;
+  const signedIn = typeof cloudUser !== "undefined" && !!cloudUser;
+  const pendingSlices = getPendingSliceList();
+  const review = isRestoreReviewActive();
+  const mismatch = signedIn && cloudIdentityMismatch();
+  const lastSyncAt = getCloudLastSyncAt();
+
+  let opText = "Idle — everything saved on this device";
+  let opClass = "trustOk";
+  if(review){
+    opText = "Restore review — sync paused until you choose"; opClass = "trustWarn";
+  }else if(mismatch){
+    opText = "Paused — this device holds another account's data"; opClass = "trustWarn";
+  }else if(typeof cloudFlushInProgress !== "undefined" && cloudFlushInProgress){
+    opText = "Syncing…"; opClass = "";
+  }else if(!online && pendingSlices.length){
+    opText = "Offline — changes waiting to sync"; opClass = "trustWarn";
+  }else if(!online){
+    opText = "Offline — working locally"; opClass = "trustWarn";
+  }else if(trustLastFlushFailedAt && trustLastFlushFailedAt > lastSyncAt){
+    opText = "Last sync failed — retrying automatically"; opClass = "trustBad";
+  }else if(signedIn && pendingSlices.length){
+    opText = "Changes pending sync"; opClass = "trustWarn";
+  }else if(!signedIn){
+    opText = "Local-only — sign in to sync"; opClass = "";
+  }
+
+  const newHeadline = signedIn ? `${cloudUser.email || "Signed in"} · ${opText}` : opText;
+  // aria-live politeness: only touch the DOM when the message actually changed.
+  if(headline.textContent !== newHeadline) headline.textContent = newHeadline;
+
+  const owner = (typeof getLocalDataOwner === "function") ? getLocalDataOwner() : "";
+  let ownerLabel = "Unclaimed (no account has synced here)";
+  let ownerClass = "";
+  if(owner && signedIn && owner === cloudUser.id) ownerLabel = "This account";
+  else if(owner && signedIn){ ownerLabel = "A different account — auto-sync paused"; ownerClass = "trustWarn"; }
+  else if(owner) ownerLabel = "The last signed-in account";
+
+  const summary = (typeof cloudSyncLastReadSummary !== "undefined" && cloudSyncLastReadSummary) || {};
+  const lastReadLabel = summary.mode && summary.mode !== "none"
+    ? `${summary.mode} read · ${Number(summary.rowsRead || 0)} rows${(summary.appliedSlices || []).length ? ` · applied ${summary.appliedSlices.length} slice${summary.appliedSlices.length === 1 ? "" : "s"}` : ""}`
+    : "No cloud reads yet this session";
+
+  const pullMode = (typeof lastLoginPullMode !== "undefined" && lastLoginPullMode) ? ({
+    "same-owner": "normal (same account)",
+    "adopted": "adopted this device's offline data",
+    "cleared-baseline-full-pull": "full pull after device clear",
+    "empty-baseline-full-pull": "full pull (empty device)",
+    "switched": "account-switch full pull"
+  })[lastLoginPullMode] || lastLoginPullMode : "";
+
+  let realtimeLabel = "";
+  if(signedIn && typeof sharedV2State !== "undefined" && sharedV2State.available){
+    realtimeLabel = (typeof sharedRealtimeEnabled === "function" && !sharedRealtimeEnabled())
+      ? "Off (disabled on this device)"
+      : ({
+          connected: "Connected",
+          connecting: "Connecting…",
+          reconnecting: "Reconnecting…",
+          error: "Error — manual refresh still works",
+          off: "Off"
+        })[sharedV2State.realtimeStatus] || sharedV2State.realtimeStatus;
+  }
+
+  const rows = [
+    { label: "Connection", value: online ? "Online" : "Offline", cls: online ? "trustOk" : "trustWarn" },
+    { label: "Account", value: signedIn ? `Signed in as ${cloudUser.email || "user"}` : "Local-only (not signed in)", cls: signedIn ? "trustOk" : "" },
+    { label: "This device's data belongs to", value: ownerLabel, cls: ownerClass },
+    { label: "Last successful cloud sync", value: lastSyncAt ? `${formatTrustRelativeTime(lastSyncAt)} (${formatTrustTimestamp(lastSyncAt)})` : "Never on this device", cls: "" },
+    { label: "Pending changes", value: pendingSlices.length ? `${pendingSlices.length} slice${pendingSlices.length === 1 ? "" : "s"} waiting` : "Nothing pending", cls: pendingSlices.length ? "trustWarn" : "trustOk", id: "trustPendingValue" },
+    { label: "Current operation", value: opText, cls: opClass }
+  ];
+  if(pullMode) rows.push({ label: "Last sign-in pull", value: pullMode, cls: "" });
+  rows.push({ label: "Last cloud read", value: lastReadLabel, cls: "" });
+  if(realtimeLabel) rows.push({ label: "Shared realtime", value: realtimeLabel, cls: sharedV2State.realtimeStatus === "connected" ? "trustOk" : "" });
+  if(review) rows.push({ label: "Restore review", value: "Active — choose Keep & Push or Discard & Pull below", cls: "trustWarn" });
+
+  list.innerHTML = "";
+  for(const row of rows){
+    const rowEl = document.createElement("div");
+    rowEl.className = "trustStatusRow";
+    const labelEl = document.createElement("span");
+    labelEl.className = "trustStatusLabel";
+    labelEl.textContent = row.label;
+    const valueEl = document.createElement("span");
+    valueEl.className = "trustStatusValue" + (row.cls ? " " + row.cls : "");
+    valueEl.textContent = row.value;
+    if(row.id) valueEl.id = row.id;
+    rowEl.appendChild(labelEl);
+    rowEl.appendChild(valueEl);
+    list.appendChild(rowEl);
+  }
+
+  // Queued record ops are async (IndexedDB) — fill in when known.
+  if(pendingSlices.length && typeof countQueuedCloudRecordOps === "function"){
+    const token = ++trustQueueCountToken;
+    countQueuedCloudRecordOps().then(n => {
+      if(token !== trustQueueCountToken) return;
+      const el = document.getElementById("trustPendingValue");
+      if(el && n > 0){
+        el.textContent = `${pendingSlices.length} slice${pendingSlices.length === 1 ? "" : "s"} · ${n} queued record${n === 1 ? "" : "s"}`;
+      }
+    }).catch(() => {});
+  }
+}
+
+function renderTrustSyncHistory(){
+  const listEl = document.getElementById("trustSyncHistoryList");
+  if(!listEl) return;
+  if(!trustAccountModalVisible()) return;
+
+  const log = getTrustSyncLog();
+  listEl.innerHTML = "";
+
+  if(!log.length){
+    listEl.appendChild(trustHintDiv("No sync activity recorded on this device yet."));
+    return;
+  }
+
+  const glyphs = { ok: "OK", error: "FAIL", warn: "WAIT", info: "·" };
+  for(const entry of log){
+    const row = document.createElement("div");
+    row.className = "trustHistoryRow";
+    row.setAttribute("role", "listitem");
+
+    const glyph = document.createElement("span");
+    glyph.className = "trustHistoryGlyph " + (entry.status || "info");
+    glyph.textContent = glyphs[entry.status] || "·";
+
+    const text = document.createElement("span");
+    text.className = "trustHistoryText";
+    text.textContent = TRUST_SYNC_EVENT_LABELS[entry.type] || entry.type;
+
+    const bits = [];
+    const counts = entry.counts || {};
+    if(Number.isFinite(counts.slices) && counts.slices > 0) bits.push(`${counts.slices} slice${counts.slices === 1 ? "" : "s"}`);
+    if(Number.isFinite(counts.rows) && counts.rows > 0) bits.push(`${counts.rows} row${counts.rows === 1 ? "" : "s"}`);
+    if(entry.reason) bits.push(entry.reason);
+    if(entry.detail) bits.push(entry.detail);
+    if(bits.length){
+      const detail = document.createElement("span");
+      detail.className = "trustHistoryDetail";
+      detail.textContent = bits.join(" · ");
+      text.appendChild(detail);
+    }
+
+    const time = document.createElement("span");
+    time.className = "trustHistoryTime";
+    time.textContent = formatTrustRelativeTime(entry.at);
+    time.title = formatTrustTimestamp(entry.at);
+
+    row.appendChild(glyph);
+    row.appendChild(text);
+    row.appendChild(time);
+    listEl.appendChild(row);
+  }
+}
+
+// --- Restore review banner ---------------------------------------------------------
+
+function renderRestoreReviewBanner(){
+  const banner = document.getElementById("trustRestoreReviewBanner");
+  if(!banner) return;
+
+  const active = isRestoreReviewActive();
+  banner.hidden = !active;
+  if(!active) return;
+
+  const st = getRestoreReviewState() || {};
+  const textEl = document.getElementById("trustRestoreReviewText");
+  if(textEl){
+    const when = st.snapshotSavedAt ? formatTrustTimestamp(st.snapshotSavedAt) : "an earlier backup";
+    textEl.textContent =
+      `This device is showing restored data (${st.source === "import" ? "imported backup file" : "backup"} from ${when}). ` +
+      "Automatic sync is paused. Keep the restored copy and push it to the cloud, or discard it and reload your cloud data.";
+  }
+
+  const signedIn = typeof cloudUser !== "undefined" && !!cloudUser;
+  const keepBtn = document.getElementById("trustReviewKeepBtn");
+  const discardBtn = document.getElementById("trustReviewDiscardBtn");
+  const finishBtn = document.getElementById("trustReviewFinishBtn");
+  if(keepBtn) keepBtn.hidden = !signedIn;
+  if(discardBtn) discardBtn.hidden = !signedIn;
+  if(finishBtn) finishBtn.hidden = signedIn;
+}
+
+// --- Data safety & recovery panel -----------------------------------------------
+
+var trustBackupRenderToken = 0;
+
+async function renderTrustBackupPanel(){
+  const listEl = document.getElementById("trustSnapshotList");
+  if(!listEl) return;
+  renderRestoreReviewBanner();
+  if(!trustAccountModalVisible()) return;
+
+  if(typeof indexedDB === "undefined"){
+    listEl.innerHTML = "";
+    listEl.appendChild(trustHintDiv("Snapshots aren't available — this browser doesn't support IndexedDB. Downloads still work."));
+    return;
+  }
+
+  const token = ++trustBackupRenderToken;
+  if(!listEl.childElementCount){
+    listEl.appendChild(trustHintDiv("Loading snapshots…"));
+  }
+
+  let rows = null;
+  let failed = false;
+  try{
+    rows = await readAllSnapshotRows();
+  }catch(err){
+    failed = true;
+    console.warn("Trust Layer: could not read snapshots:", err);
+  }
+  if(token !== trustBackupRenderToken) return; // superseded render
+
+  listEl.innerHTML = "";
+
+  if(failed){
+    // Read errors never destroy anything — the stored snapshots are untouched.
+    listEl.appendChild(trustHintDiv("Couldn't read snapshots right now. Your stored snapshots are untouched — try reopening this panel."));
+    return;
+  }
+  if(rows === null){
+    listEl.appendChild(trustHintDiv("Snapshots aren't available — this browser doesn't support IndexedDB."));
+    return;
+  }
+
+  const eligible = rows
+    .filter(r => snapshotEligibleForCurrentIdentity(r))
+    .sort((a, b) => b.id - a.id);
+
+  if(!eligible.length){
+    listEl.appendChild(trustHintDiv(
+      trustCurrentIdentity()
+        ? "No snapshots for this account on this device yet. Use “Create backup now” to make one."
+        : "No snapshots on this device yet. Use “Create backup now” to make one."
+    ));
+    return;
+  }
+
+  for(const snap of eligible){
+    const row = document.createElement("div");
+    row.className = "trustSnapshotRow";
+
+    const info = document.createElement("div");
+    info.className = "trustSnapshotInfo";
+
+    const when = document.createElement("div");
+    when.className = "trustSnapshotWhen";
+    when.textContent = formatTrustTimestamp(snap.savedAt) || String(snap.savedAt || "Unknown time");
+
+    const meta = document.createElement("div");
+    meta.className = "trustSnapshotMeta";
+    const summary = (snap.summary && typeof snap.summary === "object") ? snap.summary : null;
+    const parts = [describeSnapshotReason(snap.reason)];
+    if(summary && Number.isFinite(Number(summary.eventCount))){
+      parts.push(`${summary.eventCount} event${Number(summary.eventCount) === 1 ? "" : "s"}`);
+      if(Number(summary.pricedEventCount) > 0) parts.push(`${summary.pricedEventCount} with prices`);
+    }
+    meta.textContent = parts.filter(Boolean).join(" · ");
+
+    info.appendChild(when);
+    info.appendChild(meta);
+
+    const restoreBtn = document.createElement("button");
+    restoreBtn.type = "button";
+    restoreBtn.className = "tiny";
+    restoreBtn.textContent = "Restore";
+    restoreBtn.setAttribute("aria-label", `Restore the backup from ${when.textContent}`);
+    restoreBtn.addEventListener("click", () => {
+      restoreSnapshotFromUi(snap).catch(err => showTrustToast("Restore failed: " + (err?.message || err)));
+    });
+
+    row.appendChild(info);
+    row.appendChild(restoreBtn);
+    listEl.appendChild(row);
+  }
+}
+
+async function restoreSnapshotFromUi(snap){
+  const ok = await openTrustConfirmDialog({
+    title: "Restore this backup?",
+    body:
+      `Backup from: ${formatTrustTimestamp(snap.savedAt) || snap.savedAt}\n` +
+      `Reason: ${describeSnapshotReason(snap.reason)}\n\n` +
+      "Restoring replaces the calendar and budget data currently on this device with this backup's contents.\n\n" +
+      "Your cloud data will NOT be changed automatically — after restoring, you choose whether to keep the restored copy (Push) or return to the cloud copy (Pull).\n\n" +
+      "A fresh safety snapshot of the current state is saved first.",
+    confirmLabel: "Restore backup"
+  });
+  if(!ok) return false;
+
+  await restoreLocalSnapshot(snap.id, { source: "ui" });
+  showTrustToast("Backup restored — review it, then choose Keep & Push or Discard & Pull.");
+  try{ await renderTrustBackupPanel(); }catch{}
+  return true;
+}
+
+// --- Backup envelope: download + import -------------------------------------------
+
+function trustChecksumString(text){
+  let h1 = 5381, h2 = 52711;
+  for(let i = 0; i < text.length; i++){
+    const c = text.charCodeAt(i);
+    h1 = (Math.imul(h1, 33) ^ c) >>> 0;
+    h2 = (Math.imul(h2, 31) ^ c) >>> 0;
+  }
+  return h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
+}
+
+// The envelope carries the normalized full-save payload plus identification
+// metadata. NEVER sessions, passwords, tokens, push-subscription material,
+// test-mode state, or sync logs.
+function buildTrustBackupEnvelope(reason = "manual download"){
+  const payload = buildFullSavePayload(getLocalPayload());
+  return {
+    format: TRUST_BACKUP_FORMAT_NAME,
+    formatVersion: TRUST_BACKUP_FORMAT_VERSION,
+    appDataVersion: SPLIT_STORAGE_VERSION,
+    exportedAt: new Date().toISOString(),
+    reason: String(reason || "manual download"),
+    ownerEmail: (typeof cloudUser !== "undefined" && cloudUser?.email) ? String(cloudUser.email) : "",
+    summary: buildTrustSnapshotSummary(payload),
+    payloadChecksum: trustChecksumString(JSON.stringify(payload)),
+    payload
+  };
+}
+
+function trustBackupFilename(date = new Date()){
+  const two = n => String(n).padStart(2, "0");
+  return `vanguard-calendar-backup-${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}-${two(date.getHours())}${two(date.getMinutes())}.json`;
+}
+
+function downloadTrustBackup(){
+  const envelope = buildTrustBackupEnvelope("manual download");
+  const json = JSON.stringify(envelope, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = trustBackupFilename();
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  try{ logTrustSyncEvent("backup-downloaded", { status: "ok", counts: { events: envelope.summary.eventCount } }); }catch{}
+  showTrustToast("Backup downloaded. The file is unencrypted — store it somewhere safe.");
+  return envelope;
+}
+
+// Validates a parsed backup file. Accepts the versioned envelope AND (for
+// compatibility with older manual exports) a bare full-save payload.
+function validateTrustBackupEnvelope(parsed){
+  if(!parsed || typeof parsed !== "object" || Array.isArray(parsed)){
+    return { ok: false, error: "That file is not a Vanguard Calendar backup." };
+  }
+
+  if(parsed.format === TRUST_BACKUP_FORMAT_NAME){
+    if(Number(parsed.formatVersion || 0) > TRUST_BACKUP_FORMAT_VERSION){
+      return { ok: false, error: "This backup was made by a newer version of Vanguard. Update the app, then import it." };
+    }
+    const payload = parsed.payload;
+    if(!payload || typeof payload !== "object" || Array.isArray(payload)){
+      return { ok: false, error: "This backup file is missing its data payload." };
+    }
+    if(parsed.payloadChecksum){
+      const actual = trustChecksumString(JSON.stringify(payload));
+      if(actual !== parsed.payloadChecksum){
+        return { ok: false, error: "This backup file appears damaged (integrity check failed). Nothing was changed." };
+      }
+    }
+    if(hasOwn(payload, "events") && (typeof payload.events !== "object" || Array.isArray(payload.events) || payload.events === null)){
+      return { ok: false, error: "This backup's event data is not valid. Nothing was changed." };
+    }
+    return { ok: true, payload, legacy: false, exportedAt: parsed.exportedAt || "" };
+  }
+
+  // Legacy shapes: a full-save payload (has events/splitStorage/version keys).
+  if(hasOwn(parsed, "events") || parsed.splitStorage || hasOwn(parsed, "version")){
+    const eventsVal = hasOwn(parsed, "events") ? parsed.events : null;
+    if(eventsVal !== null && (typeof eventsVal !== "object" || Array.isArray(eventsVal))){
+      return { ok: false, error: "This file's event data is not valid. Nothing was changed." };
+    }
+    return { ok: true, payload: parsed, legacy: true, exportedAt: "" };
+  }
+
+  return { ok: false, error: "That file is not a Vanguard Calendar backup." };
+}
+
+async function importTrustBackupFile(file){
+  if(!file) return false;
+
+  let parsed = null;
+  try{
+    const text = await file.text();
+    parsed = JSON.parse(text);
+  }catch{
+    showTrustToast("That file could not be read as a backup (not valid JSON). Nothing was changed.");
+    return false;
+  }
+
+  const check = validateTrustBackupEnvelope(parsed);
+  if(!check.ok){
+    showTrustToast(check.error);
+    return false;
+  }
+
+  const summary = buildTrustSnapshotSummary(check.payload);
+  const ok = await openTrustConfirmDialog({
+    title: "Import this backup file?",
+    body:
+      (check.legacy
+        ? "This looks like an older-format export.\n"
+        : `Exported: ${check.exportedAt ? formatTrustTimestamp(check.exportedAt) : "unknown"}\n`) +
+      `Contains: ${summary.eventCount} event${summary.eventCount === 1 ? "" : "s"}\n\n` +
+      "Importing replaces the calendar and budget data currently on this device with the file's contents.\n\n" +
+      "Your cloud data will NOT be changed automatically — after importing, you choose whether to keep the imported copy (Push) or return to the cloud copy (Pull).\n\n" +
+      "A fresh safety snapshot of the current state is saved first.",
+    confirmLabel: "Import backup"
+  });
+  if(!ok) return false;
+
+  await saveLocalSnapshot("before backup file import");
+  applyFullSavePayload(check.payload);
+  await trustFlushRestoredStateNow("backup import");
+  enterRestoreReviewState({ id: 0, savedAt: check.exportedAt || new Date().toISOString(), reason: "backup file import" }, "import");
+  try{ logTrustSyncEvent("backup-imported", { status: "ok", counts: { events: summary.eventCount } }); }catch{}
+  setCloudStatus("Cloud: Backup file imported. Review, then Keep & Push or Discard & Pull.");
+  showTrustToast("Backup imported — review it, then choose Keep & Push or Discard & Pull.");
+  try{ await renderTrustBackupPanel(); renderTrustSyncStatus(); updateCloudUI(); }catch{}
+  return true;
+}
+
+// --- Accessible confirmation dialog -----------------------------------------------
+
+var trustConfirmState = null; // { resolve, previousFocus }
+
+function openTrustConfirmDialog(opts = {}){
+  return new Promise((resolve) => {
+    const modal = document.getElementById("trustConfirmModal");
+    if(!modal){
+      resolve(window.confirm(`${opts.title || "Confirm"}\n\n${opts.body || ""}`));
+      return;
+    }
+    if(trustConfirmState) closeTrustConfirmDialog(false); // one dialog at a time
+
+    trustConfirmState = { resolve, previousFocus: document.activeElement };
+
+    const titleEl = document.getElementById("trustConfirmTitle");
+    const bodyEl = document.getElementById("trustConfirmBody");
+    const okBtn = document.getElementById("trustConfirmOkBtn");
+    if(titleEl) titleEl.textContent = opts.title || "Confirm";
+    if(bodyEl) bodyEl.textContent = opts.body || "";
+    if(okBtn) okBtn.textContent = opts.confirmLabel || "Confirm";
+
+    modal.classList.remove("hidden");
+    document.body.classList.add("trustModalOpen"); // lock background scroll
+    setTimeout(() => okBtn?.focus(), 0);           // focus moves INTO the dialog
+  });
+}
+
+function closeTrustConfirmDialog(result){
+  const modal = document.getElementById("trustConfirmModal");
+  modal?.classList.add("hidden");
+  document.body.classList.remove("trustModalOpen");
+  const st = trustConfirmState;
+  trustConfirmState = null;
+  if(st){
+    try{ st.previousFocus?.focus?.(); }catch{}   // focus returns to the trigger
+    st.resolve(!!result);
+  }
+}
+
+// --- Shared-calendar activity + attribution (Part 3 client) ------------------------
+
+var trustActivityOpenCalendars = new Set(); // feeds the user opened this session
+
+function isMissingColumnError(err){
+  const msg = String(err?.message || err || "").toLowerCase();
+  const code = String(err?.code || "");
+  return code === "42703" ||
+         (msg.includes("column") && (msg.includes("does not exist") || msg.includes("could not find")));
+}
+
+// Bounded, cached fetch. Missing table = quiet per-session "unavailable"
+// (probed once, never hammered). Other errors are logged, not swallowed as
+// "unavailable".
+async function fetchSharedCalendarActivity(calendarId, opts = {}){
+  if(!supabaseClient || !cloudUser) return null;
+  if(typeof sharedV2State === "undefined" || !sharedV2State.available) return null;
+  if(sharedV2State.activityAvailable === false) return null;
+
+  const cached = sharedV2State.activityByCalendar[calendarId];
+  if(!opts.force && cached && Date.now() - cached.fetchedAt < TRUST_ACTIVITY_CACHE_MS){
+    return cached.rows;
+  }
+
+  const { data, error } = await supabaseClient
+    .from("calendar_activity")
+    .select("id, calendar_id, event_id, actor_user_id, actor_email, action, changed_fields, title_snapshot, created_at")
+    .eq("calendar_id", calendarId)
+    .order("created_at", { ascending: false })
+    .limit(TRUST_ACTIVITY_PAGE_SIZE);
+
+  if(error){
+    if(isMissingTableError(error)){
+      sharedV2State.activityAvailable = false;
+      console.info("Trust Layer: calendar_activity not installed — activity feed dormant, calendars unaffected.");
+    }else{
+      console.warn("Trust Layer: activity fetch failed for calendar", calendarId, error);
+    }
+    return null;
+  }
+
+  sharedV2State.activityAvailable = true;
+  const rows = Array.isArray(data) ? data : [];
+  sharedV2State.activityByCalendar[calendarId] = { rows, fetchedAt: Date.now() };
+  return rows;
+}
+
+// Refresh feeds the user has open — called from refreshSharedCalendarV2Core
+// (startup / realtime / periodic), so activity stays near-realtime without
+// its own channel and without per-render fetching.
+async function refreshOpenSharedActivityFeeds(reason = ""){
+  if(typeof sharedV2State === "undefined") return;
+  if(sharedV2State.activityAvailable === false) return;
+  const openIds = [...trustActivityOpenCalendars].filter(id =>
+    sharedV2State.calendars.some(c => c.id === id && c.kind === "shared"));
+  for(const calId of openIds){
+    await fetchSharedCalendarActivity(calId, { force: true });
+  }
+}
+
+function resolveSharedMemberLabel(cal, userId){
+  if(!userId) return null;
+  if(typeof cloudUser !== "undefined" && cloudUser && userId === cloudUser.id) return "you";
+  if(cal && cal.owner_user_id === userId) return cal.owner_email || "the owner";
+  const members = (typeof sharedV2State !== "undefined" && sharedV2State.members && cal)
+    ? (sharedV2State.members[cal.id] || [])
+    : [];
+  const m = members.find(x => x.user_id === userId);
+  if(m) return m.member_email || "a member";
+  return "a former member";
+}
+
+// Attribution lines for the shared-event detail modal. kind='shared' only —
+// personal mirrors show nothing (their events are always the owner's).
+function formatSharedAttributionLines(ev){
+  if(!ev || !ev._sharedV2 || ev._calendarKind !== "shared") return [];
+  if(typeof sharedV2State !== "undefined" && sharedV2State.attributionAvailable === false) return [];
+
+  const cal = (typeof sharedV2State !== "undefined" ? sharedV2State.calendars : [])
+    .find(c => c.id === ev._calendarId) || null;
+  const lines = [];
+
+  if(ev._createdBy){
+    const who = resolveSharedMemberLabel(cal, ev._createdBy) || "a member";
+    lines.push(`Created by ${who}${ev._createdAt ? ` · ${formatTrustTimestamp(ev._createdAt)}` : ""}`);
+  }else{
+    // Honest legacy label — never falsely attribute old rows to the owner.
+    lines.push("Created before activity history");
+  }
+
+  if(ev._updatedBy && Number(ev._version || 1) > 1){
+    const who = resolveSharedMemberLabel(cal, ev._updatedBy) || "a member";
+    lines.push(`Last edited by ${who}${ev._updatedAt ? ` · ${formatTrustTimestamp(ev._updatedAt)}` : ""}`);
+  }
+
+  return lines;
+}
+
+function formatSharedActivityMessage(row){
+  const isMe = typeof cloudUser !== "undefined" && cloudUser && row.actor_user_id === cloudUser.id;
+  const actor = isMe ? "You" : (row.actor_email || "A member");
+  const title = String(row.title_snapshot || "").trim() || "an event";
+  switch(row.action){
+    case "create":  return `${actor} created “${title}”`;
+    case "move":    return `${actor} moved “${title}”`;
+    case "delete":  return `${actor} deleted “${title}”`;
+    case "restore": return `${actor} restored “${title}”`;
+    default:        return `${actor} changed “${title}”`;
+  }
+}
+
+function safeActivityChangedFields(row){
+  const fields = Array.isArray(row?.changed_fields) ? row.changed_fields : [];
+  return fields.filter(f => TRUST_SAFE_ACTIVITY_FIELDS.includes(String(f)));
+}
+
+function renderSharedActivityList(listEl, cal){
+  if(!listEl) return;
+  listEl.innerHTML = "";
+
+  if(typeof sharedV2State === "undefined") return;
+
+  if(sharedV2State.activityAvailable === false){
+    const hint = document.createElement("div");
+    hint.className = "sharedActivityHint";
+    hint.textContent = "Activity isn't available yet — the calendar database hasn't been upgraded. Everything else works normally.";
+    listEl.appendChild(hint);
+    return;
+  }
+
+  const cached = sharedV2State.activityByCalendar[cal.id];
+  if(!cached){
+    const hint = document.createElement("div");
+    hint.className = "sharedActivityHint";
+    hint.textContent = "Loading activity…";
+    listEl.appendChild(hint);
+    return;
+  }
+
+  if(!cached.rows.length){
+    const hint = document.createElement("div");
+    hint.className = "sharedActivityHint";
+    hint.textContent = "No activity yet on this calendar.";
+    listEl.appendChild(hint);
+    return;
+  }
+
+  for(const row of cached.rows){
+    const item = document.createElement("div");
+    item.className = "sharedActivityRow";
+    item.setAttribute("role", "listitem");
+    item.textContent = formatSharedActivityMessage(row);
+
+    const time = document.createElement("span");
+    time.className = "sharedActivityTime";
+    time.textContent = formatTrustRelativeTime(row.created_at);
+    time.title = formatTrustTimestamp(row.created_at);
+    item.appendChild(time);
+
+    const fields = safeActivityChangedFields(row);
+    if(row.action === "edit" && fields.length){
+      const fieldsEl = document.createElement("span");
+      fieldsEl.className = "sharedActivityFields";
+      fieldsEl.textContent = "changed: " + fields.join(", ");
+      item.appendChild(fieldsEl);
+    }
+
+    listEl.appendChild(item);
+  }
+}
+
+// Builds the per-calendar collapsible activity feed (called from
+// renderSharedV2Panel for kind='shared' cards only).
+function buildSharedActivitySection(cal){
+  const wrap = document.createElement("details");
+  wrap.className = "sharedActivityWrap";
+  if(trustActivityOpenCalendars.has(cal.id)) wrap.open = true;
+
+  const summary = document.createElement("summary");
+  summary.textContent = "Recent activity";
+  summary.setAttribute("aria-label", `Recent activity on ${cal.name || "this shared calendar"}`);
+  wrap.appendChild(summary);
+
+  const list = document.createElement("div");
+  list.className = "sharedActivityList";
+  list.setAttribute("role", "list");
+  wrap.appendChild(list);
+
+  renderSharedActivityList(list, cal);
+
+  wrap.addEventListener("toggle", () => {
+    if(wrap.open){
+      trustActivityOpenCalendars.add(cal.id);
+      fetchSharedCalendarActivity(cal.id, { force: false })
+        .then(() => renderSharedActivityList(list, cal))
+        .catch(err => console.warn("Trust Layer: activity load failed:", err));
+    }else{
+      trustActivityOpenCalendars.delete(cal.id);
+    }
+  });
+
+  return wrap;
+}
+
+// --- Wiring ------------------------------------------------------------------------
+
+(function initTrustLayerV1(){
+  // Account modal opens -> render all trust surfaces (additive listener,
+  // same pattern the shared-calendar sections use).
+  document.getElementById("accountBtn")?.addEventListener("click", () => {
+    setTimeout(() => {
+      try{
+        renderTrustSyncStatus();
+        renderTrustSyncHistory();
+        renderTrustBackupPanel().catch(console.error);
+      }catch(err){
+        console.warn("Trust Layer: panel render failed:", err);
+      }
+    }, 0);
+  });
+
+  // Backup actions.
+  document.getElementById("trustCreateBackupBtn")?.addEventListener("click", async () => {
+    const ok = await saveLocalSnapshot("manual backup");
+    if(ok){
+      try{ logTrustSyncEvent("backup-created", { status: "ok", reason: "manual" }); }catch{}
+      showTrustToast("Backup created on this device.");
+    }else{
+      showTrustToast("Could not create a backup on this device (IndexedDB unavailable).");
+    }
+    try{ await renderTrustBackupPanel(); }catch{}
+  });
+
+  document.getElementById("trustDownloadBackupBtn")?.addEventListener("click", () => {
+    try{ downloadTrustBackup(); }
+    catch(err){ showTrustToast("Download failed: " + (err?.message || err)); }
+  });
+
+  document.getElementById("trustImportBackupBtn")?.addEventListener("click", () => {
+    document.getElementById("trustImportBackupInput")?.click();
+  });
+
+  document.getElementById("trustImportBackupInput")?.addEventListener("change", (e) => {
+    const file = e.target?.files?.[0] || null;
+    e.target.value = ""; // allow re-selecting the same file
+    if(file) importTrustBackupFile(file).catch(err => showTrustToast("Import failed: " + (err?.message || err)));
+  });
+
+  // Restore review actions.
+  document.getElementById("trustReviewKeepBtn")?.addEventListener("click", () => {
+    resolveRestoreReviewKeepPush().catch(err => showTrustToast("Push failed: " + (err?.message || err)));
+  });
+  document.getElementById("trustReviewDiscardBtn")?.addEventListener("click", () => {
+    resolveRestoreReviewDiscardPull().catch(err => showTrustToast("Pull failed: " + (err?.message || err)));
+  });
+  document.getElementById("trustReviewFinishBtn")?.addEventListener("click", () => {
+    resolveRestoreReviewFinishLocal();
+  });
+
+  // Sync history.
+  document.getElementById("trustSyncHistoryClearBtn")?.addEventListener("click", () => {
+    clearTrustSyncLog();
+  });
+  document.getElementById("trustSyncHistoryWrap")?.addEventListener("toggle", (e) => {
+    if(e.target?.open) renderTrustSyncHistory();
+  });
+
+  // Confirmation dialog wiring.
+  const confirmModal = document.getElementById("trustConfirmModal");
+  document.getElementById("trustConfirmOkBtn")?.addEventListener("click", () => closeTrustConfirmDialog(true));
+  document.getElementById("trustConfirmCancelBtn")?.addEventListener("click", () => closeTrustConfirmDialog(false));
+  document.getElementById("trustConfirmCloseBtn")?.addEventListener("click", () => closeTrustConfirmDialog(false));
+  confirmModal?.addEventListener("click", (e) => {
+    if(e.target === confirmModal) closeTrustConfirmDialog(false);
+  });
+
+  // Capture-phase keydown: while the confirm dialog is open, Escape cancels
+  // ONLY the dialog (not the Account modal behind it) and Tab stays inside.
+  document.addEventListener("keydown", (e) => {
+    if(!confirmModal || confirmModal.classList.contains("hidden")) return;
+    if(e.key === "Escape"){
+      e.stopPropagation();
+      e.preventDefault();
+      closeTrustConfirmDialog(false);
+      return;
+    }
+    if(e.key === "Tab"){
+      const focusables = [
+        document.getElementById("trustConfirmCloseBtn"),
+        document.getElementById("trustConfirmCancelBtn"),
+        document.getElementById("trustConfirmOkBtn")
+      ].filter(Boolean);
+      if(!focusables.length) return;
+      const idx = focusables.indexOf(document.activeElement);
+      e.preventDefault();
+      e.stopPropagation();
+      const next = e.shiftKey
+        ? focusables[(idx <= 0 ? focusables.length : idx) - 1]
+        : focusables[(idx + 1) % focusables.length];
+      next.focus();
+    }
+  }, true);
+
+  // Connectivity transitions belong in the sync history.
+  window.addEventListener("online", () => {
+    try{ logTrustSyncEvent("came-online", { status: "ok" }); }catch{}
+  });
+  window.addEventListener("offline", () => {
+    try{ logTrustSyncEvent("went-offline", { status: "warn" }); }catch{}
+  });
+
+  // A reload during restore review keeps the pause + shows the banner.
+  if(isRestoreReviewActive()){
+    try{ renderRestoreReviewBanner(); }catch{}
+  }
+})();
+
+// --- Debug helpers (console) ---------------------------------------------------------
+
+window.debugTrustLayer = function(){
+  console.group("Trust Layer V1 debug");
+  console.log("Identity:", trustCurrentIdentity() || "(unclaimed)");
+  console.log("Restore review:", getRestoreReviewState() || "(inactive)");
+  console.log("Sync log entries:", getTrustSyncLog().length, `(cap ${TRUST_SYNC_LOG_LIMIT})`);
+  console.log("Attribution available:", typeof sharedV2State !== "undefined" ? sharedV2State.attributionAvailable : "(n/a)");
+  console.log("Activity available:", typeof sharedV2State !== "undefined" ? sharedV2State.activityAvailable : "(n/a)");
+  console.log("Open activity feeds:", [...trustActivityOpenCalendars]);
+  console.table(getTrustSyncLog().slice(0, 10).map(e => ({
+    when: new Date(e.at).toLocaleTimeString(), type: e.type, status: e.status,
+    reason: e.reason, detail: e.detail
+  })));
+  console.groupEnd();
+  return {
+    identity: trustCurrentIdentity(),
+    restoreReview: getRestoreReviewState(),
+    logCount: getTrustSyncLog().length
+  };
 };

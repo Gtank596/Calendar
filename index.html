@@ -815,6 +815,64 @@
             </div>
           </div>
 
+      <!-- ===== Trust Layer V1: sync status + history ===== -->
+      <div id="trustSyncPanel" class="sharedCalendarsPanel trustPanel">
+        <div class="sharedCalendarsHeader">
+          <div class="budgetDrawerKicker">Sync</div>
+          <h4>Sync status</h4>
+        </div>
+
+        <div id="trustSyncHeadline" class="hint trustSyncHeadline" aria-live="polite"></div>
+        <div id="trustSyncStatusList" class="trustStatusList"></div>
+
+        <details id="trustSyncHistoryWrap" class="trustHistoryWrap">
+          <summary class="sharedLegacySummary">Recent sync activity</summary>
+          <div id="trustSyncHistoryList" class="trustHistoryList" role="list"></div>
+          <div class="trustHistoryActions">
+            <button id="trustSyncHistoryClearBtn" class="tiny" type="button">Clear history</button>
+          </div>
+        </details>
+      </div>
+
+      <!-- ===== Trust Layer V1: data safety and recovery ===== -->
+      <div id="trustBackupPanel" class="sharedCalendarsPanel trustPanel">
+        <div class="sharedCalendarsHeader">
+          <div class="budgetDrawerKicker">Data safety</div>
+          <h4>Data safety &amp; recovery</h4>
+        </div>
+
+        <div class="cloudSyncHint">
+          Vanguard automatically saves safety snapshots on this device before
+          risky actions (Push, Pull, logout, account switches). Snapshots are
+          stored only in this browser &mdash; they are not uploaded anywhere.
+        </div>
+
+        <div id="trustRestoreReviewBanner" class="trustReviewBanner" hidden>
+          <div class="trustReviewTitle">Restore review</div>
+          <div id="trustRestoreReviewText" class="trustReviewText"></div>
+          <div class="trustReviewActions">
+            <button id="trustReviewKeepBtn" class="cloudPrimaryAction" type="button">Keep restored copy and Push</button>
+            <button id="trustReviewDiscardBtn" class="cloudDangerAction" type="button">Discard restored copy and Pull cloud</button>
+            <button id="trustReviewFinishBtn" class="cloudGhostAction" type="button" hidden>Keep restored copy (finish review)</button>
+          </div>
+        </div>
+
+        <div class="trustBackupActions">
+          <button id="trustCreateBackupBtn" class="tiny" type="button">Create backup now</button>
+          <button id="trustDownloadBackupBtn" class="tiny" type="button">Download current backup</button>
+          <button id="trustImportBackupBtn" class="tiny" type="button">Import backup file</button>
+          <input id="trustImportBackupInput" type="file" accept="application/json,.json" style="display:none" aria-hidden="true" tabindex="-1" />
+        </div>
+
+        <div class="cloudSyncHint trustDownloadWarning">
+          Downloaded backups contain your private calendar and budget data and
+          are <strong>not encrypted</strong>. Store the file somewhere safe.
+        </div>
+
+        <div class="sharedListTitle">Snapshots on this device</div>
+        <div id="trustSnapshotList" class="sharedList trustSnapshotList" aria-live="off"></div>
+      </div>
+
       <!-- ===== Shared Calendars V2-V5 (PRIMARY: invites, roles, editable, realtime) ===== -->
       <div id="sharedCalendarsV2Panel" class="sharedCalendarsPanel">
         <div class="sharedCalendarsHeader">
@@ -910,6 +968,8 @@
     <div id="sharedEventModalRecurrence" class="sharedEventModalMeta"></div>
     <p id="sharedEventModalDetails" class="sharedEventModalDetails"></p>
     <div id="sharedEventModalV2Meta" class="sharedEventModalMeta sharedEventModalV2Meta" style="display:none"></div>
+    <!-- Trust Layer V1: server-owned creator / last-editor attribution -->
+    <div id="sharedEventModalAttribution" class="sharedEventModalMeta sharedEventModalAttribution" style="display:none"></div>
     <div id="sharedEventModalOwner" class="sharedEventModalOwner"></div>
 
     <!-- Shared Calendars V2-V5: shown only for editable shared calendars
@@ -988,6 +1048,23 @@
     </div>
   </div>
 </div>
+  <!-- ===== Trust Layer V1: confirmation dialog (restore / import) ===== -->
+  <div id="trustConfirmModal" class="sharedEventModal hidden">
+    <div class="sharedEventModalCard trustConfirmCard" role="dialog" aria-modal="true" aria-labelledby="trustConfirmTitle" aria-describedby="trustConfirmBody">
+      <div class="sharedEventModalHeader">
+        <div class="sharedEventBadge" id="trustConfirmTitle">Confirm</div>
+        <button id="trustConfirmCloseBtn" class="navBtn navBtnIcon" type="button" aria-label="Cancel and close this confirmation">×</button>
+      </div>
+
+      <div id="trustConfirmBody" class="trustConfirmBody"></div>
+
+      <div class="sharedEventModalActions">
+        <button id="trustConfirmCancelBtn" class="cloudGhostAction" type="button">Cancel</button>
+        <button id="trustConfirmOkBtn" class="cloudDangerAction" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <div id="syncGate" class="syncGate hidden">
     <div class="syncGateCard">
       <div class="syncGateTitle" id="syncGateTitle">Sync needs permission</div>
